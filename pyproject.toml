@@ -1,0 +1,18 @@
+[project]
+name = "Dissect_3D"
+version = "0.0.1"
+author = [
+    { name="Patompong Baworncharoenpun", email="Patompong.big@gmail.com" },
+]
+description = "A 3D reconstruct with part segmentation for image of object"
+readme = "README.md"
+requires-python = ">=3.10"
+classifiers = []
+license = ""
+license-file = ["LICEN[CS]E*"]
+
+[project.urls]
+Homepage = ""
+Issues = ""
+
+# https://packaging.python.org/en/latest/tutorials/packaging-projects/
