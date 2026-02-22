@@ -20,6 +20,11 @@ class PartCrafterService:
     def remove_background(self, image):
         """Remove background from image using cached RMBG model"""
         return remove_background(image)
+    
+    def generate_3d(self, image):
+        """Generate 3D model from image"""
+        start_time = time.time()
+        output = self.pipe(image)
 
     def unload(self, delete=False):
         if self.pipe is not None:
