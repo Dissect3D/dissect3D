@@ -1,0 +1,19 @@
+[package]
+name = "dissect3d-connection"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+dissect3d-api = { path = "../api" }
+dissect3d-platform = { path = "../platform" }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
+url = "=2.5.8"
+
+[dev-dependencies]
+tempfile = "=3.27.0"
+
+[lints]
+workspace = true

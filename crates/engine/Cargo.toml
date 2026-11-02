@@ -1,0 +1,39 @@
+[package]
+name = "dissect3d-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+dissect3d-api = { path = "../api" }
+dissect3d-platform = { path = "../platform" }
+base64 = "=0.22.1"
+getrandom = "=0.4.3"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
+sha2 = "=0.11.1"
+url = "=2.5.8"
+rusqlite = { version = "=0.41.0", default-features = false, features = ["bundled", "backup", "limits"] }
+subtle = "=2.6.1"
+axum = { version = "=0.8.9", default-features = false, features = ["http1", "json", "tokio"] }
+hyper = { version = "=1.12.0", default-features = false, features = ["http1", "server"] }
+hyper-util = { version = "=0.1.21", default-features = false, features = ["service", "tokio"] }
+rcgen = { version = "=0.14.10", default-features = false, features = ["aws_lc_rs", "x509-parser"] }
+tokio = { version = "=1.54.1", default-features = false, features = ["io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-rustls = { version = "=0.26.6", default-features = false, features = ["aws_lc_rs", "tls12"] }
+
+[dev-dependencies]
+dissect3d-api = { path = "../api", features = ["client"] }
+reqwest = { version = "=0.13.5", default-features = false, features = ["json", "rustls", "stream"] }
+tempfile = "=3.27.0"
+
+[lints]
+workspace = true
+
+[features]
+test-support = []
+
+[[example]]
+name = "discovery_test_host"
+required-features = ["test-support"]

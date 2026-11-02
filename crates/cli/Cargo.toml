@@ -1,0 +1,31 @@
+[package]
+name = "dissect3d-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+default-run = "dissect3d"
+
+[dependencies]
+clap = { version = "=4.6.7", features = ["derive"] }
+dissect3d-api = { path = "../api", features = ["client"] }
+dissect3d-connection = { path = "../connection" }
+dissect3d-platform = { path = "../platform" }
+getrandom = "=0.4.3"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
+sha2 = "=0.11.1"
+thiserror = "=2.0.21"
+tokio = { version = "=1.54.1", features = ["net", "rt-multi-thread", "time"] }
+url = "=2.5.8"
+
+[dev-dependencies]
+dissect3d-platform = { path = "../platform" }
+tempfile = "=3.27.0"
+
+[[bin]]
+name = "dissect3d"
+path = "src/main.rs"
+
+[lints]
+workspace = true

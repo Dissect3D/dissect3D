@@ -1,0 +1,14 @@
+[workspace]
+members = ["crates/api", "crates/cli", "crates/platform", "crates/engine", "crates/connection"]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+publish = false
+version = "0.1.0-dev"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+unused_must_use = "deny"
+
