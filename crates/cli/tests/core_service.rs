@@ -1,3 +1,4 @@
+#[cfg(unix)]
 use dissect3d_api::{DiscoveryRecord, decode_json};
 #[cfg(unix)]
 use dissect3d_platform::{ProcessIdentity, wait_for_process_exit};
@@ -713,6 +714,7 @@ fn path_arg(path: &Path) -> &str {
     path.to_str().expect("temporary path is UTF-8")
 }
 
+#[cfg(unix)]
 fn stored_secret(profile: &Path) -> String {
     let mut state = profile.as_os_str().to_os_string();
     state.push(".state/credential.json");
@@ -724,6 +726,7 @@ fn stored_secret(profile: &Path) -> String {
         .to_owned()
 }
 
+#[cfg(unix)]
 fn assert_redacted(output: &Output, secret: &str) {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -731,6 +734,7 @@ fn assert_redacted(output: &Output, secret: &str) {
     assert!(!stderr.contains(secret));
 }
 
+#[cfg(unix)]
 fn assert_not_in_database(data_root: &Path, secret_hex: &str) {
     let mut candidates = vec![data_root.join("metadata.sqlite3")];
     let wal = data_root.join("metadata.sqlite3-wal");

@@ -118,7 +118,9 @@ fn incomplete_named_pipe_frame_times_out_instead_of_failing_immediately() {
         .chain(Some(0))
         .collect();
     let server = std::thread::spawn(move || {
-        let mut channel = listener.accept(Duration::from_secs(2)).expect("peer");
+        let mut channel = listener
+            .accept_with_frame_timeout(Duration::from_secs(2), Duration::from_millis(250))
+            .expect("peer");
         let started = std::time::Instant::now();
         let result = channel.read_frame();
         let elapsed = started.elapsed();
@@ -153,12 +155,12 @@ fn incomplete_named_pipe_frame_times_out_instead_of_failing_immediately() {
         std::thread::sleep(Duration::from_millis(10));
     };
     let mut client = unsafe { std::fs::File::from_raw_handle(handle.cast()) };
-    let mut mode = PIPE_NOWAIT;
+    let mode = PIPE_NOWAIT;
     assert_ne!(
         unsafe {
             SetNamedPipeHandleState(
                 std::os::windows::io::AsRawHandle::as_raw_handle(&client).cast(),
-                &mut mode,
+                &mode,
                 std::ptr::null(),
                 std::ptr::null(),
             )

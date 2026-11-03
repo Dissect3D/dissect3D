@@ -42,8 +42,7 @@ impl ProcessWatcher {
         {
             let raw_pid = i32::try_from(identity.pid).map_err(|_| PlatformError::InvalidPath)?;
             let pid = rustix::process::Pid::from_raw(raw_pid).ok_or(PlatformError::InvalidPath)?;
-            let handle = rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty())
-                .map_err(|_| PlatformError::Io)?;
+            let handle = open_linux_process(pid)?;
             if !process_matches(identity)? {
                 return Err(PlatformError::NotFound);
             }
@@ -213,6 +212,17 @@ impl ProcessWatcher {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn open_linux_process(pid: rustix::process::Pid) -> Result<std::os::fd::OwnedFd, PlatformError> {
+    rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty()).map_err(|error| {
+        if error == rustix::io::Errno::SRCH {
+            PlatformError::NotFound
+        } else {
+            PlatformError::Io
+        }
+    })
+}
+
 /// Return a start marker for the running engine or CLI process.
 pub fn current_process_identity() -> Result<ProcessIdentity, PlatformError> {
     let pid = std::process::id();
@@ -257,29 +267,19 @@ pub fn launch_engine(binary: &Path, data_root: &Path) -> Result<ProcessIdentity,
             });
         }
     }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(
-            windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP
-                | windows_sys::Win32::System::Threading::DETACHED_PROCESS
-                | windows_sys::Win32::System::Threading::CREATE_BREAKAWAY_FROM_JOB,
-        );
-    }
+    #[cfg(unix)]
     let child = command.spawn().map_err(|error| {
-        #[cfg(windows)]
-        if error.raw_os_error() == Some(windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED as i32)
-        {
-            return PlatformError::LaunchRestricted;
-        }
         let _ = error;
         PlatformError::Io
     })?;
     #[cfg(windows)]
-    {
+    let (child, pid) = {
         use std::os::windows::io::AsRawHandle;
+        let (child, pid) = crate::windows::spawn_detached_engine(&command)?;
         ensure_no_job(child.as_raw_handle().cast())?;
-    }
+        (child, pid)
+    };
+    #[cfg(unix)]
     let pid = child.id();
     drop(child);
     Ok(ProcessIdentity {
@@ -365,7 +365,7 @@ fn process_start_marker(pid: u32) -> Result<String, PlatformError> {
         if start_ticks.bytes().any(|byte| !byte.is_ascii_digit()) {
             return Err(PlatformError::InvalidFile);
         }
-        return Ok(format!("linux-start-{start_ticks}"));
+        Ok(format!("linux-start-{start_ticks}"))
     }
     #[cfg(target_os = "macos")]
     {
@@ -413,6 +413,18 @@ fn process_start_marker(pid: u32) -> Result<String, PlatformError> {
 mod tests {
     use super::compare_start_marker;
     use crate::PlatformError;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn process_disappearance_during_registration_establishes_exit() {
+        let mut child = std::process::Command::new("/bin/true").spawn().unwrap();
+        let pid = rustix::process::Pid::from_raw(child.id() as i32).unwrap();
+        child.wait().unwrap();
+        assert!(matches!(
+            super::open_linux_process(pid),
+            Err(PlatformError::NotFound)
+        ));
+    }
 
     #[test]
     fn failed_process_queries_do_not_establish_exit() {

@@ -941,7 +941,11 @@ fn retain_verified_backup(connection: &Connection, root: &OwnedRoot) -> Result<(
     backup_connection
         .close()
         .map_err(|_| CoreError::StoreUnavailable)?;
-    std::fs::File::open(backup_path)
+    // Windows FlushFileBuffers requires a writable handle; never truncate it.
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(backup_path)
         .and_then(|file| file.sync_all())
         .map_err(|_| CoreError::StoreUnavailable)?;
     Ok(())
@@ -1668,6 +1672,7 @@ mod tests {
         assert!(open_database_with_migrations(&root, &CorePolicy::default(), &registry).is_ok());
     }
 
+    #[cfg(unix)]
     #[test]
     fn locked_sqlite_open_flag_rejects_a_symlinked_filename() {
         use std::os::unix::fs::symlink;

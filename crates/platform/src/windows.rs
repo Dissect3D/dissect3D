@@ -44,6 +44,102 @@ use windows_sys::core::PWSTR;
 const MAX_TOKEN_INFO_BYTES: u32 = 64 * 1024;
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// Launch without inheriting any launcher handles, including captured output.
+pub(crate) fn spawn_detached_engine(
+    command: &std::process::Command,
+) -> Result<(OwnedHandle, u32), PlatformError> {
+    use windows_sys::Win32::System::Threading::{
+        CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_UNICODE_ENVIRONMENT,
+        CreateProcessW, DETACHED_PROCESS, PROCESS_INFORMATION, STARTUPINFOW,
+    };
+    fn quoted(value: &std::ffi::OsStr) -> Result<Vec<u16>, PlatformError> {
+        let mut result = vec![u16::from(b'"')];
+        let mut slashes = 0;
+        for unit in value.encode_wide() {
+            if unit == 0 {
+                return Err(PlatformError::InvalidPath);
+            }
+            if unit == u16::from(b'\\') {
+                slashes += 1;
+                continue;
+            }
+            result.extend(std::iter::repeat_n(u16::from(b'\\'), slashes));
+            if unit == u16::from(b'"') {
+                result.extend(std::iter::repeat_n(u16::from(b'\\'), slashes + 1));
+            }
+            slashes = 0;
+            result.push(unit);
+        }
+        result.extend(std::iter::repeat_n(u16::from(b'\\'), slashes * 2));
+        result.push(u16::from(b'"'));
+        Ok(result)
+    }
+    let application = command
+        .get_program()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let mut arguments = quoted(command.get_program())?;
+    for argument in command.get_args() {
+        arguments.push(u16::from(b' '));
+        arguments.extend(quoted(argument)?);
+    }
+    arguments.push(0);
+    let mut environment = Vec::new();
+    for (key, value) in command.get_envs() {
+        if let Some(value) = value {
+            environment.extend(key.encode_wide());
+            environment.push(u16::from(b'='));
+            environment.extend(value.encode_wide());
+            environment.push(0);
+        }
+    }
+    environment.push(0);
+    if environment.len() == 1 {
+        environment.push(0);
+    }
+    let startup = STARTUPINFOW {
+        cb: std::mem::size_of::<STARTUPINFOW>() as u32,
+        ..Default::default()
+    };
+    let mut process = PROCESS_INFORMATION::default();
+    // SAFETY: all input buffers are NUL-terminated and live through the call;
+    // outputs are writable. FALSE forbids inheritance of every parent handle.
+    if unsafe {
+        CreateProcessW(
+            application.as_ptr(),
+            arguments.as_mut_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            0,
+            DETACHED_PROCESS
+                | CREATE_NEW_PROCESS_GROUP
+                | CREATE_BREAKAWAY_FROM_JOB
+                | CREATE_UNICODE_ENVIRONMENT,
+            environment.as_ptr().cast(),
+            std::ptr::null(),
+            &startup,
+            &mut process,
+        )
+    } == 0
+    {
+        return Err(
+            if std::io::Error::last_os_error().raw_os_error()
+                == Some(windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED as i32)
+            {
+                PlatformError::LaunchRestricted
+            } else {
+                PlatformError::Io
+            },
+        );
+    }
+    // SAFETY: successful CreateProcessW transfers both unique handles to us.
+    let child = unsafe { OwnedHandle::from_raw_handle(process.hProcess.cast()) };
+    // SAFETY: the primary thread handle is separately owned and can close now.
+    drop(unsafe { OwnedHandle::from_raw_handle(process.hThread.cast()) });
+    Ok((child, process.dwProcessId))
+}
+
 pub(crate) struct LocalDescriptor(PSECURITY_DESCRIPTOR);
 
 impl Drop for LocalDescriptor {

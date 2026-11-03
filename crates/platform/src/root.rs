@@ -367,8 +367,8 @@ fn validate_trusted_ancestor(directory: &File) -> Result<(), PlatformError> {
     let owned_and_private = metadata.uid() == uid && mode & 0o022 == 0;
     // Root-owned sticky directories such as /tmp allow shared placement only
     // when the sticky bit prevents one user replacing another user's entry.
-    let protected_system_directory = metadata.uid() == 0
-        && (mode & 0o022 == 0 || (mode & 0o020 == 0 && mode & 0o1002 == 0o1002));
+    let protected_system_directory =
+        metadata.uid() == 0 && (mode & 0o022 == 0 || mode & 0o1000 != 0);
     if !metadata.is_dir() || !(owned_and_private || protected_system_directory) {
         return Err(PlatformError::UnsafeRoot);
     }

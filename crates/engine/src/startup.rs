@@ -99,6 +99,12 @@ async fn run_engine_with_root(
     root: OwnedRoot,
     catalog: Arc<crate::support::Catalog>,
 ) -> Result<(), StartupError> {
+    // Register before publishing readiness so an immediate interrupt is queued.
+    #[cfg(unix)]
+    let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+        .map_err(|_| StartupError::Runtime)?;
+    #[cfg(windows)]
+    let mut interrupt = tokio::signal::windows::ctrl_c().map_err(|_| StartupError::Runtime)?;
     let lease = AuthorityLease::acquire(&root).map_err(|_| StartupError::Authority)?;
     let (shutdown_intent, mut shutdown_requested) = mpsc::unbounded_channel();
     let store = Arc::new(
@@ -183,8 +189,8 @@ async fn run_engine_with_root(
 
     let shutdown_request = async {
         tokio::select! {
-            signal = tokio::signal::ctrl_c() => {
-                signal.map_err(|_| StartupError::Runtime)?;
+            signal = interrupt.recv() => {
+                signal.ok_or(StartupError::Runtime)?;
                 let signal_store = store.clone();
                 tokio::task::spawn_blocking(move || signal_store.signal_shutdown(
                     service_instance_id, CorePolicy::default().shutdown_timeout_ms,
