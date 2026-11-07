@@ -4,6 +4,8 @@
 //! Host and Origin, validates the bearer, and asks the metadata actor for one
 //! serialized authorization/identity snapshot before any body is decoded.
 
+#[cfg(unix)]
+use super::UploadDeadlineSignal;
 use super::{AuthorizedRequest, BODY_TIMEOUT, MAX_BODY_BYTES, ServiceState, engine_info};
 use axum::body::{Body, to_bytes};
 use axum::extract::{Extension, Path, Request, State};
@@ -20,15 +22,21 @@ use dissect3d_api::{
 };
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
+use std::time::Duration;
 
 pub(super) fn router(state: Arc<ServiceState>) -> Router {
-    Router::new()
+    let router = Router::new()
         .route("/v1/info", get(info))
         .route("/v1/auth/status", get(status))
         .route("/v1/auth/revoke", post(revoke))
         .route("/v1/operations", post(operation_create))
         .route("/v1/operations/{operation_id}", get(operation))
-        .merge(super::discovery::routes())
+        .merge(super::discovery::routes());
+    #[cfg(unix)]
+    let router = router
+        .merge(super::inputs::routes())
+        .merge(super::jobs::routes());
+    router
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
         .layer(middleware::from_fn_with_state(state.clone(), authorize))
@@ -44,6 +52,7 @@ async fn limit_response(
     request: Request<Body>,
     next: Next,
 ) -> Response {
+    let commit_capable = request.method() == Method::POST && request.uri().path() == "/v1/jobs";
     let method = match *request.method() {
         Method::GET => "get",
         Method::POST => "post",
@@ -55,6 +64,7 @@ async fn limit_response(
         "/v1/auth/revoke" => "auth_revoke",
         "/v1/operations" => "operation_create",
         path if path.starts_with("/v1/operations/") => "operation_read",
+        "/v1/inputs" => "input_create",
         "/v1/models" => "models_list",
         path if path.starts_with("/v1/models/") => "models_show",
         "/v1/runtimes" => "runtimes_list",
@@ -98,6 +108,14 @@ async fn limit_response(
             }
             Response::from_parts(parts, Body::from(body))
         }
+        // Acceptance may already be durable. A broken receipt transport cannot
+        // be replaced with a rejection that tells the client no job exists.
+        Err(error) if commit_capable => Response::from_parts(
+            parts,
+            Body::from_stream(futures_util::stream::once(async move {
+                Err::<Vec<u8>, _>(error)
+            })),
+        ),
         Err(_) => error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             ErrorCode::TransferLimit,
@@ -160,7 +178,33 @@ async fn authorize(
         return error_response(StatusCode::FORBIDDEN, ErrorCode::Forbidden, false);
     }
     request.extensions_mut().insert(authorized);
-    next.run(request).await
+    #[cfg(unix)]
+    let is_upload = request.method() == Method::POST && request.uri().path() == "/v1/inputs";
+    #[cfg(unix)]
+    let request_timeout = if is_upload {
+        // Capture owns its single 600-second deadline, including finalization.
+        // Failure cleanup may use two seconds of slack; receipt-producing work
+        // never gets a second finalization budget.
+        crate::inputs::policy::UPLOAD_REQUEST_TIMEOUT
+    } else {
+        Duration::from_millis(u64::from(state.policy.request_timeout_ms))
+    };
+    #[cfg(not(unix))]
+    let request_timeout = Duration::from_millis(u64::from(state.policy.request_timeout_ms));
+    #[cfg(unix)]
+    if is_upload && let Some(signal) = request.extensions().get::<UploadDeadlineSignal>() {
+        signal.signal();
+    }
+    // A commit-capable submission outlives a disconnected caller. Its outer
+    // connection deadline closes the transport; never fabricate a rejection
+    // while the engine-owned blocking handoff can still commit.
+    if request.method() == Method::POST && request.uri().path() == "/v1/jobs" {
+        return next.run(request).await;
+    }
+    match tokio::time::timeout(request_timeout, next.run(request)).await {
+        Ok(response) => response,
+        Err(_) => error_response(StatusCode::SERVICE_UNAVAILABLE, ErrorCode::Busy, true),
+    }
 }
 
 fn required_grant(method: &Method, path: &str) -> Option<&'static str> {
@@ -180,6 +224,10 @@ fn required_grant(method: &Method, path: &str) -> Option<&'static str> {
         (&Method::GET, "/v1/auth/status") => Some("auth.status"),
         (&Method::POST, "/v1/auth/revoke") => Some("auth.revoke_self"),
         (&Method::POST, "/v1/operations") => Some("engine.shutdown"),
+        (&Method::POST, "/v1/inputs") => Some("inputs.create"),
+        (&Method::POST, "/v1/jobs") => Some("jobs.submit"),
+        (&Method::GET, "/v1/jobs") => Some("jobs.list"),
+        (&Method::GET, path) if path.starts_with("/v1/jobs/") => Some("jobs.show"),
         (&Method::GET, path)
             if path
                 .strip_prefix("/v1/operations/")
@@ -239,32 +287,34 @@ async fn info(
     Extension(authorized): Extension<AuthorizedRequest>,
     State(state): State<Arc<ServiceState>>,
 ) -> Json<EngineInfo> {
-    Json(
-        engine_info(
-            authorized.identity,
-            authorized.context,
-            &state.policy,
-            state.store.is_stopping(),
-        )
-        .await,
+    #[cfg(all(unix, test))]
+    state.test_hooks.info().await;
+    let info = engine_info(
+        authorized.identity,
+        authorized.context,
+        &state.policy,
+        state.store.is_stopping(),
     )
+    .await;
+    #[cfg(unix)]
+    let info = {
+        let mut info = info;
+        {
+            let capability = crate::submission::service::capability();
+            info.supported_operations.extend(
+                ["jobs.submit", "jobs.list", "jobs.show"]
+                    .into_iter()
+                    .map(str::to_owned),
+            );
+            info.submission = Some(capability);
+        }
+        info
+    };
+    Json(info)
 }
 
 async fn status(Extension(authorized): Extension<AuthorizedRequest>) -> Json<AuthStatus> {
-    let supported = [
-        "engine.info",
-        "auth.status",
-        "auth.revoke_self",
-        "engine.shutdown",
-        "operation.show_own",
-    ];
-    let granted_operations = authorized
-        .context
-        .granted_operations()
-        .iter()
-        .filter(|grant| supported.contains(&grant.as_str()))
-        .cloned()
-        .collect();
+    let granted_operations = authorized.context.granted_operations().to_vec();
     Json(AuthStatus {
         api_version: "1.0".to_owned(),
         installation_id: authorized.identity.installation_id,
@@ -513,6 +563,36 @@ pub(super) fn error_response(status: StatusCode, code: ErrorCode, retryable: boo
     (status, Json(error)).into_response()
 }
 
+#[cfg(unix)]
+pub(super) fn capacity_response(limit: &'static str) -> Response {
+    let mut response = ApiError {
+        api_version: "1.0".to_owned(),
+        error: ApiErrorBody {
+            code: ErrorCode::CapacityExceeded,
+            message: error_message(ErrorCode::CapacityExceeded).to_owned(),
+            correlation_id: correlation_id(),
+            retryable: true,
+            details: Some(serde_json::json!({"limit": limit})),
+        },
+        operation_id: None,
+    };
+    // Only fixed policy keys may enter diagnostics/public details.
+    if !matches!(
+        limit,
+        "upload_concurrency_max"
+            | "staged_input_records_max"
+            | "staging_reserved_bytes_max"
+            | "queued_jobs_max"
+            | "submission_bindings_max"
+            | "captured_input_bytes_max"
+            | "job_metadata_bytes_max"
+            | "storage_free_reserve_bytes"
+    ) {
+        response.error.details = None;
+    }
+    (StatusCode::TOO_MANY_REQUESTS, Json(response)).into_response()
+}
+
 pub(super) fn discovery_error_response(
     status: StatusCode,
     code: ErrorCode,
@@ -552,6 +632,20 @@ fn error_message(code: ErrorCode) -> &'static str {
         ErrorCode::AmbiguousSelection => "Selection is ambiguous",
         ErrorCode::InventoryCursorExpired => "Inventory cursor expired",
         ErrorCode::Busy => "Engine is busy; retry the read later",
+        ErrorCode::InputUnavailable => "Input is unavailable",
+        ErrorCode::NotPrepared => "Selected support is not prepared",
+        ErrorCode::IncompatibleProfile => "Selected runtime profile is incompatible",
+        ErrorCode::JobCursorExpired => "Job cursor expired",
+        ErrorCode::DataDeleted => "Previously accepted data is unavailable",
+        ErrorCode::LengthRequired => "A valid Content-Length is required",
+        ErrorCode::PayloadTooLarge => "Request payload exceeded a configured limit",
+        ErrorCode::UnsupportedMediaType => "Input media type is unsupported",
+        ErrorCode::InvalidInput => "Input content is invalid",
+        ErrorCode::UnsupportedParameter => "A requested parameter is unsupported",
+        ErrorCode::CapacityExceeded => "Engine submission capacity is exhausted",
+        ErrorCode::EngineStopping => "Engine is stopping",
+        ErrorCode::StoreUnavailable => "Engine metadata store is unavailable",
+        ErrorCode::StorageIntegrityFault => "Stored input integrity could not be verified",
     }
 }
 
@@ -581,7 +675,7 @@ fn hex_digit(value: u8) -> u8 {
 
 #[cfg(test)]
 mod response_limit_tests {
-    use super::to_bytes;
+    use super::*;
     use axum::body::Body;
     use axum::http::Response;
 
@@ -594,5 +688,44 @@ mod response_limit_tests {
             to_bytes(response.into_body(), 4).await.expect("body"),
             "four"
         );
+    }
+
+    #[tokio::test]
+    async fn auth_status_reports_the_authenticated_clients_full_grant_set() {
+        let grants = [
+            "auth.revoke_self",
+            "auth.status",
+            "engine.info",
+            "engine.shutdown",
+            "inputs.create",
+            "jobs.list",
+            "jobs.show",
+            "jobs.submit",
+            "operation.show_own",
+        ]
+        .map(str::to_owned)
+        .to_vec();
+        let authorized = AuthorizedRequest {
+            identity: super::super::StoreIdentity {
+                installation_id: dissect3d_api::InstallationId::parse(
+                    "ins_0123456789abcdef0123456789abcdef",
+                )
+                .unwrap(),
+                instance_id: dissect3d_api::InstanceId::parse(
+                    "eng_0123456789abcdef0123456789abcdef",
+                )
+                .unwrap(),
+            },
+            context: crate::AuthContext {
+                installation_id: dissect3d_api::InstallationId::parse(
+                    "ins_0123456789abcdef0123456789abcdef",
+                )
+                .unwrap(),
+                client_id: ClientId::parse("cli_0123456789abcdef0123456789abcdef").unwrap(),
+                granted_operations: grants.clone(),
+            },
+        };
+        let actual = status(Extension(authorized)).await.0;
+        assert_eq!(actual.granted_operations, grants);
     }
 }

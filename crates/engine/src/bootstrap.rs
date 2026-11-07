@@ -34,7 +34,20 @@ enum Request {
         bootstrap_version: String,
         instance_id: InstanceId,
     },
+    Capabilities {
+        bootstrap_version: String,
+        instance_id: InstanceId,
+    },
     Enroll {
+        bootstrap_version: String,
+        installation_id: InstallationId,
+        instance_id: InstanceId,
+        enrollment_id: EnrollmentId,
+        client_id: ClientId,
+        client_kind: String,
+        secret_hex: SecretHex,
+    },
+    EnrollSubmission {
         bootstrap_version: String,
         installation_id: InstallationId,
         instance_id: InstanceId,
@@ -107,12 +120,20 @@ struct ProbeReceipt {
 }
 
 #[derive(Serialize)]
+struct CapabilitiesReceipt {
+    bootstrap_version: &'static str,
+    installation_id: InstallationId,
+    instance_id: InstanceId,
+    enrollment_policies: [&'static str; 2],
+}
+
+#[derive(Serialize)]
 struct ErrorResponse {
     bootstrap_version: &'static str,
     error: &'static str,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum RequestError {
     Invalid,
     Conflict,
@@ -138,7 +159,7 @@ impl From<CoreError> for RequestError {
         match error {
             CoreError::Conflict => Self::Conflict,
             CoreError::Unauthorized => Self::Unauthorized,
-            CoreError::LimitReached => Self::LimitReached,
+            CoreError::LimitReached | CoreError::CapacityExceeded(_) => Self::LimitReached,
             CoreError::Busy
             | CoreError::InvalidStore
             | CoreError::StoreIncompatible
@@ -193,6 +214,7 @@ pub(crate) fn serve_bootstrap_once_with_cancel(
 
 enum Response {
     Probe(ProbeReceipt),
+    Capabilities(CapabilitiesReceipt),
     Enrollment(EnrollmentReceipt),
     Error(ErrorResponse),
 }
@@ -204,6 +226,7 @@ impl Serialize for Response {
     {
         match self {
             Self::Probe(receipt) => receipt.serialize(serializer),
+            Self::Capabilities(receipt) => receipt.serialize(serializer),
             Self::Enrollment(receipt) => receipt.serialize(serializer),
             Self::Error(error) => error.serialize(serializer),
         }
@@ -238,6 +261,20 @@ fn process_request(
                 ready: true,
             }))
         }
+        Request::Capabilities {
+            bootstrap_version,
+            instance_id,
+        } => {
+            if bootstrap_version != BOOTSTRAP_VERSION || instance_id != identity.instance_id {
+                return Err(RequestError::Invalid);
+            }
+            Ok(Response::Capabilities(CapabilitiesReceipt {
+                bootstrap_version: BOOTSTRAP_VERSION,
+                installation_id: identity.installation_id,
+                instance_id: identity.instance_id,
+                enrollment_policies: ["core-v1", "submission-v1"],
+            }))
+        }
         Request::Enroll {
             bootstrap_version,
             installation_id,
@@ -246,31 +283,90 @@ fn process_request(
             client_id,
             client_kind,
             secret_hex,
-        } => {
-            if bootstrap_version != BOOTSTRAP_VERSION
-                || installation_id != identity.installation_id
-                || instance_id != identity.instance_id
-                || client_kind != "cli"
-            {
-                return Err(RequestError::Invalid);
-            }
-            let digest = secret_hex.digest()?;
-            let enrollment = VerifiedEnrollment::new(
-                // This value came from the channel's OS credential check, never
-                // from a client supplied field.
-                peer,
-                installation_id,
-                instance_id,
-                enrollment_id,
-                client_id,
-                digest,
-            );
-            store
-                .enroll(enrollment)
-                .map(Response::Enrollment)
-                .map_err(Into::into)
-        }
+        } => process_enrollment(
+            store,
+            &identity,
+            peer,
+            bootstrap_version,
+            installation_id,
+            instance_id,
+            enrollment_id,
+            client_id,
+            client_kind,
+            secret_hex,
+            false,
+        ),
+        Request::EnrollSubmission {
+            bootstrap_version,
+            installation_id,
+            instance_id,
+            enrollment_id,
+            client_id,
+            client_kind,
+            secret_hex,
+        } => process_enrollment(
+            store,
+            &identity,
+            peer,
+            bootstrap_version,
+            installation_id,
+            instance_id,
+            enrollment_id,
+            client_id,
+            client_kind,
+            secret_hex,
+            true,
+        ),
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn process_enrollment(
+    store: &Store,
+    identity: &crate::StoreIdentity,
+    peer: OwnerIdentity,
+    bootstrap_version: String,
+    installation_id: InstallationId,
+    instance_id: InstanceId,
+    enrollment_id: EnrollmentId,
+    client_id: ClientId,
+    client_kind: String,
+    secret_hex: SecretHex,
+    submission_access: bool,
+) -> Result<Response, RequestError> {
+    if bootstrap_version != BOOTSTRAP_VERSION
+        || installation_id != identity.installation_id
+        || instance_id != identity.instance_id
+        || client_kind != "cli"
+    {
+        return Err(RequestError::Invalid);
+    }
+    let digest = secret_hex.digest()?;
+    // This owner came from the channel's OS credential check, never from a
+    // client supplied field. Only the distinct native message selects policy.
+    let enrollment = if submission_access {
+        VerifiedEnrollment::new_submission_access(
+            peer,
+            installation_id,
+            instance_id,
+            enrollment_id,
+            client_id,
+            digest,
+        )
+    } else {
+        VerifiedEnrollment::new(
+            peer,
+            installation_id,
+            instance_id,
+            enrollment_id,
+            client_id,
+            digest,
+        )
+    };
+    store
+        .enroll(enrollment)
+        .map(Response::Enrollment)
+        .map_err(Into::into)
 }
 
 fn error_response(error: RequestError) -> Response {
@@ -279,3 +375,7 @@ fn error_response(error: RequestError) -> Response {
         error: error.code(),
     })
 }
+
+#[cfg(test)]
+#[path = "bootstrap/submission_tests.rs"]
+mod submission_tests;

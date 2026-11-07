@@ -17,6 +17,22 @@ const MAX_REQUEST_LOG_BYTES: usize = 1_048_576;
 const MAX_REQUEST_LOG_FILES: usize = 3;
 static REQUEST_LOG_LOCK: Mutex<()> = Mutex::new(());
 
+/// Keep the latest recovery fault in a bounded, fixed-category record. A failed
+/// diagnostics write never releases storage charges or changes input authority.
+#[cfg(unix)]
+pub(crate) fn record_input_recovery_failure(root: &OwnedRoot, code: &'static str) {
+    if !matches!(code, "store_unavailable" | "storage_unavailable") {
+        return;
+    }
+    let Ok(path) = RelativePath::parse("run/input-recovery.json") else {
+        return;
+    };
+    let record = serde_json::json!({"timestamp_ms": timestamp_ms(), "phase": "input_recovery", "code": code});
+    if let Ok(bytes) = serde_json::to_vec(&record) {
+        let _ = root.write_atomic(&path, &bytes);
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum StartupPhase {
@@ -169,6 +185,8 @@ pub(crate) fn record_startup_failure(root: &OwnedRoot, error: crate::StartupErro
         crate::StartupError::Bootstrap => (StartupPhase::Bootstrap, StartupCode::Bootstrap),
         crate::StartupError::Https => (StartupPhase::Https, StartupCode::Https),
         crate::StartupError::Discovery => (StartupPhase::Discovery, StartupCode::Discovery),
+        #[cfg(feature = "test-support")]
+        crate::StartupError::Fixture(_) => (StartupPhase::Discovery, StartupCode::Discovery),
         crate::StartupError::Runtime | crate::StartupError::ShutdownDeadline => {
             (StartupPhase::Runtime, StartupCode::Runtime)
         }
@@ -209,6 +227,15 @@ pub(crate) fn record_startup_failure(root: &OwnedRoot, error: crate::StartupErro
     };
     if encoded.len() <= MAX_DIAGNOSTICS_BYTES {
         let _ = root.write_atomic(&path, &encoded);
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn record_job_recovery_failure(root: &OwnedRoot) {
+    let path = RelativePath::parse("run/job-recovery.json").expect("fixed private path");
+    let record = serde_json::json!({"timestamp_ms":timestamp_ms(),"phase":"job_recovery","code":"store_unavailable"});
+    if let Ok(bytes) = serde_json::to_vec(&record) {
+        let _ = root.write_atomic(&path, &bytes);
     }
 }
 

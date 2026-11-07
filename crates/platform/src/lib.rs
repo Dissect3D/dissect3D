@@ -5,6 +5,7 @@
 
 mod files;
 mod identity;
+mod input_files;
 mod ipc;
 mod lease;
 mod process;
@@ -12,8 +13,11 @@ mod root;
 #[cfg(windows)]
 mod windows;
 
-pub use files::{RelativePath, SafeFileMetadata, open_regular_file};
+pub use files::{RelativePath, SafeFileMetadata, open_config_lock, open_regular_file};
 pub use identity::{OwnerIdentity, current_owner_identity};
+pub use input_files::{
+    DurableFile, OwnedFileBatch, OwnedInputScan, PrivateInputReader, PrivateInputWriter,
+};
 pub use ipc::connect as connect_bootstrap;
 pub use ipc::{BootstrapEndpoint, BootstrapListener, MAX_BOOTSTRAP_FRAME_BYTES, PeerChannel};
 pub use lease::AuthorityLease;

@@ -14,9 +14,16 @@ pub(crate) struct CommandOutcome {
     accepted: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     operation_id: Option<String>,
-    data: Option<serde_json::Value>,
+    data: Option<OutputData>,
     warnings: Vec<String>,
     error: Option<ErrorInfo>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum OutputData {
+    Value(serde_json::Value),
+    Raw(Box<serde_json::value::RawValue>),
 }
 
 #[derive(Debug, Serialize)]
@@ -39,6 +46,19 @@ impl CommandOutcome {
         Self::success_with_warnings(command, data, Vec::new())
     }
 
+    pub(crate) fn success_raw(command: &str, data: Box<serde_json::value::RawValue>) -> Self {
+        Self {
+            cli_output_version: "1.0",
+            command: command.into(),
+            ok: true,
+            accepted: None,
+            operation_id: None,
+            data: Some(OutputData::Raw(data)),
+            warnings: Vec::new(),
+            error: None,
+        }
+    }
+
     pub(crate) fn success_with_warnings(
         command: &str,
         data: serde_json::Value,
@@ -58,7 +78,7 @@ impl CommandOutcome {
             ok: true,
             accepted,
             operation_id,
-            data: Some(data),
+            data: Some(OutputData::Value(data)),
             warnings,
             error: None,
         }
@@ -90,7 +110,7 @@ impl CommandOutcome {
             ok: false,
             accepted,
             operation_id,
-            data,
+            data: data.map(OutputData::Value),
             warnings: Vec::new(),
             error: Some(error),
         }
@@ -98,21 +118,28 @@ impl CommandOutcome {
 }
 
 pub(crate) fn render(outcome: &CommandOutcome, json: bool) {
+    let _ = render_checked(outcome, json);
+}
+
+pub(crate) fn render_checked(outcome: &CommandOutcome, json: bool) -> std::io::Result<()> {
+    use std::io::Write;
     if json {
-        match serde_json::to_string(outcome) {
-            Ok(encoded) => println!("{encoded}"),
-            Err(_) => {
-                // Serialization failure must still produce one valid JSON
-                // object so scripts can handle the CLI failure consistently.
-                println!(
-                    "{{\"cli_output_version\":\"1.0\",\"command\":\"cli\",\"ok\":false,\"accepted\":null,\"error\":{{\"category\":\"internal_error\",\"message\":\"Could not encode response\"}}}}"
-                )
-            }
-        }
+        let encoded = serde_json::to_string(outcome).map_err(std::io::Error::other)?;
+        writeln!(std::io::stdout().lock(), "{encoded}")
     } else if outcome.ok {
-        println!("{}", safe_terminal_text(&human_success(outcome)));
+        writeln!(
+            std::io::stdout().lock(),
+            "{}",
+            safe_terminal_text(&human_success(outcome))
+        )
     } else if outcome.error.is_some() {
-        eprintln!("{}", safe_terminal_text(&human_failure(outcome)));
+        writeln!(
+            std::io::stderr().lock(),
+            "{}",
+            safe_terminal_text(&human_failure(outcome))
+        )
+    } else {
+        Ok(())
     }
 }
 
@@ -137,12 +164,28 @@ fn human_success(outcome: &CommandOutcome) -> String {
     let mut lines = Vec::new();
     if let Some(data) = &outcome.data {
         lines.push(human_data(data));
-        if data.get("truncated").and_then(serde_json::Value::as_bool) == Some(true)
-            && let Some(cursor) = data.get("next_cursor").and_then(serde_json::Value::as_str)
+        let navigation = match data {
+            OutputData::Value(value) => value.clone(),
+            OutputData::Raw(raw) => {
+                #[derive(serde::Deserialize)]
+                struct Navigation {
+                    #[serde(default)]
+                    truncated: bool,
+                    #[serde(default)]
+                    next_cursor: Option<String>,
+                }
+                serde_json::from_str::<Navigation>(raw.get()).ok().map(|nav|serde_json::json!({"truncated":nav.truncated,"next_cursor":nav.next_cursor})).unwrap_or(serde_json::Value::Null)
+            }
+        };
+        if navigation
+            .get("truncated")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+            && let Some(cursor) = navigation
+                .get("next_cursor")
+                .and_then(serde_json::Value::as_str)
         {
-            lines.push(format!(
-                "Next page cursor: {cursor}\nRepeat this command with the same filters and limit, then pass --cursor {cursor}."
-            ));
+            lines.push(format!("Next page cursor: {cursor}\nRepeat this command with the same filters and limit, then pass --cursor {cursor}."));
         }
     }
     lines.extend(
@@ -169,7 +212,14 @@ fn safe_terminal_text(value: &str) -> String {
     safe
 }
 
-fn human_data(data: &serde_json::Value) -> String {
+fn human_data(data: &OutputData) -> String {
+    match data {
+        OutputData::Value(value) => human_value(value),
+        OutputData::Raw(raw) => raw.get().to_owned(),
+    }
+}
+
+fn human_value(data: &serde_json::Value) -> String {
     if let Some(effective) = data.get("effective").and_then(serde_json::Value::as_object) {
         let mut lines = Vec::new();
         for (key, entry) in effective {
@@ -200,6 +250,17 @@ fn human_data(data: &serde_json::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn inspection_output_preserves_exact_decimal_tokens() {
+        let raw = serde_json::value::RawValue::from_string(
+            r#"{"effective_parameters":{"scale":1.000000000000000000000001}}"#.into(),
+        )
+        .unwrap();
+        let outcome = CommandOutcome::success_raw("jobs show", raw);
+        let encoded = serde_json::to_string(&outcome).unwrap();
+        assert!(encoded.contains("1.000000000000000000000001"));
+        assert!(encoded.contains("\"accepted\":null"));
+    }
     #[test]
     fn human_shutdown_timeout_keeps_known_acceptance_and_operation() {
         let outcome = CommandOutcome::failure_with_context(

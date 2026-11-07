@@ -16,6 +16,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(unix)]
 use rustix::fs::{AtFlags, Mode, OFlags, openat};
 #[cfg(unix)]
+use std::os::fd::AsRawFd;
+#[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 
 #[cfg(unix)]
@@ -37,6 +39,30 @@ pub fn open_regular_file(path: &std::path::Path) -> std::io::Result<std::fs::Fil
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "expected a regular file",
+        ));
+    }
+    Ok(file)
+}
+
+/// Open a persistent configuration lock without following links or waiting on FIFOs.
+pub fn open_config_lock(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    #[cfg(unix)]
+    let file = std::fs::File::from(rustix::fs::open(
+        path,
+        OFlags::RDWR | OFlags::CREATE | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::from_bits_truncate(0o600),
+    )?);
+    #[cfg(not(unix))]
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "expected a regular lock file",
         ));
     }
     Ok(file)
@@ -93,6 +119,41 @@ fn is_windows_device_name(component: &str) -> bool {
 }
 
 impl OwnedRoot {
+    /// Report free bytes available to this user on the root's filesystem.
+    ///
+    /// A failed or unsupported query is an error; callers that reserve durable
+    /// storage must not treat unknown capacity as available space.
+    pub fn available_space_bytes(&self) -> Result<u64, PlatformError> {
+        #[cfg(unix)]
+        {
+            let mut statistics = std::mem::MaybeUninit::<libc::statvfs>::zeroed();
+            // SAFETY: `fstatvfs` writes the platform-defined statvfs structure
+            // to this correctly aligned output buffer for a live root handle.
+            if unsafe { libc::fstatvfs(self.directory().as_raw_fd(), statistics.as_mut_ptr()) } != 0
+            {
+                return Err(PlatformError::Io);
+            }
+            // SAFETY: success means the complete statvfs structure was written.
+            let statistics = unsafe { statistics.assume_init() };
+            // Native field widths vary by Unix target. Widen before multiplying
+            // and check the resulting byte count at the public u64 boundary.
+            let blocks = u128::from(statistics.f_bavail);
+            let block_size = u128::from(statistics.f_frsize);
+            if block_size == 0 {
+                return Err(PlatformError::Io);
+            }
+            u64::try_from(blocks * block_size).map_err(|_| PlatformError::Io)
+        }
+        #[cfg(windows)]
+        {
+            crate::windows::available_space_bytes(self)
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            Err(PlatformError::UnsupportedRoot)
+        }
+    }
+
     /// Remove one owner-validated regular file beneath this root.
     pub fn remove_file(&self, path: &RelativePath) -> Result<(), PlatformError> {
         #[cfg(unix)]
@@ -290,6 +351,11 @@ impl OwnedRoot {
 }
 
 impl RelativePath {
+    /// Return the validated slash-separated relative path.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
     pub(crate) fn as_path(&self) -> &std::path::Path {
         std::path::Path::new(&self.0)
     }
@@ -301,7 +367,7 @@ impl RelativePath {
 
 #[cfg(unix)]
 impl OwnedRoot {
-    fn open_parent(
+    pub(crate) fn open_parent(
         &self,
         path: &RelativePath,
         create: bool,
@@ -365,7 +431,7 @@ pub(crate) fn open_subdirectory(
 }
 
 #[cfg(unix)]
-fn validate_private_file(file: &File) -> Result<(), PlatformError> {
+pub(crate) fn validate_private_file(file: &File) -> Result<(), PlatformError> {
     let metadata = file.metadata().map_err(|_| PlatformError::Io)?;
     if !metadata.is_file()
         || metadata.uid() != rustix::process::geteuid().as_raw()

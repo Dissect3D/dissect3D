@@ -318,10 +318,14 @@ fn task_list_query(params: &BTreeMap<String, String>) -> Result<TaskListQuery, D
     })
 }
 
-fn page_query(params: &BTreeMap<String, String>) -> Result<PageQuery, DiscoveryError> {
+pub(super) fn page_query(params: &BTreeMap<String, String>) -> Result<PageQuery, DiscoveryError> {
     let limit = match params.get("limit") {
         Some(value) => {
-            if value.is_empty() || value.len() > 3 || (value.len() > 1 && value.starts_with('0')) {
+            if value.is_empty()
+                || value.len() > 3
+                || !value.bytes().all(|byte| byte.is_ascii_digit())
+                || (value.len() > 1 && value.starts_with('0'))
+            {
                 return Err(DiscoveryError::InvalidRequest);
             }
             let parsed = value
@@ -536,7 +540,7 @@ fn discovery_error(error: DiscoveryError) -> Response {
     }
 }
 
-fn query_params(
+pub(super) fn query_params(
     raw: Option<&str>,
     allowed: &[&str],
     maximum: usize,

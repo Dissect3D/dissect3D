@@ -8,6 +8,7 @@ publish.workspace = true
 [dependencies]
 dissect3d-api = { path = "../api" }
 dissect3d-platform = { path = "../platform" }
+dissect3d-connection = { path = "../connection", optional = true }
 base64 = "=0.22.1"
 getrandom = "=0.4.3"
 serde = { version = "=1.0.229", features = ["derive"] }
@@ -22,6 +23,7 @@ hyper-util = { version = "=0.1.21", default-features = false, features = ["servi
 rcgen = { version = "=0.14.10", default-features = false, features = ["aws_lc_rs", "x509-parser"] }
 tokio = { version = "=1.54.1", default-features = false, features = ["io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-rustls = { version = "=0.26.6", default-features = false, features = ["aws_lc_rs", "tls12"] }
+futures-util = "=0.3.34"
 
 [dev-dependencies]
 dissect3d-api = { path = "../api", features = ["client"] }
@@ -32,8 +34,20 @@ tempfile = "=3.27.0"
 workspace = true
 
 [features]
-test-support = []
+test-support = ["dep:dissect3d-connection"]
 
 [[example]]
 name = "discovery_test_host"
 required-features = ["test-support"]
+
+[[example]]
+name = "submission_test_host"
+required-features = ["test-support"]
+
+[[example]]
+name = "submission_fixture_tool"
+required-features = ["test-support"]
+
+[[test]]
+name = "input_ingestion"
+path = "tests/input_ingestion.rs"

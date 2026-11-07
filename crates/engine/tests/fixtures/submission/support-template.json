@@ -1,0 +1,85 @@
+{
+  "schema_version": "1.0",
+  "required_features": [],
+  "support_ref": "test.mesh-copy@fixture-r1",
+  "family": "controlled-test-fixture",
+  "implementation": "test.mesh-copy",
+  "description": "Prepared controlled CPU fixture that validates and copies one OBJ mesh",
+  "limitations": [
+    "Controlled test only; no upstream inference or production support",
+    "Broader hardware support and upstream asset rights are unknown; no upstream assets are included"
+  ],
+  "test_only": true,
+  "code": {
+    "upstream_repository": "workspace:controlled-fixture",
+    "upstream_revision": "fixture-v1",
+    "executed_repository": "workspace:Dissect3D",
+    "executed_revision": "pending-adapter-source-hash",
+    "patches": [],
+    "build_provenance": "controlled-test-only; no inference worker"
+  },
+  "adapter": {
+    "id": "dissect3d.fixture.adapter",
+    "revision": "1",
+    "sha256": "pending-package-hash",
+    "interface_version": "1.0",
+    "required_worker_features": []
+  },
+  "tasks": [
+    {
+      "task": { "id": "dissect3d.test.mesh-copy", "version": "1.0" },
+      "pipeline": { "id": "test.mesh-copy", "revision": "1" },
+      "input_schema": {
+        "id": "test.mesh",
+        "version": "1.0",
+        "sha256": "pending-package-hash"
+      },
+      "parameter_schema": {
+        "id": "test.parameters",
+        "version": "1.0",
+        "sha256": "pending-package-hash"
+      },
+      "output_schema": {
+        "id": "test.output",
+        "version": "1.0",
+        "sha256": "pending-package-hash"
+      },
+      "constraints": [],
+      "preprocessing": [],
+      "required_features": [],
+      "validator": { "id": "dissect3d.test.validator", "revision": "1" }
+    }
+  ],
+  "assets": [],
+  "runtime_refs": ["test.cpu@fixture-r1"],
+  "default_runtime_ref": "test.cpu@fixture-r1",
+  "variants": [
+    {
+      "id": "fixture",
+      "components": [],
+      "offload": false,
+      "task_keys": [{ "id": "dissect3d.test.mesh-copy", "version": "1.0" }],
+      "runtime_refs": ["test.cpu@fixture-r1"],
+      "constraints": [],
+      "evidence_ids": []
+    }
+  ],
+  "default_variant": "fixture",
+  "rights": [],
+  "resources": {
+    "device": "cpu",
+    "ram_bytes": null,
+    "vram_bytes": null,
+    "workload": "unmeasured",
+    "evidence_ids": []
+  },
+  "lifecycle": {
+    "cancellation": "unimplemented",
+    "progress": "unimplemented",
+    "reuse": false,
+    "reset": "unimplemented",
+    "cleanup": "unimplemented"
+  },
+  "tested_profiles": [],
+  "evidence": []
+}

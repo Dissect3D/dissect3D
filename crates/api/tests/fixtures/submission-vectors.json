@@ -1,0 +1,24 @@
+{
+  "version": "ds-0.1",
+  "status": "Independent equivalence expectations; production canonicalizer binding remains required",
+  "cases": [
+    {"id": "DS-V01", "left": "{\"a\":1,\"b\":true}", "right": "{\"b\":true,\"a\":1}", "equivalent": true},
+    {"id": "DS-V02", "left": "{\"a\":1}", "right": "{\"a\":1.0}", "equivalent": false},
+    {"id": "DS-V03", "left": "{\"a\":1.0}", "right": "{\"a\":1e0}", "equivalent": true},
+    {"id": "DS-V04", "left": "{}", "right": "{\"hold_before_candidate\":false}", "equivalent": false},
+    {"id": "DS-V05", "left": "[1,2]", "right": "[2,1]", "equivalent": false},
+    {"id": "DS-V06", "left": "true", "right": "1", "equivalent": false},
+    {"id": "DS-V07", "left": "\"é\"", "right": "\"é\"", "equivalent": false},
+    {"id": "DS-V08", "left": "-0", "right": "0", "equivalent": true},
+    {"id": "DS-V09", "left": "-0.0", "right": "0e0", "equivalent": true},
+    {"id": "DS-V10", "left": "1.2300e2", "right": "123.0", "equivalent": true},
+    {"id": "DS-V11", "left": "\"test.latest\"", "right": "\"test.mesh-copy@fixture-r1\"", "equivalent": false},
+    {"id": "DS-V12", "left": "[\"a\",\"b\"]", "right": "[\"b\",\"a\"]", "equivalent": false}
+  ],
+  "invalid_json": ["{\"a\":1,\"a\":2}", "NaN", "Infinity", "1e309", "9223372036854775808", "\"\\ud800\""],
+  "literal_canonical": [
+    {"raw": "{\"b\":true,\"a\":1}", "canonical_utf8": "[\"object\",[[\"a\",[\"integer\",\"1\"]],[\"b\",[\"bool\",true]]]]"},
+    {"raw": "1.2300e2", "canonical_utf8": "[\"decimal\",\"123e0\"]"},
+    {"raw": "{}", "canonical_utf8": "[\"object\",[]]"}
+  ]
+}

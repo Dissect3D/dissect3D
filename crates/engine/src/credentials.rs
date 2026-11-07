@@ -18,6 +18,38 @@ pub struct VerifiedEnrollment {
     pub(crate) enrollment_id: EnrollmentId,
     pub(crate) client_id: ClientId,
     pub(crate) token_digest: TokenDigest,
+    pub(crate) grant_policy: GrantPolicy,
+}
+
+/// Closed set of enrollment policies accepted by this engine version.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GrantPolicy {
+    CoreV1,
+    SubmissionV1,
+}
+
+impl GrantPolicy {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::CoreV1 => "core-v1",
+            Self::SubmissionV1 => "submission-v1",
+        }
+    }
+
+    pub(crate) const fn grants(self) -> &'static [&'static str] {
+        match self {
+            Self::CoreV1 => &INITIAL_GRANTS,
+            Self::SubmissionV1 => &SUBMISSION_GRANTS,
+        }
+    }
+
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value {
+            "core-v1" => Some(Self::CoreV1),
+            "submission-v1" => Some(Self::SubmissionV1),
+            _ => None,
+        }
+    }
 }
 
 impl VerifiedEnrollment {
@@ -36,6 +68,30 @@ impl VerifiedEnrollment {
             enrollment_id,
             client_id,
             token_digest,
+            grant_policy: GrantPolicy::CoreV1,
+        }
+    }
+
+    /// Native bootstrap's explicit, capability-gated enrollment path.
+    ///
+    /// Keeping this constructor crate-controlled prevents API consumers from
+    /// selecting a wider grant set without passing through native verification.
+    pub(crate) fn new_submission_access(
+        owner: OwnerIdentity,
+        installation_id: InstallationId,
+        instance_id: InstanceId,
+        enrollment_id: EnrollmentId,
+        client_id: ClientId,
+        token_digest: TokenDigest,
+    ) -> Self {
+        Self {
+            owner,
+            installation_id,
+            instance_id,
+            enrollment_id,
+            client_id,
+            token_digest,
+            grant_policy: GrantPolicy::SubmissionV1,
         }
     }
 }
@@ -66,5 +122,17 @@ pub(crate) const INITIAL_GRANTS: [&str; 5] = [
     "auth.status",
     "engine.info",
     "engine.shutdown",
+    "operation.show_own",
+];
+
+pub(crate) const SUBMISSION_GRANTS: [&str; 9] = [
+    "auth.revoke_self",
+    "auth.status",
+    "engine.info",
+    "engine.shutdown",
+    "inputs.create",
+    "jobs.list",
+    "jobs.show",
+    "jobs.submit",
     "operation.show_own",
 ];

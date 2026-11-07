@@ -206,9 +206,9 @@ pub(super) fn build_catalog(
         if schema["$schema"] != "https://json-schema.org/draft/2020-12/schema" {
             return Err(CatalogError::InvalidPackage);
         }
-        validate_schema_tree(schema, &mut unresolved, "schema", 0)
-            .map_err(|_| CatalogError::InvalidPackage)?;
         validate_schema_refs(schema).map_err(|_| CatalogError::InvalidPackage)?;
+        validate_schema_tree(schema, schema, &mut unresolved, "schema", 0)
+            .map_err(|_| CatalogError::InvalidPackage)?;
         schemas.insert(
             (id.to_owned(), version.to_owned()),
             SchemaRecord {
@@ -1386,6 +1386,7 @@ fn validate_schema_use(schema: &SchemaRecord, usage: SchemaUse) -> Result<(), Ca
 }
 
 fn validate_schema_tree(
+    root: &Value,
     value: &Value,
     unresolved: &mut Vec<String>,
     path: &str,
@@ -1456,6 +1457,7 @@ fn validate_schema_tree(
                         return Err(());
                     }
                     validate_schema_tree(
+                        root,
                         sub,
                         unresolved,
                         &format!("{path}.{key}.{name}"),
@@ -1464,7 +1466,7 @@ fn validate_schema_tree(
                 }
             }
             "items" => {
-                validate_schema_tree(child, unresolved, &format!("{path}.items"), depth + 1)?
+                validate_schema_tree(root, child, unresolved, &format!("{path}.items"), depth + 1)?
             }
             "required" => {
                 let vals = strings(child).ok_or(())?;
@@ -1550,16 +1552,14 @@ fn validate_schema_tree(
         }
     }
     if let Some(default) = object.get("default") {
-        if has_unknown_schema_keyword(value) {
-            unresolved.push(format!("{path}.default"));
-        } else if !value_matches(value, default, 0).unwrap_or(false) {
-            return Err(());
+        match value_matches(root, value, default, 0, 0) {
+            Some(false) => return Err(()),
+            None => unresolved.push(format!("{path}.default")),
+            Some(true) => {}
         }
     }
     if let Some(constant) = object.get("const")
-        && object
-            .get("type")
-            .is_some_and(|ty| !matches_type(ty.as_str().unwrap_or_default(), constant))
+        && value_matches(root, value, constant, 0, 0) == Some(false)
     {
         return Err(());
     }
@@ -1575,7 +1575,10 @@ fn validate_schema_tree(
     Ok(())
 }
 
-fn has_unknown_schema_keyword(value: &Value) -> bool {
+fn has_unknown_schema_keyword(root: &Value, value: &Value, edges: usize) -> bool {
+    if edges > 16 {
+        return true;
+    }
     const KNOWN: &[&str] = &[
         "$schema",
         "$defs",
@@ -1604,13 +1607,21 @@ fn has_unknown_schema_keyword(value: &Value) -> bool {
     let Some(object) = value.as_object() else {
         return false;
     };
+    if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
+        return reference
+            .strip_prefix("#/$defs/")
+            .and_then(|name| root.get("$defs")?.get(name))
+            .is_none_or(|target| has_unknown_schema_keyword(root, target, edges + 1));
+    }
     object.iter().any(|(key, child)| {
         !KNOWN.contains(&key.as_str())
             || match key.as_str() {
-                "properties" | "$defs" => child
-                    .as_object()
-                    .is_some_and(|items| items.values().any(has_unknown_schema_keyword)),
-                "items" => has_unknown_schema_keyword(child),
+                "properties" | "$defs" => child.as_object().is_some_and(|items| {
+                    items
+                        .values()
+                        .any(|sub| has_unknown_schema_keyword(root, sub, edges))
+                }),
+                "items" => has_unknown_schema_keyword(root, child, edges),
                 "x-output-policy" => false,
                 _ => false,
             }
@@ -1628,8 +1639,21 @@ fn validate_schema_refs(root: &Value) -> Result<(), ()> {
         defs: &Map<String, Value>,
         stack: &mut Vec<String>,
         edges: usize,
+        depth: usize,
     ) -> Result<(), ()> {
         let object = value.as_object().ok_or(())?;
+        // Count expanded containers, not reference hops or the $defs storage map.
+        let depth = depth
+            + usize::from(
+                matches!(
+                    object.get("type").and_then(Value::as_str),
+                    Some("object" | "array")
+                ) || object.contains_key("properties")
+                    || object.contains_key("items"),
+            );
+        if depth > 32 {
+            return Err(());
+        }
         if let Some(reference) = object.get("$ref") {
             let reference = reference.as_str().ok_or(())?;
             let name = reference.strip_prefix("#/$defs/").ok_or(())?;
@@ -1647,7 +1671,7 @@ fn validate_schema_refs(root: &Value) -> Result<(), ()> {
                 return Err(());
             }
             stack.push(name.to_owned());
-            scan(target, defs, stack, edges + 1)?;
+            scan(target, defs, stack, edges + 1, depth)?;
             stack.pop();
         }
         for (key, child) in object {
@@ -1657,27 +1681,40 @@ fn validate_schema_refs(root: &Value) -> Result<(), ()> {
             if matches!(key.as_str(), "properties" | "items") {
                 if key == "properties" {
                     for sub in child.as_object().ok_or(())?.values() {
-                        scan(sub, defs, stack, edges)?;
+                        scan(sub, defs, stack, edges, depth)?;
                     }
                 } else {
-                    scan(child, defs, stack, edges)?;
+                    scan(child, defs, stack, edges, depth)?;
                 }
             }
         }
         Ok(())
     }
-    scan(root, &defs, &mut Vec::new(), 0)?;
+    scan(root, &defs, &mut Vec::new(), 0, 0)?;
     for def in defs.values() {
-        scan(def, &defs, &mut Vec::new(), 0)?;
+        scan(def, &defs, &mut Vec::new(), 0, 0)?;
     }
     Ok(())
 }
 
-fn value_matches(schema: &Value, value: &Value, depth: usize) -> Option<bool> {
-    if depth > 32 {
+fn value_matches(
+    root: &Value,
+    schema: &Value,
+    value: &Value,
+    depth: usize,
+    edges: usize,
+) -> Option<bool> {
+    if depth > 32 || edges > 16 {
         return Some(false);
     }
     let object = schema.as_object()?;
+    // References are structurally checked before any const/default evaluation.
+    if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
+        let name = reference.strip_prefix("#/$defs/")?;
+        let target = root.get("$defs")?.get(name)?;
+        return value_matches(root, target, value, depth, edges + 1);
+    }
+    let mut unknown = has_unknown_schema_keyword(root, schema, edges);
     if let Some(ty) = object.get("type").and_then(Value::as_str)
         && !matches_type(ty, value)
     {
@@ -1731,10 +1768,13 @@ fn value_matches(schema: &Value, value: &Value, depth: usize) -> Option<bool> {
         {
             return Some(false);
         }
-        let item_schema = object.get("items")?;
-        for item in items {
-            if !value_matches(item_schema, item, depth + 1)? {
-                return Some(false);
+        if let Some(item_schema) = object.get("items") {
+            for item in items {
+                match value_matches(root, item_schema, item, depth + 1, edges) {
+                    Some(false) => return Some(false),
+                    None => unknown = true,
+                    Some(true) => {}
+                }
             }
         }
     }
@@ -1755,15 +1795,17 @@ fn value_matches(schema: &Value, value: &Value, depth: usize) -> Option<bool> {
         }
         if let Some(props) = object.get("properties").and_then(Value::as_object) {
             for (key, subschema) in props {
-                if let Some(item) = fields.get(key)
-                    && !value_matches(subschema, item, depth + 1)?
-                {
-                    return Some(false);
+                if let Some(item) = fields.get(key) {
+                    match value_matches(root, subschema, item, depth + 1, edges) {
+                        Some(false) => return Some(false),
+                        None => unknown = true,
+                        Some(true) => {}
+                    }
                 }
             }
         }
     }
-    Some(true)
+    if unknown { None } else { Some(true) }
 }
 
 fn matches_type(name: &str, value: &Value) -> bool {

@@ -1,0 +1,25 @@
+{
+  "schema_version": "1.0",
+  "id": "test.output",
+  "version": "1.0",
+  "required_features": [],
+  "schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "mesh": {
+        "type": "array",
+        "items": { "type": "string" },
+        "minItems": 1,
+        "maxItems": 1,
+        "x-output-policy": {
+          "mandatory": true,
+          "partial_allowed": false,
+          "formats": ["obj"]
+        }
+      }
+    },
+    "required": ["mesh"],
+    "additionalProperties": false
+  }
+}

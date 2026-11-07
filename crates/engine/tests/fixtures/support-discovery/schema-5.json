@@ -1,0 +1,1 @@
+{"schema_version":"1.0","id":"test.unknown","version":"1.0","required_features":["future.semantic"],"schema":{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"future":{"type":"string","x-required-future":"semantic"}},"required":[],"additionalProperties":false}}

@@ -6,7 +6,15 @@
 
 mod access;
 mod discovery;
+#[cfg(any(unix, test))]
+mod framing;
+#[cfg(unix)]
+mod inputs;
+#[cfg(unix)]
+mod jobs;
 
+#[cfg(feature = "test-support")]
+use crate::submission_fixture::PreparedReadiness;
 use crate::{AuthContext, CorePolicy, Store, StoreIdentity, support::Catalog, tls::TlsMaterial};
 use axum::Router;
 use dissect3d_api::{DiscoveryCapability, EngineInfo, EnginePhase, PlatformInfo};
@@ -16,6 +24,8 @@ use hyper_util::{rt::TokioIo, service::TowerToHyperService};
 use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
+#[cfg(unix)]
+use std::sync::Mutex;
 use std::time::Duration;
 use std::time::Instant;
 use tokio::net::{TcpListener, TcpStream};
@@ -39,17 +49,34 @@ pub struct HttpServer {
     ca_sha256: [u8; 32],
     endpoint: SocketAddr,
     request_timeout: Duration,
+    #[cfg(unix)]
+    recovery_state: Arc<crate::inputs::InputService>,
+    #[cfg(unix)]
+    job_recovery_state: Arc<crate::jobs::JobsService>,
 }
 
 #[derive(Clone)]
 struct ServiceState {
+    #[cfg(all(unix, test))]
+    test_hooks: Arc<crate::submission::test_support::Hooks>,
     store: Arc<Store>,
     host: String,
     policy: CorePolicy,
     diagnostic_root: Arc<OwnedRoot>,
     diagnostic_permit: Arc<Semaphore>,
+    #[cfg(unix)]
+    inputs: Arc<crate::inputs::InputService>,
     catalog: Arc<Catalog>,
+    #[cfg(unix)]
+    submissions: Arc<crate::submission::service::SubmissionService>,
+    #[cfg(unix)]
+    jobs: Arc<crate::jobs::JobsService>,
 }
+
+#[cfg(feature = "test-support")]
+type PreparedReadinessOption = Option<PreparedReadiness>;
+#[cfg(not(feature = "test-support"))]
+type PreparedReadinessOption = ();
 
 /// Authenticated data placed on a request after the access gate succeeds.
 #[derive(Clone)]
@@ -59,6 +86,21 @@ pub(crate) struct AuthorizedRequest {
 }
 
 impl HttpServer {
+    #[cfg(all(test, unix, feature = "test-support"))]
+    pub(crate) fn test_router(&self) -> Router {
+        self.router.clone()
+    }
+
+    #[cfg(all(test, unix, feature = "test-support"))]
+    pub(crate) fn test_recovery_states(
+        &self,
+    ) -> (
+        Arc<crate::inputs::InputService>,
+        Arc<crate::jobs::JobsService>,
+    ) {
+        (self.recovery_state.clone(), self.job_recovery_state.clone())
+    }
+
     /// Bind exactly numeric IPv4 loopback and prepare installation TLS material.
     pub async fn bind(
         root: &OwnedRoot,
@@ -74,24 +116,89 @@ impl HttpServer {
         policy: CorePolicy,
         catalog: Arc<Catalog>,
     ) -> Result<Self, HttpError> {
+        #[cfg(feature = "test-support")]
+        return Self::bind_inner(root, store, policy, catalog, None).await;
+        #[cfg(not(feature = "test-support"))]
+        Self::bind_inner(root, store, policy, catalog, ()).await
+    }
+
+    #[cfg(feature = "test-support")]
+    pub(crate) async fn bind_with_prepared_catalog(
+        root: &OwnedRoot,
+        store: Arc<Store>,
+        policy: CorePolicy,
+        catalog: Arc<Catalog>,
+        readiness: PreparedReadiness,
+    ) -> Result<Self, HttpError> {
+        Self::bind_inner(root, store, policy, catalog, Some(readiness)).await
+    }
+
+    async fn bind_inner(
+        root: &OwnedRoot,
+        store: Arc<Store>,
+        policy: CorePolicy,
+        catalog: Arc<Catalog>,
+        #[cfg(feature = "test-support")] prepared_readiness: PreparedReadinessOption,
+        #[cfg(not(feature = "test-support"))] _prepared_readiness: PreparedReadinessOption,
+    ) -> Result<Self, HttpError> {
         let tls = TlsMaterial::load_or_create(root).map_err(|_| HttpError::Tls)?;
+        let request_timeout = Duration::from_millis(u64::from(policy.request_timeout_ms));
         let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
             .await
             .map_err(|_| HttpError::Bind)?;
         let endpoint = listener.local_addr().map_err(|_| HttpError::Bind)?;
         let host = format!("127.0.0.1:{}", endpoint.port());
-        let request_timeout = Duration::from_millis(u64::from(policy.request_timeout_ms));
         let diagnostic_root =
             OwnedRoot::open(root.path(), dissect3d_platform::RootPurpose::EngineData)
                 .map_err(|_| HttpError::Store)?;
+        let diagnostic_root = Arc::new(diagnostic_root);
+        #[cfg(unix)]
+        let inputs = Arc::new(crate::inputs::InputService::new(
+            store.clone(),
+            diagnostic_root.clone(),
+        ));
+        #[cfg(all(unix, feature = "test-support"))]
+        let prepared = prepared_readiness
+            .as_ref()
+            .map(crate::submission::admission::PreparedAdmission::from_verified_fixture);
+        #[cfg(all(unix, not(feature = "test-support")))]
+        let prepared = None;
+        #[cfg(all(not(unix), feature = "test-support"))]
+        let _ = prepared_readiness;
+        #[cfg(unix)]
+        let jobs = Arc::new(crate::jobs::JobsService::new(
+            store.clone(),
+            diagnostic_root.clone(),
+        ));
+        #[cfg(unix)]
+        let submissions = Arc::new(crate::submission::service::SubmissionService::new(
+            store.clone(),
+            diagnostic_root.clone(),
+            catalog.clone(),
+            prepared,
+            inputs.clone(),
+            jobs.clone(),
+        ));
         let state = Arc::new(ServiceState {
+            #[cfg(all(unix, test))]
+            test_hooks: crate::submission::test_support::for_root(root.path()),
             store,
             host,
             policy,
-            diagnostic_root: Arc::new(diagnostic_root),
+            diagnostic_root,
             diagnostic_permit: Arc::new(Semaphore::new(1)),
+            #[cfg(unix)]
+            inputs,
             catalog,
+            #[cfg(unix)]
+            submissions,
+            #[cfg(unix)]
+            jobs,
         });
+        #[cfg(unix)]
+        let recovery_state = state.inputs.clone();
+        #[cfg(unix)]
+        let job_recovery_state = state.jobs.clone();
         let router = access::router(state);
         Ok(Self {
             listener,
@@ -101,6 +208,10 @@ impl HttpServer {
             ca_sha256: tls.ca_sha256,
             endpoint,
             request_timeout,
+            #[cfg(unix)]
+            recovery_state,
+            #[cfg(unix)]
+            job_recovery_state,
         })
     }
 
@@ -133,7 +244,20 @@ impl HttpServer {
         mut shutdown: oneshot::Receiver<Instant>,
         ready: Option<oneshot::Sender<()>>,
     ) -> Result<(), HttpError> {
+        #[cfg(unix)]
+        let (recovery_stop, recovery_shutdown) = oneshot::channel();
+        #[cfg(unix)]
+        let mut recovery_task = tokio::spawn(crate::inputs::recovery::run(
+            self.recovery_state.clone(),
+            recovery_shutdown,
+        ));
+        #[cfg(unix)]
+        let (job_recovery_stop, job_recovery_shutdown) = oneshot::channel();
+        #[cfg(unix)]
+        let mut job_recovery_task =
+            tokio::spawn(self.job_recovery_state.run_recovery(job_recovery_shutdown));
         let acceptor = TlsAcceptor::from(self.tls);
+        let request_timeout = self.request_timeout;
         let permits = Arc::new(Semaphore::new(MAX_CONNECTIONS));
         let mut connections = JoinSet::new();
         if let Some(ready) = ready {
@@ -143,9 +267,16 @@ impl HttpServer {
             while connections.try_join_next().is_some() {}
             let accepted = tokio::select! {
                 deadline = &mut shutdown => break deadline.unwrap_or_else(|_| Instant::now()),
+                _ = async {
+                    #[cfg(unix)]
+                    { tokio::select! {_=&mut recovery_task=>{},_=&mut job_recovery_task=>{}} }
+                    #[cfg(not(unix))]
+                    std::future::pending::<()>().await;
+                } => return Err(HttpError::Store),
                 accepted = self.listener.accept() => accepted.map_err(|_| HttpError::Accept)?,
             };
             let (stream, peer) = accepted;
+            let request_deadline = Instant::now() + request_timeout;
             // Binding to 127.0.0.1 is the primary boundary; reject any socket
             // peer that the OS reports outside that numeric loopback address.
             if peer.ip() != IpAddr::V4(Ipv4Addr::LOCALHOST) {
@@ -157,17 +288,30 @@ impl HttpServer {
             };
             let acceptor = acceptor.clone();
             let router = self.router.clone();
-            let request_timeout = self.request_timeout;
             connections.spawn(async move {
                 let _permit = permit;
-                // One request is served per connection. Start the accepted
-                // request budget at socket admission so headers, body,
-                // handler work, and the HTTP response share one deadline.
-                let _ = tokio::time::timeout(
-                    request_timeout,
-                    serve_connection(stream, acceptor, router),
-                )
-                .await;
+                #[cfg(unix)]
+                {
+                    let (upload_signal_tx, mut upload_signal_rx) = oneshot::channel();
+                    let signal = UploadDeadlineSignal(Arc::new(Mutex::new(Some(upload_signal_tx))));
+                    let router = router.layer(axum::Extension(signal));
+                    let serving = serve_connection(stream, acceptor, router);
+                    tokio::pin!(serving);
+                    tokio::select! {
+                        _ = tokio::time::sleep_until(request_deadline.into()) => {}
+                        _ = &mut serving => {}
+                        signal = &mut upload_signal_rx => {
+                            if signal.is_ok() {
+                                let _ = serving.await;
+                            }
+                        }
+                    }
+                }
+                #[cfg(not(unix))]
+                {
+                    let serving = serve_connection(stream, acceptor, router);
+                    let _ = tokio::time::timeout_at(request_deadline.into(), serving).await;
+                }
             });
         };
         // Accepted requests share the intent deadline; no new stage receives
@@ -185,6 +329,13 @@ impl HttpServer {
             }
         }
         while connections.join_next().await.is_some() {}
+        #[cfg(unix)]
+        {
+            let _ = recovery_stop.send(());
+            let _ = job_recovery_stop.send(());
+            job_recovery_task.await.map_err(|_| HttpError::Store)?;
+            recovery_task.await.map_err(|_| HttpError::Store)?;
+        }
         Ok(())
     }
 }
@@ -198,12 +349,35 @@ pub enum HttpError {
     Store,
 }
 
+/// Per-connection signal for the one authorized route allowed to exceed the
+/// short core request deadline.
+#[derive(Clone)]
+#[cfg(unix)]
+pub(super) struct UploadDeadlineSignal(Arc<Mutex<Option<oneshot::Sender<()>>>>);
+
+#[cfg(unix)]
+impl UploadDeadlineSignal {
+    pub(super) fn signal(&self) {
+        if let Ok(mut sender) = self.0.lock()
+            && let Some(sender) = sender.take()
+        {
+            let _ = sender.send(());
+        }
+    }
+}
+
 async fn serve_connection(stream: TcpStream, acceptor: TlsAcceptor, router: Router) {
     let Ok(Ok(stream)) =
         tokio::time::timeout(Duration::from_secs(5), acceptor.accept(stream)).await
     else {
         return;
     };
+    #[cfg(unix)]
+    let framing = framing::WireFraming::default();
+    #[cfg(unix)]
+    let router = router.layer(axum::Extension(framing.clone()));
+    #[cfg(unix)]
+    let stream = framing::FramingIo::new(stream, framing);
     let service = TowerToHyperService::new(router);
     let mut builder = http1::Builder::new();
     builder
@@ -230,12 +404,12 @@ pub(crate) async fn engine_info(
         "engine.shutdown".to_owned(),
         "operation.show_own".to_owned(),
     ];
-    let granted_operations = context
-        .granted_operations()
-        .iter()
-        .filter(|grant| supported_operations.contains(grant))
-        .cloned()
-        .collect();
+    #[cfg(unix)]
+    let supported_operations = supported_operations
+        .into_iter()
+        .chain(std::iter::once("inputs.create".to_owned()))
+        .collect::<Vec<_>>();
+    let granted_operations = context.granted_operations().to_vec();
     let mut limits = BTreeMap::new();
     limits.insert(
         "store_queue_capacity".to_owned(),
@@ -297,6 +471,10 @@ pub(crate) async fn engine_info(
     // The current native server processes one frame at a time, within the
     // accepted admission ceiling. Do not advertise parallel handling it lacks.
     limits.insert("bootstrap_connections".to_owned(), 1);
+    #[cfg(unix)]
+    let submission = Some(crate::inputs::policy::capability());
+    #[cfg(not(unix))]
+    let submission = None;
     EngineInfo {
         api_version: "1.0".to_owned(),
         engine_version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -328,6 +506,7 @@ pub(crate) async fn engine_info(
             ],
             authorization_grant: "engine.info".to_owned(),
         }),
+        submission,
     }
 }
 
@@ -365,8 +544,61 @@ mod limit_tests {
             ("bootstrap_frame_bytes", 16384),
             ("bootstrap_timeout_ms", 5000),
             ("bootstrap_connections", 1),
+            ("maximum_store_value_bytes", 1_048_576),
+            ("control_response_bytes", 262_144),
         ] {
             assert_eq!(info.limits[key], expected, "{key}");
+        }
+    }
+
+    #[tokio::test]
+    async fn engine_info_reports_the_authenticated_clients_full_grant_set() {
+        let identity = StoreIdentity {
+            installation_id: dissect3d_api::InstallationId::parse(
+                "ins_0123456789abcdef0123456789abcdef",
+            )
+            .unwrap(),
+            instance_id: dissect3d_api::InstanceId::parse("eng_0123456789abcdef0123456789abcdef")
+                .unwrap(),
+        };
+        let grants = [
+            "auth.revoke_self",
+            "auth.status",
+            "engine.info",
+            "engine.shutdown",
+            "inputs.create",
+            "jobs.list",
+            "jobs.show",
+            "jobs.submit",
+            "operation.show_own",
+        ]
+        .map(str::to_owned)
+        .to_vec();
+        let context = AuthContext {
+            installation_id: identity.installation_id.clone(),
+            client_id: dissect3d_api::ClientId::parse("cli_0123456789abcdef0123456789abcdef")
+                .unwrap(),
+            granted_operations: grants.clone(),
+        };
+        let info = engine_info(identity, context, &CorePolicy::default(), false).await;
+        assert_eq!(info.granted_operations, grants);
+        #[cfg(unix)]
+        {
+            let submission = info.submission.expect("Unix capture capability");
+            assert_eq!(submission.operations, vec!["inputs.create"]);
+            assert!(!submission.dispatch_enabled);
+            assert_eq!(submission.limits["input_bytes_max"], 268_435_456);
+            assert_eq!(submission.limits["upload_concurrency_max"], 2);
+            assert!(
+                info.supported_operations
+                    .iter()
+                    .any(|operation| operation == "inputs.create")
+            );
+        }
+        #[cfg(not(unix))]
+        {
+            assert!(info.submission.is_none());
+            assert_eq!(info.supported_operations.len(), 5);
         }
     }
 }

@@ -275,7 +275,7 @@ fn validate_storage_filesystem(_directory: &File, _path: &Path) -> Result<(), Pl
 }
 
 #[cfg(unix)]
-fn open_directory_chain(path: &Path, create: bool) -> Result<File, PlatformError> {
+pub(crate) fn open_directory_chain(path: &Path, create: bool) -> Result<File, PlatformError> {
     if !path.is_absolute()
         || path
             .components()

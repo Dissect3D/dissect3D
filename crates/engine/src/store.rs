@@ -5,12 +5,16 @@
 //! ordering is explicit and overload is returned as `Busy` instead of growing
 //! unbounded work in memory.
 
-use crate::{AuthContext, CorePolicy, VerifiedEnrollment, credentials::INITIAL_GRANTS};
+use crate::{AuthContext, CorePolicy, VerifiedEnrollment, credentials::GrantPolicy};
 use dissect3d_api::{
     ClientId, EnrollmentReceipt, IdempotencyKey, InstallationId, InstanceId, OperationId,
     OperationSnapshot, OperationState, OperationTarget, RevocationReceipt, TimestampMs,
     TokenDigest,
 };
+#[cfg(unix)]
+use dissect3d_api::{ContentDigest, InputId, InputIdentity, InputReceipt};
+#[cfg(unix)]
+use dissect3d_platform::DurableFile;
 use dissect3d_platform::{
     AuthorityLease, OwnedRoot, PlatformError, RelativePath, current_owner_identity,
 };
@@ -25,13 +29,34 @@ use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
+pub(crate) mod inputs;
+#[cfg(unix)]
+use crate::inputs::policy::{
+    MAX_INPUT_BYTES, MAX_INPUT_ROWS, MAX_STAGING_BYTES, MAX_UPLOADS, STORAGE_FREE_RESERVE_BYTES,
+    UPLOAD_METADATA_RESERVE_BYTES, UPLOAD_TTL_MS,
+};
+#[cfg(unix)]
+use inputs::{abandon_upload, complete_upload, reserve_upload};
+#[cfg(unix)]
+pub(crate) mod jobs;
+#[cfg(unix)]
+pub(crate) mod submission;
+
 const APPLICATION_ID: i64 = 0x4433_4431;
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 6;
 const DATABASE_NAME: &str = "metadata.sqlite3";
-const RECOVERY_BACKUP: &str = "recovery/metadata-upgrade.sqlite3";
+// `recovery/metadata-upgrade.sqlite3` is a legacy artifact and is never opened
+// or replaced by this migration. Keep the v3 pre-upgrade image distinct.
+const RECOVERY_BACKUP: &str = "recovery/metadata-v3-upgrade.sqlite3";
+const RECOVERY_BACKUP_V4: &str = "recovery/metadata-v4-upgrade.sqlite3";
+const RECOVERY_BACKUP_V5: &str = "recovery/metadata-v5-upgrade.sqlite3";
 pub(crate) const RECOVERY_BACKUP_LIMIT_BYTES: i64 = 268_435_456;
+const RECOVERY_BACKUP_FREE_SPACE_FLOOR_BYTES: u64 = 1_073_741_824;
 pub(crate) const MAX_CORE_OPERATION_ROWS: i64 = 16_384;
 pub(crate) const MAX_CREDENTIAL_ROWS: i64 = 1_024;
+#[cfg(unix)]
+const MAX_CLEANUP_BATCH: usize = 64;
 fn protected_sqlite_open_flags() -> OpenFlags {
     OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW
 }
@@ -44,6 +69,7 @@ struct ExistingCredential {
     client_id: String,
     enrollment_id: String,
     digest: Vec<u8>,
+    grant_policy: String,
     created_at_ms: i64,
     revoked_at_ms: Option<i64>,
 }
@@ -70,6 +96,23 @@ pub(crate) struct ShutdownAcceptance {
     pub(crate) replayed: bool,
 }
 
+/// Actor-issued authority to create one generated input identity.
+#[cfg(unix)]
+pub(crate) struct UploadReservation {
+    pub(crate) reservation_id: String,
+    pub(crate) input_id: InputId,
+    pub(crate) declared_length: u64,
+    pub(crate) media_type: String,
+    pub(crate) lease: Arc<()>,
+}
+
+/// Native publication witness and engine-computed digest offered for commit.
+#[cfg(unix)]
+pub(crate) struct DurableInput {
+    pub(crate) file: DurableFile,
+    pub(crate) sha256: [u8; 32],
+}
+
 /// Safe persistence and authority error categories.
 ///
 /// Variants intentionally omit SQLite and operating-system diagnostics; those
@@ -84,6 +127,8 @@ pub enum CoreError {
     Unauthorized,
     NotFound,
     LimitReached,
+    /// A finite input-policy limit, identified by its public safe key.
+    CapacityExceeded(&'static str),
     Platform(PlatformError),
 }
 
@@ -96,6 +141,11 @@ pub struct StoreIdentity {
 }
 
 enum Command {
+    #[cfg(all(test, unix, feature = "test-support"))]
+    JobLimits(
+        submission::AcceptanceLimits,
+        mpsc::SyncSender<Result<(), CoreError>>,
+    ),
     Identity(mpsc::SyncSender<Result<StoreIdentity, CoreError>>),
     Enroll(
         VerifiedEnrollment,
@@ -126,12 +176,90 @@ enum Command {
         OperationId,
         mpsc::SyncSender<Result<OperationSnapshot, CoreError>>,
     ),
+    #[cfg(unix)]
+    ReserveUpload(
+        AuthContext,
+        u64,
+        String,
+        u64,
+        mpsc::SyncSender<Result<UploadReservation, CoreError>>,
+    ),
+    #[cfg(unix)]
+    CompleteUpload(
+        AuthContext,
+        UploadReservation,
+        DurableInput,
+        mpsc::SyncSender<Result<InputReceipt, CoreError>>,
+    ),
+    #[cfg(unix)]
+    AbandonUpload(String, mpsc::SyncSender<Result<(), CoreError>>),
+    #[cfg(unix)]
+    PinVerifiedInputs(
+        AuthContext,
+        Vec<InputId>,
+        mpsc::SyncSender<Result<inputs::PinnedInputSet, CoreError>>,
+    ),
+    #[cfg(unix)]
+    ClaimInputCleanup(
+        Option<i64>,
+        mpsc::SyncSender<Result<Vec<inputs::InputCleanupClaim>, CoreError>>,
+    ),
+    #[cfg(unix)]
+    ConfirmInputCleanup(
+        inputs::InputCleanupClaim,
+        mpsc::SyncSender<Result<(), CoreError>>,
+    ),
+    #[cfg(unix)]
+    InputFileKnown(InputId, mpsc::SyncSender<Result<bool, CoreError>>),
+    #[cfg(unix)]
+    ProbeJobBinding(
+        AuthContext,
+        IdempotencyKey,
+        dissect3d_api::JobRequest,
+        mpsc::SyncSender<
+            Result<Option<dissect3d_api::AcceptanceReceipt>, crate::submission::SubmissionError>,
+        >,
+    ),
+    #[cfg(unix)]
+    AcceptJob(
+        AuthContext,
+        IdempotencyKey,
+        dissect3d_api::JobRequest,
+        Box<crate::submission::admission::AdmissionCandidate>,
+        mpsc::SyncSender<
+            Result<dissect3d_api::AcceptanceReceipt, crate::submission::SubmissionError>,
+        >,
+    ),
+    #[cfg(unix)]
+    ShowJob(
+        AuthContext,
+        dissect3d_api::JobId,
+        mpsc::SyncSender<Result<dissect3d_api::JobSnapshot, crate::submission::SubmissionError>>,
+    ),
+    #[cfg(unix)]
+    ListJobs(
+        AuthContext,
+        dissect3d_api::JobsQuery,
+        mpsc::SyncSender<Result<dissect3d_api::JobPage, crate::submission::SubmissionError>>,
+    ),
+    #[cfg(unix)]
+    JobAuditBatch(
+        String,
+        mpsc::SyncSender<Result<Vec<jobs::AuditEntry>, crate::submission::SubmissionError>>,
+    ),
+    #[cfg(unix)]
+    MarkJobInputFault(
+        InputId,
+        mpsc::SyncSender<Result<(), crate::submission::SubmissionError>>,
+    ),
     CompleteShutdown(InstanceId, mpsc::SyncSender<Result<(), CoreError>>),
     SignalShutdown(
         InstanceId,
         u32,
         mpsc::SyncSender<Result<Instant, CoreError>>,
     ),
+    #[cfg(all(unix, test, feature = "test-support"))]
+    FailNextJobCommit(mpsc::SyncSender<Result<(), CoreError>>),
     Close,
     #[cfg(test)]
     LimitDatabasePages(mpsc::SyncSender<Result<(), CoreError>>),
@@ -267,6 +395,177 @@ impl Store {
         self.request(|response| Command::ShowOperation(context, operation_id, response))
     }
 
+    #[cfg(unix)]
+    pub(crate) fn reserve_upload(
+        &self,
+        context: AuthContext,
+        declared_length: u64,
+        media_type: String,
+        available_space_bytes: u64,
+    ) -> Result<UploadReservation, CoreError> {
+        self.request(|response| {
+            Command::ReserveUpload(
+                context,
+                declared_length,
+                media_type,
+                available_space_bytes,
+                response,
+            )
+        })
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn complete_upload(
+        &self,
+        context: AuthContext,
+        reservation: UploadReservation,
+        input: DurableInput,
+    ) -> Result<InputReceipt, CoreError> {
+        self.request(|response| Command::CompleteUpload(context, reservation, input, response))
+    }
+
+    /// Release an incomplete reservation after its staging file has been
+    /// durably removed. If cleanup cannot prove deletion, keep its charge.
+    #[cfg(unix)]
+    pub(crate) fn abandon_upload(&self, reservation_id: String) -> Result<(), CoreError> {
+        self.request(|response| Command::AbandonUpload(reservation_id, response))
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn pin_verified_inputs(
+        &self,
+        context: AuthContext,
+        input_ids: Vec<InputId>,
+    ) -> Result<inputs::PinnedInputSet, CoreError> {
+        self.request(|response| Command::PinVerifiedInputs(context, input_ids, response))
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn claim_input_cleanup(&self) -> Result<Vec<inputs::InputCleanupClaim>, CoreError> {
+        self.request(|response| Command::ClaimInputCleanup(None, response))
+    }
+
+    #[cfg(all(unix, test))]
+    pub(crate) fn claim_input_cleanup_at(
+        &self,
+        requested_time_ms: i64,
+    ) -> Result<Vec<inputs::InputCleanupClaim>, CoreError> {
+        self.request(|response| Command::ClaimInputCleanup(Some(requested_time_ms), response))
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn confirm_input_cleanup(
+        &self,
+        claim: inputs::InputCleanupClaim,
+    ) -> Result<(), CoreError> {
+        self.request(|response| Command::ConfirmInputCleanup(claim, response))
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn input_file_known(&self, input_id: InputId) -> Result<bool, CoreError> {
+        self.request(|response| Command::InputFileKnown(input_id, response))
+    }
+
+    #[cfg(all(unix, test, feature = "test-support"))]
+    pub(crate) fn fail_next_job_commit(&self) -> Result<(), CoreError> {
+        self.request(Command::FailNextJobCommit)
+    }
+    #[cfg(unix)]
+    pub(crate) fn probe_job_binding(
+        &self,
+        auth: AuthContext,
+        key: IdempotencyKey,
+        request: dissect3d_api::JobRequest,
+    ) -> Result<Option<dissect3d_api::AcceptanceReceipt>, crate::submission::SubmissionError> {
+        self.request_job(|reply| Command::ProbeJobBinding(auth, key, request, reply))
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn accept_job(
+        &self,
+        auth: AuthContext,
+        key: IdempotencyKey,
+        request: dissect3d_api::JobRequest,
+        candidate: crate::submission::admission::AdmissionCandidate,
+    ) -> Result<dissect3d_api::AcceptanceReceipt, crate::submission::SubmissionError> {
+        self.request_job(|reply| Command::AcceptJob(auth, key, request, Box::new(candidate), reply))
+    }
+
+    #[cfg(all(unix, test, feature = "test-support"))]
+    pub(crate) fn set_test_job_limits(&self, limits: submission::AcceptanceLimits) {
+        self.request(|reply| Command::JobLimits(limits, reply))
+            .unwrap();
+    }
+
+    #[cfg(all(unix, test, feature = "test-support"))]
+    pub(crate) fn accept_job_without_reply(
+        &self,
+        auth: AuthContext,
+        key: IdempotencyKey,
+        request: dissect3d_api::JobRequest,
+        candidate: crate::submission::admission::AdmissionCandidate,
+    ) {
+        let (reply, receiver) = mpsc::sync_channel(1);
+        assert!(
+            self.sender
+                .send(Command::AcceptJob(
+                    auth,
+                    key,
+                    request,
+                    Box::new(candidate),
+                    reply
+                ))
+                .is_ok()
+        );
+        drop(receiver);
+    }
+
+    #[cfg(unix)]
+    fn request_job<T>(
+        &self,
+        command: impl FnOnce(mpsc::SyncSender<Result<T, crate::submission::SubmissionError>>) -> Command,
+    ) -> Result<T, crate::submission::SubmissionError> {
+        let (tx, rx) = mpsc::sync_channel(1);
+        self.sender.try_send(command(tx)).map_err(|error| {
+            crate::submission::SubmissionError::from(match error {
+                mpsc::TrySendError::Full(_) => CoreError::Busy,
+                mpsc::TrySendError::Disconnected(_) => CoreError::StoreUnavailable,
+            })
+        })?;
+        rx.recv()
+            .map_err(|_| crate::submission::SubmissionError::from(CoreError::StoreUnavailable))?
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn show_job(
+        &self,
+        auth: AuthContext,
+        id: dissect3d_api::JobId,
+    ) -> Result<dissect3d_api::JobSnapshot, crate::submission::SubmissionError> {
+        self.request_job(|reply| Command::ShowJob(auth, id, reply))
+    }
+    #[cfg(unix)]
+    pub(crate) fn list_jobs(
+        &self,
+        auth: AuthContext,
+        query: dissect3d_api::JobsQuery,
+    ) -> Result<dissect3d_api::JobPage, crate::submission::SubmissionError> {
+        self.request_job(|reply| Command::ListJobs(auth, query, reply))
+    }
+    #[cfg(unix)]
+    pub(crate) fn job_audit_batch(
+        &self,
+        after: String,
+    ) -> Result<Vec<jobs::AuditEntry>, crate::submission::SubmissionError> {
+        self.request_job(|reply| Command::JobAuditBatch(after, reply))
+    }
+    #[cfg(unix)]
+    pub(crate) fn mark_job_input_fault(
+        &self,
+        id: InputId,
+    ) -> Result<(), crate::submission::SubmissionError> {
+        self.request_job(|reply| Command::MarkJobInputFault(id, reply))
+    }
     pub(crate) fn complete_shutdown(&self, instance_id: InstanceId) -> Result<(), CoreError> {
         self.request(|response| Command::CompleteShutdown(instance_id, response))
     }
@@ -284,7 +583,7 @@ impl Store {
     }
 
     #[cfg(test)]
-    fn limit_database_pages_to_current_plus_one(&self) -> Result<(), CoreError> {
+    pub(crate) fn limit_database_pages_to_current_plus_one(&self) -> Result<(), CoreError> {
         let (response_tx, response_rx) = mpsc::sync_channel(1);
         self.sender
             .try_send(Command::LimitDatabasePages(response_tx))
@@ -361,11 +660,23 @@ fn actor(
             return;
         }
     };
+    #[cfg(all(test, unix, feature = "test-support"))]
+    let mut job_limits = submission::AcceptanceLimits::default();
+    #[cfg(all(unix, not(all(test, feature = "test-support"))))]
+    let job_limits = submission::AcceptanceLimits::default();
     let _ = ready.send(Ok(()));
     let mut stopping = false;
     let mut shutdown_deadline: Option<Instant> = None;
+    #[cfg(unix)]
+    let mut active_uploads = inputs::ActiveUploads::new();
+    #[cfg(unix)]
+    let mut input_pin_counts = inputs::InputPinCounts::new();
+    #[cfg(unix)]
+    let mut input_cleanup_cursor = inputs::CleanupCursor::default();
     #[cfg(test)]
     let mut fail_next_shutdown_commit = false;
+    #[cfg(all(unix, test, feature = "test-support"))]
+    let mut fail_next_job_commit = false;
     #[cfg(test)]
     let mut pause_next_shutdown: Option<(mpsc::SyncSender<()>, Receiver<()>)> = None;
     while let Ok(command) = receiver.recv() {
@@ -456,6 +767,145 @@ fn actor(
             }
             Command::ShowOperation(context, operation_id, response) => {
                 let _ = response.send(show_operation(&connection, context, operation_id));
+            }
+            #[cfg(unix)]
+            Command::ReserveUpload(
+                context,
+                declared_length,
+                media_type,
+                available_space_bytes,
+                response,
+            ) => {
+                let result = if stopping {
+                    Err(CoreError::Busy)
+                } else {
+                    reserve_upload(
+                        &mut connection,
+                        context,
+                        declared_length,
+                        &media_type,
+                        available_space_bytes,
+                    )
+                };
+                let result = result.inspect(|reservation| {
+                    active_uploads.insert(
+                        reservation.reservation_id.clone(),
+                        reservation.lease.clone(),
+                    );
+                });
+                let _ = response.send(result);
+            }
+            #[cfg(unix)]
+            Command::CompleteUpload(context, reservation, input, response) => {
+                let reservation_id = reservation.reservation_id.clone();
+                let result = if stopping {
+                    Err(CoreError::Busy)
+                } else {
+                    complete_upload(&mut connection, context, reservation, input)
+                };
+                if result.is_ok() {
+                    active_uploads.remove(&reservation_id);
+                }
+                let _ = response.send(result);
+            }
+            #[cfg(unix)]
+            Command::AbandonUpload(reservation_id, response) => {
+                let result = abandon_upload(&mut connection, &reservation_id);
+                if result.is_ok() {
+                    active_uploads.remove(&reservation_id);
+                }
+                let _ = response.send(result);
+            }
+            #[cfg(unix)]
+            Command::PinVerifiedInputs(context, input_ids, response) => {
+                let result =
+                    inputs::pin_inputs(&mut connection, context, input_ids, &mut input_pin_counts);
+                let _ = response.send(result);
+            }
+            #[cfg(unix)]
+            Command::ClaimInputCleanup(requested_time_ms, response) => {
+                let result = inputs::claim_input_cleanup(
+                    &mut connection,
+                    &mut active_uploads,
+                    &mut input_pin_counts,
+                    &mut input_cleanup_cursor,
+                    requested_time_ms,
+                );
+                let _ = response.send(result);
+            }
+            #[cfg(unix)]
+            Command::ConfirmInputCleanup(claim, response) => {
+                let _ = response.send(inputs::confirm_input_cleanup(&mut connection, claim));
+            }
+            #[cfg(unix)]
+            Command::InputFileKnown(input_id, response) => {
+                let _ = response.send(inputs::input_file_known(&connection, &input_id));
+            }
+            #[cfg(unix)]
+            Command::ProbeJobBinding(auth, key, request, reply) => {
+                let _ = reply.send(submission::probe_committed(
+                    &mut connection,
+                    auth,
+                    key,
+                    request,
+                ));
+            }
+            #[cfg(all(test, unix, feature = "test-support"))]
+            Command::JobLimits(limits, reply) => {
+                job_limits = limits;
+                let _ = reply.send(Ok(()));
+            }
+            #[cfg(unix)]
+            Command::AcceptJob(auth, key, request, candidate, reply) => {
+                #[cfg(all(test, feature = "test-support"))]
+                let fail_commit = std::mem::take(&mut fail_next_job_commit);
+                #[cfg(not(all(test, feature = "test-support")))]
+                let fail_commit = false;
+                let _ = reply.send(submission::accept(
+                    &mut connection,
+                    &root,
+                    auth,
+                    key,
+                    request,
+                    *candidate,
+                    submission::AcceptancePolicy {
+                        stopping,
+                        fail_commit,
+                        response_limit: policy.control_response_bytes,
+                        limits: job_limits,
+                    },
+                ));
+            }
+            #[cfg(unix)]
+            Command::ShowJob(auth, id, reply) => {
+                let _ = reply.send(jobs::show(
+                    &connection,
+                    auth,
+                    id,
+                    policy.control_response_bytes,
+                ));
+            }
+            #[cfg(unix)]
+            Command::ListJobs(auth, query, reply) => {
+                let _ = reply.send(jobs::list(
+                    &connection,
+                    auth,
+                    query,
+                    policy.control_response_bytes,
+                ));
+            }
+            #[cfg(all(unix, test, feature = "test-support"))]
+            Command::FailNextJobCommit(reply) => {
+                fail_next_job_commit = true;
+                let _ = reply.send(Ok(()));
+            }
+            #[cfg(unix)]
+            Command::JobAuditBatch(after, reply) => {
+                let _ = reply.send(jobs::audit_batch(&connection, after));
+            }
+            #[cfg(unix)]
+            Command::MarkJobInputFault(id, reply) => {
+                let _ = reply.send(jobs::mark_fault(&connection, id));
             }
             Command::CompleteShutdown(instance_id, response) => {
                 let _ = response.send(complete_shutdown(&mut connection, instance_id));
@@ -703,6 +1153,8 @@ fn initialize_schema_with_hook(
                 enrollment_id TEXT UNIQUE NOT NULL,
                 secret_digest BLOB NOT NULL CHECK(length(secret_digest)=32),
                 client_kind TEXT NOT NULL CHECK(client_kind='cli'),
+                grant_policy TEXT NOT NULL DEFAULT 'core-v1'
+                    CHECK(grant_policy IN ('core-v1','submission-v1')),
                 created_at_ms INTEGER NOT NULL,
                 revoked_at_ms INTEGER
              );
@@ -732,7 +1184,42 @@ fn initialize_schema_with_hook(
                 phase TEXT NOT NULL,
                 created_at_ms INTEGER NOT NULL,
                 updated_at_ms INTEGER NOT NULL
-             );",
+             );
+             CREATE TABLE input_upload_reservations (
+                reservation_id TEXT PRIMARY KEY,
+                input_id TEXT NOT NULL UNIQUE,
+                client_id TEXT NOT NULL REFERENCES credentials(client_id),
+                declared_length INTEGER NOT NULL CHECK(declared_length BETWEEN 1 AND 268435456),
+                media_type TEXT NOT NULL CHECK(length(media_type) BETWEEN 1 AND 128),
+                created_at_ms INTEGER NOT NULL
+             );
+             CREATE INDEX input_upload_reservations_owner
+                ON input_upload_reservations(client_id,created_at_ms);
+             CREATE TABLE captured_inputs (
+                input_id TEXT PRIMARY KEY,
+                client_id TEXT NOT NULL REFERENCES credentials(client_id),
+                media_type TEXT NOT NULL CHECK(length(media_type) BETWEEN 1 AND 128),
+                byte_length INTEGER NOT NULL CHECK(byte_length BETWEEN 1 AND 268435456),
+                sha256 BLOB NOT NULL CHECK(length(sha256)=32),
+                completed_at_ms INTEGER NOT NULL,
+                expires_at_ms INTEGER NOT NULL CHECK(expires_at_ms>completed_at_ms),
+                cleanup_state TEXT NOT NULL DEFAULT 'complete'
+                    CHECK(cleanup_state IN ('complete','deleting'))
+             );
+             CREATE INDEX captured_inputs_owner_expiry
+                ON captured_inputs(client_id,expires_at_ms);
+             CREATE TABLE engine_clock (
+                singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+                last_observed_ms INTEGER NOT NULL CHECK(last_observed_ms>=0)
+             );
+             ",
+        )
+        .map_err(|_| CoreError::StoreUnavailable)?;
+    add_job_tables(&transaction)?;
+    transaction
+        .execute(
+            "INSERT INTO engine_clock(singleton,last_observed_ms) VALUES(1,?1)",
+            [now_ms()?],
         )
         .map_err(|_| CoreError::StoreUnavailable)?;
     transaction
@@ -809,11 +1296,33 @@ struct MigrationStep {
     apply: fn(&Transaction<'_>) -> Result<(), CoreError>,
 }
 
-const CORE_MIGRATIONS: [MigrationStep; 1] = [MigrationStep {
-    from: 1,
-    to: 2,
-    apply: add_internal_shutdown_table,
-}];
+const CORE_MIGRATIONS: [MigrationStep; 5] = [
+    MigrationStep {
+        from: 1,
+        to: 2,
+        apply: add_internal_shutdown_table,
+    },
+    MigrationStep {
+        from: 2,
+        to: 3,
+        apply: add_credential_grant_policy,
+    },
+    MigrationStep {
+        from: 3,
+        to: 4,
+        apply: add_input_capture_tables,
+    },
+    MigrationStep {
+        from: 4,
+        to: 5,
+        apply: add_input_cleanup_state,
+    },
+    MigrationStep {
+        from: 5,
+        to: 6,
+        apply: add_job_tables,
+    },
+];
 
 fn add_internal_shutdown_table(transaction: &Transaction<'_>) -> Result<(), CoreError> {
     transaction
@@ -830,12 +1339,126 @@ fn add_internal_shutdown_table(transaction: &Transaction<'_>) -> Result<(), Core
         .map_err(|_| CoreError::StoreUnavailable)
 }
 
+fn add_job_tables(transaction: &Transaction<'_>) -> Result<(), CoreError> {
+    transaction.execute_batch(
+        "CREATE TABLE jobs (
+            job_id TEXT PRIMARY KEY,
+            client_id TEXT NOT NULL REFERENCES credentials(client_id),
+            acceptance_sequence INTEGER NOT NULL UNIQUE CHECK(acceptance_sequence>0),
+            created_at_ms INTEGER NOT NULL,
+            resolved_json TEXT NOT NULL,
+            storage_status TEXT NOT NULL CHECK(storage_status IN ('verified','storage_integrity_fault'))
+         );
+         CREATE INDEX jobs_creator_sequence ON jobs(client_id,acceptance_sequence);
+         CREATE TABLE submission_bindings (
+            client_id TEXT NOT NULL REFERENCES credentials(client_id),
+            operation TEXT NOT NULL CHECK(operation='jobs.submit'),
+            idempotency_key TEXT NOT NULL,
+            job_id TEXT NOT NULL REFERENCES jobs(job_id),
+            canonicalization_version INTEGER NOT NULL CHECK(canonicalization_version=1),
+            fingerprint BLOB NOT NULL CHECK(length(fingerprint)=32),
+            original_inputs_json TEXT NOT NULL,
+            PRIMARY KEY(client_id,operation,idempotency_key)
+         );
+         CREATE TABLE job_inputs (
+            job_id TEXT NOT NULL REFERENCES jobs(job_id),
+            input_id TEXT NOT NULL REFERENCES captured_inputs(input_id),
+            PRIMARY KEY(job_id,input_id)
+         );
+         CREATE INDEX job_inputs_by_input ON job_inputs(input_id);
+         CREATE TABLE job_acceptance_events (
+            job_id TEXT PRIMARY KEY REFERENCES jobs(job_id),
+            acceptance_sequence INTEGER NOT NULL UNIQUE,
+            snapshot_revision INTEGER NOT NULL CHECK(snapshot_revision=1)
+         );
+         CREATE TABLE job_sequence (
+            singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+            value INTEGER NOT NULL CHECK(value>=0)
+         );
+         INSERT INTO job_sequence(singleton,value) VALUES(1,0);"
+    ).map_err(|_| CoreError::StoreUnavailable)
+}
+
+fn add_credential_grant_policy(transaction: &Transaction<'_>) -> Result<(), CoreError> {
+    transaction
+        .execute_batch(
+            "ALTER TABLE credentials ADD COLUMN grant_policy TEXT NOT NULL DEFAULT 'core-v1'
+             CHECK(grant_policy IN ('core-v1','submission-v1'));",
+        )
+        .map_err(|_| CoreError::StoreUnavailable)
+}
+
+fn add_input_capture_tables(transaction: &Transaction<'_>) -> Result<(), CoreError> {
+    transaction
+        .execute_batch(
+            "CREATE TABLE input_upload_reservations (
+                reservation_id TEXT PRIMARY KEY,
+                input_id TEXT NOT NULL UNIQUE,
+                client_id TEXT NOT NULL REFERENCES credentials(client_id),
+                declared_length INTEGER NOT NULL CHECK(declared_length BETWEEN 1 AND 268435456),
+                media_type TEXT NOT NULL CHECK(length(media_type) BETWEEN 1 AND 128),
+                created_at_ms INTEGER NOT NULL
+             );
+             CREATE INDEX input_upload_reservations_owner
+                ON input_upload_reservations(client_id,created_at_ms);
+             CREATE TABLE captured_inputs (
+                input_id TEXT PRIMARY KEY,
+                client_id TEXT NOT NULL REFERENCES credentials(client_id),
+                media_type TEXT NOT NULL CHECK(length(media_type) BETWEEN 1 AND 128),
+                byte_length INTEGER NOT NULL CHECK(byte_length BETWEEN 1 AND 268435456),
+                sha256 BLOB NOT NULL CHECK(length(sha256)=32),
+                completed_at_ms INTEGER NOT NULL,
+                expires_at_ms INTEGER NOT NULL CHECK(expires_at_ms>completed_at_ms)
+             );
+             CREATE INDEX captured_inputs_owner_expiry
+                ON captured_inputs(client_id,expires_at_ms);",
+        )
+        .map_err(|_| CoreError::StoreUnavailable)
+}
+
+fn add_input_cleanup_state(transaction: &Transaction<'_>) -> Result<(), CoreError> {
+    transaction
+        .execute_batch(
+            "ALTER TABLE captured_inputs ADD COLUMN cleanup_state TEXT NOT NULL DEFAULT 'complete'
+                CHECK(cleanup_state IN ('complete','deleting'));
+             CREATE TABLE IF NOT EXISTS engine_clock (
+                singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+                last_observed_ms INTEGER NOT NULL CHECK(last_observed_ms>=0)
+             );",
+        )
+        .map_err(|_| CoreError::StoreUnavailable)?;
+    let now = now_ms()?;
+    let last_completion: i64 = transaction
+        .query_row(
+            "SELECT coalesce(max(completed_at_ms),0) FROM captured_inputs",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|_| CoreError::StoreUnavailable)?;
+    transaction
+        .execute(
+            "INSERT OR IGNORE INTO engine_clock(singleton,last_observed_ms) VALUES(1,?1)",
+            [now.max(last_completion)],
+        )
+        .map_err(|_| CoreError::StoreUnavailable)?;
+    Ok(())
+}
+
 /// Apply only a private, contiguous migration registry after retaining a
 /// verified online backup. Every step runs with verified durability settings.
 fn run_migrations(
     connection: &mut Connection,
     root: &OwnedRoot,
     migrations: &[MigrationStep],
+) -> Result<(), CoreError> {
+    run_migrations_with_backup_at(connection, root, migrations, retain_verified_backup_at)
+}
+
+fn run_migrations_with_backup_at(
+    connection: &mut Connection,
+    root: &OwnedRoot,
+    migrations: &[MigrationStep],
+    retain_backup: impl FnOnce(&Connection, &OwnedRoot, &RelativePath) -> Result<(), CoreError>,
 ) -> Result<(), CoreError> {
     let mut version: i64 = connection
         .query_row("PRAGMA user_version", [], |row| row.get(0))
@@ -860,7 +1483,8 @@ fn run_migrations(
     }
     // Retain a verified pre-upgrade copy before the single transaction changes
     // schema and user_version together.
-    retain_verified_backup(connection, root)?;
+    let backup_path = recovery_backup_for_version(next_version)?;
+    retain_backup(connection, root, &backup_path)?;
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|_| CoreError::StoreUnavailable)?;
@@ -880,9 +1504,38 @@ fn run_migrations(
     Ok(())
 }
 
-fn retain_verified_backup(connection: &Connection, root: &OwnedRoot) -> Result<(), CoreError> {
-    let existing =
-        root.file_metadata(&RelativePath::parse(RECOVERY_BACKUP).map_err(CoreError::Platform)?);
+fn recovery_backup_for_version(version: i64) -> Result<RelativePath, CoreError> {
+    let path = match version {
+        3 => RECOVERY_BACKUP.to_owned(),
+        4 => RECOVERY_BACKUP_V4.to_owned(),
+        5 => RECOVERY_BACKUP_V5.to_owned(),
+        _ => format!("recovery/metadata-v{version}-upgrade.sqlite3"),
+    };
+    RelativePath::parse(path).map_err(CoreError::Platform)
+}
+
+fn retain_verified_backup_at(
+    connection: &Connection,
+    root: &OwnedRoot,
+    backup_relative: &RelativePath,
+) -> Result<(), CoreError> {
+    retain_verified_backup_at_with_sync(connection, root, backup_relative, |backup_path| {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(backup_path)
+            .and_then(|file| file.sync_all())
+            .map_err(|_| CoreError::StoreUnavailable)
+    })
+}
+
+fn retain_verified_backup_at_with_sync(
+    connection: &Connection,
+    root: &OwnedRoot,
+    backup_relative: &RelativePath,
+    sync_backup: impl FnOnce(&Path) -> Result<(), CoreError>,
+) -> Result<(), CoreError> {
+    let existing = root.file_metadata(backup_relative);
     match existing {
         Ok(_) => return Err(CoreError::StoreIncompatible),
         Err(PlatformError::NotFound) => {}
@@ -902,10 +1555,12 @@ fn retain_verified_backup(connection: &Connection, root: &OwnedRoot) -> Result<(
     {
         return Err(CoreError::StoreIncompatible);
     }
-    let backup_relative = RelativePath::parse(RECOVERY_BACKUP).map_err(CoreError::Platform)?;
-    root.write_atomic(&backup_relative, &[])
+    let backup_bytes = page_count.saturating_mul(page_size) as u64;
+    let available_bytes = root.available_space_bytes().map_err(CoreError::Platform)?;
+    require_recovery_backup_space(available_bytes, backup_bytes)?;
+    root.write_atomic(backup_relative, &[])
         .map_err(CoreError::Platform)?;
-    let backup_path = root.path_for_native_vfs(&backup_relative);
+    let backup_path = root.path_for_native_vfs(backup_relative);
     // The fixed backup file was created through OwnedRoot above; do not let
     // SQLite choose a different URI target or create a missing path itself.
     let mut backup_connection = open_internal_database(&backup_path)?;
@@ -942,13 +1597,17 @@ fn retain_verified_backup(connection: &Connection, root: &OwnedRoot) -> Result<(
         .close()
         .map_err(|_| CoreError::StoreUnavailable)?;
     // Windows FlushFileBuffers requires a writable handle; never truncate it.
-    std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(backup_path)
-        .and_then(|file| file.sync_all())
-        .map_err(|_| CoreError::StoreUnavailable)?;
+    sync_backup(&backup_path)?;
     Ok(())
+}
+
+fn require_recovery_backup_space(available_bytes: u64, backup_bytes: u64) -> Result<(), CoreError> {
+    let required = backup_bytes.saturating_add(RECOVERY_BACKUP_FREE_SPACE_FLOOR_BYTES);
+    if available_bytes < required {
+        Err(CoreError::StoreUnavailable)
+    } else {
+        Ok(())
+    }
 }
 
 fn read_identity(connection: &Connection) -> Result<StoreIdentity, CoreError> {
@@ -998,7 +1657,7 @@ fn enroll(
     }
     let existing: Option<ExistingCredential> = transaction
         .query_row(
-            "SELECT client_id,enrollment_id,secret_digest,created_at_ms,revoked_at_ms
+            "SELECT client_id,enrollment_id,secret_digest,grant_policy,created_at_ms,revoked_at_ms
              FROM credentials WHERE enrollment_id=?1 OR client_id=?2 LIMIT 1",
             rusqlite::params![
                 enrollment.enrollment_id.as_str(),
@@ -1009,8 +1668,9 @@ fn enroll(
                     client_id: row.get(0)?,
                     enrollment_id: row.get(1)?,
                     digest: row.get(2)?,
-                    created_at_ms: row.get(3)?,
-                    revoked_at_ms: row.get(4)?,
+                    grant_policy: row.get(3)?,
+                    created_at_ms: row.get(4)?,
+                    revoked_at_ms: row.get(5)?,
                 })
             },
         )
@@ -1022,6 +1682,8 @@ fn enroll(
         use subtle::ConstantTimeEq as _;
         let exact_identity = existing.client_id == enrollment.client_id.as_str()
             && existing.enrollment_id == enrollment.enrollment_id.as_str();
+        let existing_policy =
+            GrantPolicy::parse(&existing.grant_policy).ok_or(CoreError::InvalidStore)?;
         let exact_digest = existing.digest.len() == 32
             && existing
                 .digest
@@ -1029,14 +1691,13 @@ fn enroll(
                 .ct_eq(enrollment.token_digest.as_bytes().as_slice())
                 .unwrap_u8()
                 == 1;
-        if !exact_identity || !exact_digest {
+        if !exact_identity || !exact_digest || existing_policy != enrollment.grant_policy {
             return Err(CoreError::Conflict);
         }
         if existing.revoked_at_ms.is_some() {
             return Err(CoreError::Unauthorized);
         }
-        let grants = read_grants(&transaction, &enrollment.client_id)?;
-        validate_initial_grants(&grants)?;
+        let grants = read_validated_grants(&transaction, &enrollment.client_id)?;
         let receipt = enrollment_receipt(
             enrollment.installation_id,
             enrollment.client_id,
@@ -1059,17 +1720,18 @@ fn enroll(
     let created_at_ms = now_ms()?;
     transaction
         .execute(
-            "INSERT INTO credentials(client_id,enrollment_id,secret_digest,client_kind,created_at_ms)
-             VALUES(?1,?2,?3,'cli',?4)",
+            "INSERT INTO credentials(client_id,enrollment_id,secret_digest,client_kind,grant_policy,created_at_ms)
+             VALUES(?1,?2,?3,'cli',?4,?5)",
             rusqlite::params![
                 enrollment.client_id.as_str(),
                 enrollment.enrollment_id.as_str(),
                 enrollment.token_digest.as_bytes().as_slice(),
+                enrollment.grant_policy.as_str(),
                 created_at_ms
             ],
         )
         .map_err(|_| CoreError::StoreUnavailable)?;
-    for grant in INITIAL_GRANTS {
+    for grant in enrollment.grant_policy.grants() {
         transaction
             .execute(
                 "INSERT INTO credential_grants(client_id,operation) VALUES(?1,?2)",
@@ -1081,7 +1743,9 @@ fn enroll(
         enrollment.installation_id,
         enrollment.client_id,
         enrollment.enrollment_id,
-        INITIAL_GRANTS
+        enrollment
+            .grant_policy
+            .grants()
             .iter()
             .map(|grant| (*grant).to_owned())
             .collect(),
@@ -1106,17 +1770,18 @@ fn authenticate(
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|_| CoreError::StoreUnavailable)?;
     let identity = read_identity(&transaction)?;
-    let credential: Option<(Vec<u8>, Option<i64>)> = transaction
+    let credential: Option<(Vec<u8>, Option<i64>, String)> = transaction
         .query_row(
-            "SELECT secret_digest,revoked_at_ms FROM credentials WHERE client_id=?1",
+            "SELECT secret_digest,revoked_at_ms,grant_policy FROM credentials WHERE client_id=?1",
             [client_id.as_str()],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()
         .map_err(|_| CoreError::StoreUnavailable)?;
-    let Some((stored_digest, revoked_at_ms)) = credential else {
+    let Some((stored_digest, revoked_at_ms, grant_policy)) = credential else {
         return Err(CoreError::Unauthorized);
     };
+    let grant_policy = GrantPolicy::parse(&grant_policy).ok_or(CoreError::InvalidStore)?;
     if revoked_at_ms.is_some()
         || stored_digest.len() != 32
         || stored_digest
@@ -1128,7 +1793,7 @@ fn authenticate(
         return Err(CoreError::Unauthorized);
     }
     let grants = read_grants(&transaction, &client_id)?;
-    validate_initial_grants(&grants)?;
+    validate_grants_for_policy(grant_policy, &grants)?;
     transaction
         .commit()
         .map_err(|_| CoreError::StoreUnavailable)?;
@@ -1137,6 +1802,34 @@ fn authenticate(
         client_id,
         granted_operations: grants,
     })
+}
+
+#[cfg(unix)]
+fn require_active_grant(
+    connection: &Connection,
+    context: &AuthContext,
+    required: &str,
+) -> Result<(), CoreError> {
+    let identity = read_identity(connection)?;
+    if identity.installation_id != context.installation_id {
+        return Err(CoreError::Unauthorized);
+    }
+    let revoked_at: Option<Option<i64>> = connection
+        .query_row(
+            "SELECT revoked_at_ms FROM credentials WHERE client_id=?1",
+            [context.client_id.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|_| CoreError::StoreUnavailable)?;
+    if !matches!(revoked_at, Some(None)) {
+        return Err(CoreError::Unauthorized);
+    }
+    let grants = read_validated_grants(connection, &context.client_id)?;
+    if !grants.iter().any(|grant| grant == required) {
+        return Err(CoreError::Unauthorized);
+    }
+    Ok(())
 }
 
 fn revoke_self(
@@ -1168,7 +1861,7 @@ fn revoke_self(
     if revoked.is_none() {
         return Err(CoreError::Unauthorized);
     }
-    let grants = read_grants(&transaction, &context.client_id)?;
+    let grants = read_validated_grants(&transaction, &context.client_id)?;
     if !grants.iter().any(|grant| grant == "auth.revoke_self") {
         return Err(CoreError::Unauthorized);
     }
@@ -1213,7 +1906,7 @@ fn request_shutdown(
     {
         return Err(CoreError::Unauthorized);
     }
-    let grants = read_grants(&transaction, &context.client_id)?;
+    let grants = read_validated_grants(&transaction, &context.client_id)?;
     if !grants.iter().any(|grant| grant == "engine.shutdown") {
         return Err(CoreError::Unauthorized);
     }
@@ -1412,7 +2105,7 @@ fn show_operation(
     {
         return Err(CoreError::Unauthorized);
     }
-    let grants = read_grants(&transaction, &context.client_id)?;
+    let grants = read_validated_grants(&transaction, &context.client_id)?;
     if !grants.iter().any(|grant| grant == "operation.show_own") {
         return Err(CoreError::Unauthorized);
     }
@@ -1570,8 +2263,31 @@ fn read_grants(connection: &Connection, client_id: &ClientId) -> Result<Vec<Stri
     Ok(grants)
 }
 
-fn validate_initial_grants(grants: &[String]) -> Result<(), CoreError> {
-    let mut expected = INITIAL_GRANTS.map(str::to_owned);
+fn read_validated_grants(
+    connection: &Connection,
+    client_id: &ClientId,
+) -> Result<Vec<String>, CoreError> {
+    let policy: String = connection
+        .query_row(
+            "SELECT grant_policy FROM credentials WHERE client_id=?1",
+            [client_id.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|_| CoreError::StoreUnavailable)?
+        .ok_or(CoreError::InvalidStore)?;
+    let policy = GrantPolicy::parse(&policy).ok_or(CoreError::InvalidStore)?;
+    let grants = read_grants(connection, client_id)?;
+    validate_grants_for_policy(policy, &grants)?;
+    Ok(grants)
+}
+
+fn validate_grants_for_policy(policy: GrantPolicy, grants: &[String]) -> Result<(), CoreError> {
+    let mut expected = policy
+        .grants()
+        .iter()
+        .map(|grant| (*grant).to_owned())
+        .collect::<Vec<_>>();
     expected.sort();
     if grants == expected {
         Ok(())
@@ -1608,7 +2324,7 @@ fn new_instance_id() -> Result<InstanceId, CoreError> {
     InstanceId::parse(random_id("eng_")?).map_err(|_| CoreError::StoreUnavailable)
 }
 
-fn random_id(prefix: &str) -> Result<String, CoreError> {
+pub(crate) fn random_id(prefix: &str) -> Result<String, CoreError> {
     let mut entropy = [0_u8; 16];
     getrandom::fill(&mut entropy).map_err(|_| CoreError::StoreUnavailable)?;
     let mut value = String::with_capacity(prefix.len() + 32);
@@ -1618,6 +2334,16 @@ fn random_id(prefix: &str) -> Result<String, CoreError> {
         write!(value, "{byte:02x}").map_err(|_| CoreError::StoreUnavailable)?;
     }
     Ok(value)
+}
+
+#[cfg(unix)]
+fn digest_hex(digest: &[u8; 32]) -> String {
+    let mut encoded = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write as _;
+        write!(encoded, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    encoded
 }
 
 fn now_ms() -> Result<i64, CoreError> {
@@ -1660,15 +2386,37 @@ mod tests {
         let path = root.path_for_native_vfs(&RelativePath::parse(DATABASE_NAME).unwrap());
         let connection = Connection::open(path).unwrap();
         connection
-            .execute_batch("DROP TABLE internal_shutdowns; PRAGMA user_version=1;")
+            .execute_batch("DROP TABLE job_inputs; DROP TABLE submission_bindings; DROP TABLE job_acceptance_events; DROP TABLE jobs; DROP TABLE job_sequence; DROP TABLE engine_clock; DROP TABLE captured_inputs; DROP TABLE input_upload_reservations; DROP TABLE internal_shutdowns; ALTER TABLE credentials DROP COLUMN grant_policy; PRAGMA user_version=1;")
             .unwrap();
         drop(connection);
         let _lease = AuthorityLease::acquire(&root).unwrap();
-        let registry = [MigrationStep {
-            from: 1,
-            to: 2,
-            apply: checked_migration,
-        }];
+        let registry = [
+            MigrationStep {
+                from: 1,
+                to: 2,
+                apply: checked_migration,
+            },
+            MigrationStep {
+                from: 2,
+                to: 3,
+                apply: add_credential_grant_policy,
+            },
+            MigrationStep {
+                from: 3,
+                to: 4,
+                apply: add_input_capture_tables,
+            },
+            MigrationStep {
+                from: 4,
+                to: 5,
+                apply: add_input_cleanup_state,
+            },
+            MigrationStep {
+                from: 5,
+                to: 6,
+                apply: add_job_tables,
+            },
+        ];
         assert!(open_database_with_migrations(&root, &CorePolicy::default(), &registry).is_ok());
     }
 
@@ -1874,8 +2622,8 @@ mod tests {
             .expect("migration table count");
         assert_eq!(temporary_table_count, 0);
 
-        let backup_path = path.join(RECOVERY_BACKUP);
-        let backup_name = RelativePath::parse(RECOVERY_BACKUP).expect("backup relative path");
+        let backup_name = recovery_backup_for_version(SCHEMA_VERSION + 2).unwrap();
+        let backup_path = root.path_for_native_vfs(&backup_name);
         assert!(
             root.file_metadata(&backup_name)
                 .expect("protected backup")
@@ -1915,7 +2663,10 @@ mod tests {
         );
         connection
             .execute_batch(
-                "DROP TABLE internal_shutdowns;
+                "DROP TABLE job_inputs; DROP TABLE submission_bindings; DROP TABLE job_acceptance_events; DROP TABLE jobs; DROP TABLE job_sequence; DROP TABLE engine_clock; DROP TABLE captured_inputs;
+                 DROP TABLE input_upload_reservations;
+                 DROP TABLE internal_shutdowns;
+                 ALTER TABLE credentials DROP COLUMN grant_policy;
                  PRAGMA user_version=1;",
             )
             .expect("shape schema-v1 fixture");
@@ -1946,7 +2697,11 @@ mod tests {
             )
             .expect("internal shutdown table");
         assert_eq!(table_count, 1);
-        let backup = root_path.join(RECOVERY_BACKUP);
+        let backup = root_path.join(
+            recovery_backup_for_version(SCHEMA_VERSION)
+                .unwrap()
+                .as_str(),
+        );
         let backup = Connection::open(backup).expect("retained v1 recovery backup");
         let backup_version: i64 = backup
             .query_row("PRAGMA user_version", [], |row| row.get(0))
@@ -2332,3 +3087,13 @@ mod tests {
         assert_eq!(integrity, "ok");
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "store/input_cleanup_tests.rs"]
+mod input_cleanup_tests;
+#[cfg(test)]
+#[path = "store/submission_tests.rs"]
+mod submission_tests;
+
+#[cfg(all(test, unix))]
+mod job_tests;

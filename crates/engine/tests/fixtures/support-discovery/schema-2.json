@@ -1,0 +1,1 @@
+{"schema_version":"1.0","id":"test.count","version":"1.0","required_features":[],"schema":{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"part_count":{"type":"integer","minimum":1,"maximum":32}},"required":["part_count"],"additionalProperties":false}}

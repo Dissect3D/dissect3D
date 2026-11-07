@@ -2,6 +2,8 @@
 //! the connection layer; handlers return only bounded public data.
 
 pub(crate) mod discovery;
+pub(crate) mod jobs;
+pub(crate) mod submission;
 
 use crate::args::{AuthCommand, EngineCommand};
 use crate::config::ConfigFile;
@@ -165,10 +167,46 @@ pub(crate) fn auth(
 ) -> Result<serde_json::Value, CommandError> {
     let root = data_root(config, config_path).ok_or_else(|| match command {
         AuthCommand::Status => read_unconfigured("unverified")(),
-        AuthCommand::Setup | AuthCommand::Revoke => unconfigured(),
+        AuthCommand::Setup { .. } | AuthCommand::Revoke => unconfigured(),
     })?;
     let profile = Profile::open(config_path).map_err(CommandError::connection)?;
     let _profile_control = profile.lock_control().map_err(CommandError::connection)?;
+    if matches!(
+        command,
+        AuthCommand::Setup {
+            submission_access: true
+        }
+    ) {
+        if config
+            .explicit_credential_reference()
+            .map_err(|_| invalid_error())?
+            .is_some()
+        {
+            return Err(CommandError {
+                category: "usage_error",
+                message: "Clear the explicit credential reference before enrollment setup",
+                exit_code: 2,
+                context: None,
+            });
+        }
+        let pending_replay = profile
+            .load()
+            .map_err(CommandError::connection)?
+            .is_some_and(|credential| {
+                credential.state == "pending" && credential.submission_access
+            })
+            && profile
+                .load_pending_stop()
+                .map_err(CommandError::connection)?
+                .is_none();
+        if !pending_replay
+            && profile
+                .has_saved_records()
+                .map_err(CommandError::connection)?
+        {
+            return Err(submission_access_requires_new_profile());
+        }
+    }
     let engine = match profile.connection(&root, client_limits.connect_timeout, client_limits) {
         Ok(engine) => engine,
         Err(ConnectionError::Unavailable) if matches!(&command, AuthCommand::Status) => {
@@ -177,7 +215,17 @@ pub(crate) fn auth(
         Err(error) => return Err(CommandError::connection(error)),
     };
     match command {
-        AuthCommand::Setup => {
+        AuthCommand::Setup { submission_access } => {
+            if submission_access
+                && profile
+                    .load()
+                    .map_err(CommandError::connection)?
+                    .is_some_and(|credential| {
+                        credential.installation_id != engine.discovery.installation_id
+                    })
+            {
+                return Err(submission_access_requires_new_profile());
+            }
             if config
                 .explicit_credential_reference()
                 .map_err(|_| invalid_error())?
@@ -190,7 +238,7 @@ pub(crate) fn auth(
                     context: None,
                 });
             }
-            setup(&profile, &engine)
+            setup(&profile, &engine, submission_access)
         }
         AuthCommand::Status => {
             let credential = profile
@@ -348,6 +396,7 @@ fn start(
 fn setup(
     profile: &Profile,
     engine: &crate::connection::DiscoveredEngine,
+    submission_access_requested: bool,
 ) -> Result<serde_json::Value, CommandError> {
     let mut credential = match profile.load().map_err(CommandError::connection)? {
         Some(mut existing)
@@ -376,16 +425,27 @@ fn setup(
                 Err(_) => return Err(transport_error()),
                 _ => return Err(unauthorized()),
             }
-            new_credential(engine)?
+            new_credential(engine, false)?
         }
-        _ => new_credential(engine)?,
+        _ => new_credential(engine, submission_access_requested)?,
     };
+    if credential.submission_access {
+        // `connection` already completed protected discovery, process matching,
+        // and the old native probe. This separate same-owner exchange gates
+        // both first enrollment and replay of a pending opt-in record.
+        engine
+            .supports_submission_access()
+            .map_err(CommandError::connection)?;
+    }
     profile
         .save(&credential)
         .map_err(CommandError::connection)?;
-    let receipt = engine
-        .enroll(&credential)
-        .map_err(|error| enrollment_error(error, &credential))?;
+    let receipt = if credential.submission_access {
+        engine.enroll_submission(&credential)
+    } else {
+        engine.enroll(&credential)
+    }
+    .map_err(|error| enrollment_error(error, &credential))?;
     credential.state = "active".to_owned();
     profile
         .save(&credential)
@@ -694,6 +754,7 @@ fn new_stop_key() -> Result<IdempotencyKey, CommandError> {
 
 fn new_credential(
     engine: &crate::connection::DiscoveredEngine,
+    submission_access: bool,
 ) -> Result<ProfileCredential, CommandError> {
     let installation_id = engine.discovery.installation_id.clone();
     let instance_id = engine.discovery.instance_id.clone();
@@ -705,6 +766,7 @@ fn new_credential(
         enrollment_id,
         secret_hex,
         state: "pending".to_owned(),
+        submission_access,
     })
 }
 
@@ -795,6 +857,14 @@ fn unconfigured() -> CommandError {
     CommandError {
         category: "engine_unavailable",
         message: "Configure an absolute engine data root and engine binary for this profile",
+        exit_code: 2,
+        context: None,
+    }
+}
+fn submission_access_requires_new_profile() -> CommandError {
+    CommandError {
+        category: "usage_error",
+        message: "Submission access can be requested only for a new empty profile",
         exit_code: 2,
         context: None,
     }
@@ -957,6 +1027,105 @@ mod tests {
     use super::*;
 
     #[test]
+    fn repeated_opt_in_reaches_connection_without_replacing_its_pending_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("config.json");
+        let config: ConfigFile = serde_json::from_value(serde_json::json!({
+            "connection": {"data_root": directory.path().join("missing-engine")}
+        }))
+        .unwrap();
+        let profile = Profile::open(&config_path).unwrap();
+        let credential = ProfileCredential {
+            installation_id: dissect3d_api::InstallationId::parse(
+                "ins_0123456789abcdef0123456789abcdef",
+            )
+            .unwrap(),
+            instance_id: dissect3d_api::InstanceId::parse("eng_0123456789abcdef0123456789abcdef")
+                .unwrap(),
+            client_id: ClientId::parse("cli_0123456789abcdef0123456789abcdef").unwrap(),
+            enrollment_id: EnrollmentId::parse("enr_0123456789abcdef0123456789abcdef").unwrap(),
+            secret_hex: "ab".repeat(32),
+            state: "pending".to_owned(),
+            submission_access: true,
+        };
+        profile.save(&credential).unwrap();
+        let error = auth(
+            AuthCommand::Setup {
+                submission_access: true,
+            },
+            &config,
+            &config_path,
+            ClientLimits::default(),
+        )
+        .unwrap_err();
+        assert_ne!(
+            error.category, "usage_error",
+            "an exact pending replay is not a privilege upgrade"
+        );
+        let stored = profile.load().unwrap().unwrap();
+        assert_eq!(stored.client_id, credential.client_id);
+        assert_eq!(stored.enrollment_id, credential.enrollment_id);
+        assert_eq!(stored.secret_hex, credential.secret_hex);
+        assert_eq!(stored.state, "pending");
+        assert!(stored.submission_access);
+    }
+
+    #[test]
+    fn opt_in_enrollment_rejects_existing_profiles_before_engine_connection() {
+        for state in ["active", "pending"] {
+            let directory = tempfile::tempdir().expect("temporary config root");
+            let config_path = directory.path().join("config.json");
+            let missing_engine_root = directory.path().join("engine-is-not-running");
+            let config: ConfigFile = serde_json::from_value(serde_json::json!({
+                "connection": {
+                    "data_root": missing_engine_root.to_string_lossy()
+                }
+            }))
+            .expect("isolated connection config");
+            let profile = Profile::open(&config_path).expect("profile root");
+            let credential = ProfileCredential {
+                installation_id: dissect3d_api::InstallationId::parse(
+                    "ins_0123456789abcdef0123456789abcdef",
+                )
+                .unwrap(),
+                instance_id: dissect3d_api::InstanceId::parse(
+                    "eng_0123456789abcdef0123456789abcdef",
+                )
+                .unwrap(),
+                client_id: ClientId::parse("cli_0123456789abcdef0123456789abcdef").unwrap(),
+                enrollment_id: EnrollmentId::parse("enr_0123456789abcdef0123456789abcdef").unwrap(),
+                secret_hex: "ab".repeat(32),
+                state: state.to_owned(),
+                submission_access: false,
+            };
+            profile.save(&credential).expect("existing profile");
+
+            let error = auth(
+                AuthCommand::Setup {
+                    submission_access: true,
+                },
+                &config,
+                &config_path,
+                ClientLimits::default(),
+            )
+            .expect_err("must reject before probing the absent engine");
+            assert_eq!(error.category, "usage_error");
+            assert_eq!(error.exit_code, 2);
+
+            let stored = Profile::open(&config_path)
+                .expect("profile root remains available")
+                .load()
+                .expect("existing profile remains valid")
+                .expect("profile remains present");
+            assert_eq!(stored.client_id, credential.client_id);
+            assert_eq!(stored.enrollment_id, credential.enrollment_id);
+            assert_eq!(stored.secret_hex, credential.secret_hex);
+            assert_eq!(stored.state, state);
+            assert!(!stored.submission_access);
+        }
+    }
+
+    #[test]
     fn ambiguous_enrollment_is_uncertain_and_keeps_recovery_identity() {
         let credential = ProfileCredential {
             installation_id: dissect3d_api::InstallationId::parse(
@@ -969,6 +1138,7 @@ mod tests {
             enrollment_id: EnrollmentId::parse("enr_0123456789abcdef0123456789abcdef").unwrap(),
             secret_hex: "ab".repeat(32),
             state: "pending".to_owned(),
+            submission_access: false,
         };
         for failure in [
             ConnectionError::Unavailable,

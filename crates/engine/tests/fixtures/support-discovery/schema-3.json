@@ -1,0 +1,1 @@
+{"schema_version":"1.0","id":"test.parameters","version":"1.0","required_features":[],"schema":{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"hold_before_candidate":{"type":"boolean","default":false},"fail_execution":{"type":"boolean","default":false}},"required":[],"additionalProperties":false}}

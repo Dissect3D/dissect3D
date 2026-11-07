@@ -1,0 +1,75 @@
+{
+  "api_version": "1.0",
+  "accepted": true,
+  "job_id": "job_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "replayed": false,
+  "acceptance_sequence": 1,
+  "snapshot_revision": 1,
+  "resolved": {
+    "selection": {
+      "support_id": "mdl_1111111111111111111111111111111111111111111111111111111111111111",
+      "support_ref": "test.mesh-copy@fixture-r1",
+      "support_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "code": {
+        "upstream_repository": "urn:dissect3d:test:mesh-copy",
+        "upstream_revision": "fixture-r1",
+        "executed_repository": "urn:dissect3d:test:mesh-copy",
+        "executed_revision": "fixture-r1",
+        "patches": [],
+        "build_provenance": "illustrative-only"
+      },
+      "adapter": {
+        "id": "dissect3d.test.mesh-copy",
+        "revision": "fixture-r1",
+        "sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+        "interface_version": "1.0",
+        "required_worker_features": []
+      },
+      "assets": [],
+      "task_binding_id": "tsk_4444444444444444444444444444444444444444444444444444444444444444",
+      "task": {
+        "id": "dissect3d.test.mesh-copy",
+        "version": "1.0"
+      },
+      "schemas": [
+        {
+          "id": "dissect3d.test.mesh-copy.parameters",
+          "version": "1.0",
+          "sha256": "5555555555555555555555555555555555555555555555555555555555555555"
+        }
+      ],
+      "runtime_id": "rtp_6666666666666666666666666666666666666666666666666666666666666666",
+      "runtime_ref": "test.cpu@fixture-r1",
+      "runtime_sha256": "7777777777777777777777777777777777777777777777777777777777777777",
+      "variant": "fixture"
+    },
+    "effective_parameters": {
+      "hold_before_candidate": false,
+      "fail_execution": false
+    },
+    "inputs": {
+      "mesh": [
+        {
+          "input_id": "inp_11111111111111111111111111111111",
+          "media_type": "application/octet-stream",
+          "byte_length": 64,
+          "sha256": "a5ef04f55cfb16ec7d18c6e0d264b2237d9e09a529cb69e0174e594f8025eec8"
+        }
+      ]
+    },
+    "readiness": {
+      "check_id": "fixture-check-r1",
+      "fingerprint": "8888888888888888888888888888888888888888888888888888888888888888",
+      "runtime_realization": "test.cpu@fixture-r1:local",
+      "integrity_sha256": "9999999999999999999999999999999999999999999999999999999999999999"
+    },
+    "validation": [
+      {
+        "validator_id": "dissect3d.test.validator",
+        "revision": "1",
+        "status": "passed"
+      }
+    ],
+    "evidence_scope": "controlled-test-only"
+  }
+}

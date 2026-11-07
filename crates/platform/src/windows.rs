@@ -30,7 +30,7 @@ use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, CreateDirectoryW, CreateFileW, DeleteFileW, FILE_ALL_ACCESS,
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO,
     FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
-    FILE_SHARE_READ, FILE_SHARE_WRITE, FileAttributeTagInfo, GetDriveTypeW,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, FileAttributeTagInfo, GetDiskFreeSpaceExW, GetDriveTypeW,
     GetFileInformationByHandle, GetFileInformationByHandleEx, GetVolumeInformationW,
     MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW, OPEN_EXISTING,
 };
@@ -428,6 +428,11 @@ fn open_directory(path: &Path, create: bool) -> Result<File, PlatformError> {
             {
                 return Err(map_io(error));
             }
+        } else {
+            // A newly created root or ancestor must be durably reachable too.
+            // Do not continue down a newly created chain after a failed barrier.
+            sync_input_directory(path)?;
+            sync_external_directory(path.parent().ok_or(PlatformError::InvalidPath)?)?;
         }
     }
 
@@ -649,6 +654,25 @@ pub(crate) fn validate_filesystem(path: &Path) -> Result<(), PlatformError> {
     }
 }
 
+pub(crate) fn available_space_bytes(root: &OwnedRoot) -> Result<u64, PlatformError> {
+    let path = wide_path(root.path());
+    let mut available = 0_u64;
+    // SAFETY: `path` is a live NUL-terminated UTF-16 path and `available` is a
+    // writable output. The other optional outputs are not needed.
+    if unsafe {
+        GetDiskFreeSpaceExW(
+            path.as_ptr(),
+            &mut available,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    } == 0
+    {
+        return Err(PlatformError::Io);
+    }
+    Ok(available)
+}
+
 pub(crate) fn file_metadata(
     root: &OwnedRoot,
     path: &RelativePath,
@@ -751,6 +775,111 @@ pub(crate) fn write_atomic(
         let _ = fs::remove_file(&temporary);
     }
     result
+}
+
+pub(crate) fn begin_input(root: &OwnedRoot, path: &RelativePath) -> Result<File, PlatformError> {
+    // Recheck the root's own namespace before authorizing content below it.
+    sync_external_directory(root.path().parent().ok_or(PlatformError::InvalidPath)?)?;
+    let (parent, name) = open_relative_parent(root, path, true)?;
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(parent.join(name))
+        .map_err(map_io)?;
+    validate_file(&file)?;
+    Ok(file)
+}
+
+pub(crate) fn open_input(root: &OwnedRoot, path: &RelativePath) -> Result<File, PlatformError> {
+    open_relative_file(root, path, false, false, false)
+}
+
+pub(crate) fn finish_input(
+    root: &OwnedRoot,
+    file: File,
+    staged: &RelativePath,
+    final_name: &RelativePath,
+    checkpoint: &mut impl FnMut(crate::input_files::PublicationStep) -> Result<(), PlatformError>,
+) -> Result<(), PlatformError> {
+    use crate::input_files::PublicationStep;
+    validate_file(&file)?;
+    checkpoint(PublicationStep::DataSync)?;
+    file.sync_all().map_err(|_| PlatformError::Io)?;
+    let (from, staged_name) = open_relative_parent(root, staged, false)?;
+    let (to, name) = open_relative_parent(root, final_name, true)?;
+    let from_handles = open_directory_chain(&from, false)?;
+    let to_handles = open_directory_chain(&to, false)?;
+    // Retain every checked directory until publication and its barriers finish.
+    for directory in from_handles.iter().chain(&to_handles) {
+        validate_directory_type(directory)?;
+    }
+    drop(file);
+    let from = wide_path(&from.join(staged_name));
+    let to = wide_path(&to.join(name));
+    checkpoint(PublicationStep::Publish)?;
+    // No REPLACE_EXISTING or COPY_ALLOWED: collision and cross-volume moves fail.
+    // SAFETY: both checked, protected paths are NUL terminated and live.
+    if unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), MOVEFILE_WRITE_THROUGH) } == 0 {
+        return Err(map_io(std::io::Error::last_os_error()));
+    }
+    let published = open_relative_file(root, final_name, false, true, false)?;
+    published.sync_all().map_err(|_| PlatformError::Io)?;
+    checkpoint(PublicationStep::NamespaceSync)?;
+    sync_input_ancestors(root, final_name)?;
+    sync_input_ancestors(root, staged)?;
+    checkpoint(PublicationStep::FinalSync)
+}
+
+/// Fail closed if the native filesystem cannot flush directory namespace state.
+/// WRITE_THROUGH rename alone does not establish newly created ancestor barriers.
+fn sync_input_ancestors(root: &OwnedRoot, path: &RelativePath) -> Result<(), PlatformError> {
+    let mut current = root.path().to_path_buf();
+    sync_input_directory(&current)?;
+    let components = path.components().collect::<Vec<_>>();
+    for component in &components[..components.len() - 1] {
+        current.push(component);
+        sync_input_directory(&current)?;
+    }
+    Ok(())
+}
+
+fn sync_input_directory(path: &Path) -> Result<(), PlatformError> {
+    sync_directory_namespace(path, true)
+}
+
+fn sync_external_directory(path: &Path) -> Result<(), PlatformError> {
+    // Flushing an external parent grants no private-file authority. Preserve
+    // OwnedRoot's existing ancestor policy, including ordinary inherited ACLs.
+    sync_directory_namespace(path, false)
+}
+
+fn sync_directory_namespace(path: &Path, private: bool) -> Result<(), PlatformError> {
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .map_err(map_io)?;
+    if private {
+        validate_directory(&file, false)?;
+    } else {
+        validate_directory_type(&file)?;
+    }
+    file.sync_all().map_err(|_| PlatformError::Io)
+}
+
+pub(crate) fn remove_input_durable(
+    root: &OwnedRoot,
+    path: &RelativePath,
+) -> Result<(), PlatformError> {
+    match remove_file(root, path) {
+        Ok(()) | Err(PlatformError::NotFound) => {}
+        Err(error) => return Err(error),
+    }
+    sync_input_ancestors(root, path)
 }
 
 pub(crate) fn open_lease_file(root: &OwnedRoot) -> Result<File, PlatformError> {

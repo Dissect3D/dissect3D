@@ -28,6 +28,8 @@ pub enum StartupError {
     Discovery,
     Runtime,
     ShutdownDeadline,
+    #[cfg(feature = "test-support")]
+    Fixture(crate::submission_fixture::FixtureError),
 }
 
 impl StartupError {
@@ -42,6 +44,8 @@ impl StartupError {
             Self::Discovery => "discovery_unavailable",
             Self::Runtime => "runtime_unavailable",
             Self::ShutdownDeadline => "shutdown_unconfirmed",
+            #[cfg(feature = "test-support")]
+            Self::Fixture(error) => error.safe_code(),
         }
     }
 }
@@ -68,6 +72,44 @@ pub async fn run_engine(data_root: &Path) -> Result<(), StartupError> {
 pub async fn run_discovery_test_engine(data_root: &Path) -> Result<(), StartupError> {
     let catalog = crate::support::test_support::catalog().map_err(|_| StartupError::Discovery)?;
     run_engine_with_catalog(data_root, catalog).await
+}
+
+/// Isolated host composition backed by an explicitly prepared CPU fixture.
+#[cfg(feature = "test-support")]
+pub async fn run_submission_test_engine(data_root: &Path) -> Result<(), StartupError> {
+    dissect3d_platform::ensure_independent_engine().map_err(|_| StartupError::Runtime)?;
+    if !data_root.is_absolute() {
+        return Err(StartupError::Root);
+    }
+    let root = if data_root.exists() {
+        OwnedRoot::open(data_root, RootPurpose::EngineData)
+    } else {
+        OwnedRoot::create_private(data_root, RootPurpose::EngineData)
+    }
+    .map_err(|_| StartupError::Root)?;
+    let diagnostic_path = data_root.to_path_buf();
+    let result = async {
+        let lease = AuthorityLease::acquire(&root).map_err(|_| StartupError::Authority)?;
+        let probe =
+            crate::submission_fixture::fixture_probe_sibling().map_err(StartupError::Fixture)?;
+        let fixture = crate::submission_fixture::load_prepared_fixture(&root, &probe)
+            .map_err(StartupError::Fixture)?;
+        run_engine_with_lease(
+            data_root,
+            root,
+            lease,
+            Arc::new(fixture.catalog),
+            Some(fixture.readiness),
+        )
+        .await
+    }
+    .await;
+    if let Err(error) = result
+        && let Ok(root) = OwnedRoot::open(&diagnostic_path, RootPurpose::EngineData)
+    {
+        crate::diagnostics::record_startup_failure(&root, error);
+    }
+    result
 }
 
 async fn run_engine_with_catalog(
@@ -99,13 +141,28 @@ async fn run_engine_with_root(
     root: OwnedRoot,
     catalog: Arc<crate::support::Catalog>,
 ) -> Result<(), StartupError> {
+    let lease = AuthorityLease::acquire(&root).map_err(|_| StartupError::Authority)?;
+    #[cfg(feature = "test-support")]
+    return run_engine_with_lease(data_root, root, lease, catalog, None).await;
+    #[cfg(not(feature = "test-support"))]
+    run_engine_with_lease(data_root, root, lease, catalog).await
+}
+
+pub(crate) async fn run_engine_with_lease(
+    data_root: &Path,
+    root: OwnedRoot,
+    lease: AuthorityLease,
+    catalog: Arc<crate::support::Catalog>,
+    #[cfg(feature = "test-support")] prepared_readiness: Option<
+        crate::submission_fixture::PreparedReadiness,
+    >,
+) -> Result<(), StartupError> {
     // Register before publishing readiness so an immediate interrupt is queued.
     #[cfg(unix)]
     let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
         .map_err(|_| StartupError::Runtime)?;
     #[cfg(windows)]
     let mut interrupt = tokio::signal::windows::ctrl_c().map_err(|_| StartupError::Runtime)?;
-    let lease = AuthorityLease::acquire(&root).map_err(|_| StartupError::Authority)?;
     let (shutdown_intent, mut shutdown_requested) = mpsc::unbounded_channel();
     let store = Arc::new(
         Store::open_with_shutdown(root, lease, &CorePolicy::default(), Some(shutdown_intent))
@@ -117,6 +174,30 @@ async fn run_engine_with_root(
     let bootstrap = BootstrapListener::bind(&service_root, identity.instance_id.as_str())
         .map_err(|_| StartupError::Bootstrap)?;
     let bootstrap_endpoint = discovery_bootstrap(bootstrap.endpoint())?;
+    #[cfg(feature = "test-support")]
+    let server = match prepared_readiness {
+        Some(readiness) => {
+            HttpServer::bind_with_prepared_catalog(
+                &service_root,
+                store.clone(),
+                CorePolicy::default(),
+                catalog,
+                readiness,
+            )
+            .await
+        }
+        None => {
+            HttpServer::bind_with_catalog(
+                &service_root,
+                store.clone(),
+                CorePolicy::default(),
+                catalog,
+            )
+            .await
+        }
+    }
+    .map_err(|_| StartupError::Https)?;
+    #[cfg(not(feature = "test-support"))]
     let server =
         HttpServer::bind_with_catalog(&service_root, store.clone(), CorePolicy::default(), catalog)
             .await

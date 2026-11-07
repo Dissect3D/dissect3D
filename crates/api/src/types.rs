@@ -107,6 +107,19 @@ pub struct EngineInfo {
     /// Optional read-only catalog capability, ignored by older core clients.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub discovery: Option<crate::DiscoveryCapability>,
+    /// Optional queued-submission capability, absent on older or inactive engines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub submission: Option<SubmissionCapability>,
+}
+
+/// Versioned, optional Stage 3 capability advertised only by an active composition.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubmissionCapability {
+    pub version: String,
+    pub dispatch_enabled: bool,
+    pub operations: Vec<String>,
+    pub limits: BTreeMap<String, u64>,
+    pub limits_source: String,
 }
 
 /// Service lifecycle state exposed by engine inspection.

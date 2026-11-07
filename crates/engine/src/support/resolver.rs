@@ -1,4 +1,4 @@
-//! Exact immutable selection resolution for future admission and submission paths.
+//! Exact immutable selection resolution for admission and submission paths.
 
 use super::{
     AdapterIdentity, AssetIdentity, Catalog, CodeIdentity, DiscoveryError, PatchIdentity,
@@ -7,7 +7,7 @@ use super::{
 use serde_json::Value;
 
 #[cfg_attr(
-    not(test),
+    all(not(unix), not(test), not(feature = "test-support")),
     expect(
         dead_code,
         reason = "This exact immutable handoff is implemented for later job admission."

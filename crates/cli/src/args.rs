@@ -3,7 +3,7 @@
 //! Keeping this parser limited to implemented local commands makes unsupported
 //! service actions fail at the CLI boundary instead of appearing accepted.
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -67,6 +67,70 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: TasksCommand,
     },
+    /// Submit and inspect durable queued work.
+    Jobs {
+        #[command(subcommand)]
+        command: JobsCommand,
+    },
+    /// Submit a durable job without waiting for execution.
+    Run(RunArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct RunArgs {
+    /// Submit the job and return its durable job ID.
+    #[arg(long)]
+    pub(crate) detach: bool,
+    #[command(flatten)]
+    pub(crate) definition: JobDefinitionArgs,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct JobDefinitionArgs {
+    /// Read the complete local job definition from a JSON file.
+    #[arg(long, conflicts_with_all = ["model", "task", "task_version", "runtime", "variant", "input", "parameters_json"])]
+    pub(crate) request: Option<std::path::PathBuf>,
+    /// Select a support reference for the job.
+    #[arg(long, requires = "input")]
+    pub(crate) model: Option<String>,
+    /// Select a task ID; pair with --task-version.
+    #[arg(long, requires = "task_version", requires = "model")]
+    pub(crate) task: Option<String>,
+    /// Select the task version.
+    #[arg(long = "task-version", requires = "task", requires = "model")]
+    pub(crate) task_version: Option<String>,
+    /// Select a runtime profile.
+    #[arg(long, requires = "model")]
+    pub(crate) runtime: Option<String>,
+    /// Select a declared variant.
+    #[arg(long, requires = "model")]
+    pub(crate) variant: Option<String>,
+    /// Capture an input as ROLE=PATH; may be repeated.
+    #[arg(long = "input", value_name = "ROLE=PATH", requires = "model")]
+    pub(crate) input: Vec<String>,
+    /// Supply request parameters as a JSON object.
+    #[arg(long = "parameters-json", value_name = "OBJECT", requires = "model")]
+    pub(crate) parameters_json: Option<String>,
+    /// Use this stable key to recover the same submission.
+    #[arg(long = "idempotency-key", value_name = "KEY")]
+    pub(crate) idempotency_key: Option<String>,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum JobsCommand {
+    /// Submit one durable job definition.
+    Submit(JobDefinitionArgs),
+    /// Recover the same request and key; the first attempt may already have been accepted.
+    Recover { sub_id: String },
+    /// List this credential's accepted jobs.
+    List {
+        #[arg(long)]
+        limit: Option<u8>,
+        #[arg(long)]
+        cursor: Option<String>,
+    },
+    /// Inspect one accepted job.
+    Show { job_id: String },
 }
 
 #[derive(Debug, Subcommand)]
@@ -152,7 +216,11 @@ pub(crate) enum EngineCommand {
 #[derive(Debug, Subcommand)]
 pub(crate) enum AuthCommand {
     /// Enroll this profile with the selected engine.
-    Setup,
+    Setup {
+        /// Request the four queued-submission grants for a new empty profile.
+        #[arg(long)]
+        submission_access: bool,
+    },
     /// Read this profile's authentication status.
     Status,
     /// Revoke this profile's own credential.

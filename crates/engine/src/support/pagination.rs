@@ -554,7 +554,7 @@ mod tests {
             last_id: "mdl_6b32152ee6058b9b0babf6204080f368ce616aeffe1218012e780fffb44b0629".into(),
         };
         let vectors: Value = serde_json::from_slice(include_bytes!(
-            "../../../../patompong-docs/tests/support-discovery/fixtures/vectors.json"
+            "../../tests/fixtures/support-discovery/vectors.json"
         ))
         .unwrap();
         let encoded = encode_cursor(state, DiscoveryLimits::default()).unwrap();

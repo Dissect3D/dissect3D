@@ -118,7 +118,7 @@ pub(crate) struct ModelRecord {
     pub(crate) id: String,
     pub(crate) support_ref: String,
     #[cfg_attr(
-        not(test),
+        all(not(unix), not(test), not(feature = "test-support")),
         expect(
             dead_code,
             reason = "Retained for exact selection identity capture when admission is implemented."
@@ -140,7 +140,7 @@ pub(crate) struct RuntimeRecord {
     pub(crate) id: String,
     pub(crate) runtime_ref: String,
     #[cfg_attr(
-        not(test),
+        all(not(unix), not(test), not(feature = "test-support")),
         expect(
             dead_code,
             reason = "Retained for exact selection identity capture when admission is implemented."
@@ -191,7 +191,7 @@ pub(crate) struct Selection {
 
 /// Exact code provenance bound by one support release.
 #[cfg_attr(
-    not(test),
+    all(not(unix), not(test), not(feature = "test-support")),
     expect(dead_code, reason = "Consumed by future durable selection capture.")
 )]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -205,7 +205,7 @@ pub(crate) struct CodeIdentity {
 }
 
 #[cfg_attr(
-    not(test),
+    all(not(unix), not(test), not(feature = "test-support")),
     expect(dead_code, reason = "Consumed by future durable selection capture.")
 )]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -216,7 +216,7 @@ pub(crate) struct PatchIdentity {
 
 /// Adapter identity and its declared worker interface.
 #[cfg_attr(
-    not(test),
+    all(not(unix), not(test), not(feature = "test-support")),
     expect(dead_code, reason = "Consumed by future durable selection capture.")
 )]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -230,7 +230,7 @@ pub(crate) struct AdapterIdentity {
 
 /// Exact model asset declaration, including provenance and rights binding.
 #[cfg_attr(
-    not(test),
+    all(not(unix), not(test), not(feature = "test-support")),
     expect(dead_code, reason = "Consumed by future durable selection capture.")
 )]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -247,7 +247,7 @@ pub(crate) struct AssetIdentity {
 
 /// Exact package-local schema identity attached to one task binding.
 #[cfg_attr(
-    not(test),
+    all(not(unix), not(test), not(feature = "test-support")),
     expect(dead_code, reason = "Consumed by future durable selection capture.")
 )]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -259,7 +259,7 @@ pub(crate) struct SchemaIdentity {
 
 /// Owned exact identities suitable for later durable selection capture.
 #[cfg_attr(
-    not(test),
+    all(not(unix), not(test), not(feature = "test-support")),
     expect(
         dead_code,
         reason = "This handoff is consumed by future job admission, outside support discovery."
@@ -298,7 +298,7 @@ pub(crate) enum DiscoveryError {
         candidates_truncated: bool,
     },
     #[cfg_attr(
-        not(test),
+        all(not(unix), not(test), not(feature = "test-support")),
         expect(
             dead_code,
             reason = "Selection resolution is ready for later admission; discovery only inspects these declarations."
@@ -363,7 +363,7 @@ impl Catalog {
     }
 
     #[cfg_attr(
-        not(test),
+        all(not(unix), not(test), not(feature = "test-support")),
         expect(
             dead_code,
             reason = "This exact immutable handoff is implemented for later job admission."
@@ -503,10 +503,7 @@ mod tests {
     #[test]
     fn index_rejects_changed_document_bytes() {
         let index = br#"{"schema_version":"1.0","required_features":[],"documents":[{"kind":"schema","ref":"test.mesh@1.0","sha256":"a7fd5e73397d976d4e72942e0d0a5e34bdd5ec62e16a3bbcaff748da0c0b7cd8","byte_length":394}],"aliases":[]}"#;
-        let bytes = include_bytes!(
-            "../../../patompong-docs/tests/support-discovery/fixtures/schema-0.json"
-        )
-        .to_vec();
+        let bytes = include_bytes!("../tests/fixtures/support-discovery/schema-0.json").to_vec();
         assert!(index_revision(index, std::slice::from_ref(&bytes)).is_ok());
         let mut changed = bytes;
         changed.push(b'\n');
@@ -515,59 +512,20 @@ mod tests {
 
     fn fixture_package() -> ControlledPackage {
         ControlledPackage {
-            index_bytes: include_bytes!(
-                "../../../patompong-docs/tests/support-discovery/fixtures/index.json"
-            )
-            .to_vec(),
+            index_bytes: include_bytes!("../tests/fixtures/support-discovery/index.json").to_vec(),
             document_bytes: vec![
-                include_bytes!(
-                    "../../../patompong-docs/tests/support-discovery/fixtures/schema-0.json"
-                )
-                .to_vec(),
-                include_bytes!(
-                    "../../../patompong-docs/tests/support-discovery/fixtures/schema-1.json"
-                )
-                .to_vec(),
-                include_bytes!(
-                    "../../../patompong-docs/tests/support-discovery/fixtures/schema-2.json"
-                )
-                .to_vec(),
-                include_bytes!(
-                    "../../../patompong-docs/tests/support-discovery/fixtures/schema-3.json"
-                )
-                .to_vec(),
-                include_bytes!(
-                    "../../../patompong-docs/tests/support-discovery/fixtures/schema-4.json"
-                )
-                .to_vec(),
-                include_bytes!(
-                    "../../../patompong-docs/tests/support-discovery/fixtures/schema-5.json"
-                )
-                .to_vec(),
-                include_bytes!(
-                    "../../../patompong-docs/tests/support-discovery/fixtures/runtime-6.json"
-                )
-                .to_vec(),
-                include_bytes!(
-                    "../../../patompong-docs/tests/support-discovery/fixtures/support-7.json"
-                )
-                .to_vec(),
-                include_bytes!(
-                    "../../../patompong-docs/tests/support-discovery/fixtures/support-8.json"
-                )
-                .to_vec(),
-                include_bytes!(
-                    "../../../patompong-docs/tests/support-discovery/fixtures/support-9.json"
-                )
-                .to_vec(),
-                include_bytes!(
-                    "../../../patompong-docs/tests/support-discovery/fixtures/support-10.json"
-                )
-                .to_vec(),
-                include_bytes!(
-                    "../../../patompong-docs/tests/support-discovery/fixtures/support-11.json"
-                )
-                .to_vec(),
+                include_bytes!("../tests/fixtures/support-discovery/schema-0.json").to_vec(),
+                include_bytes!("../tests/fixtures/support-discovery/schema-1.json").to_vec(),
+                include_bytes!("../tests/fixtures/support-discovery/schema-2.json").to_vec(),
+                include_bytes!("../tests/fixtures/support-discovery/schema-3.json").to_vec(),
+                include_bytes!("../tests/fixtures/support-discovery/schema-4.json").to_vec(),
+                include_bytes!("../tests/fixtures/support-discovery/schema-5.json").to_vec(),
+                include_bytes!("../tests/fixtures/support-discovery/runtime-6.json").to_vec(),
+                include_bytes!("../tests/fixtures/support-discovery/support-7.json").to_vec(),
+                include_bytes!("../tests/fixtures/support-discovery/support-8.json").to_vec(),
+                include_bytes!("../tests/fixtures/support-discovery/support-9.json").to_vec(),
+                include_bytes!("../tests/fixtures/support-discovery/support-10.json").to_vec(),
+                include_bytes!("../tests/fixtures/support-discovery/support-11.json").to_vec(),
             ],
         }
     }
@@ -590,7 +548,7 @@ mod tests {
             "mdl_6b32152ee6058b9b0babf6204080f368ce616aeffe1218012e780fffb44b0629"
         );
         let vectors: Value = serde_json::from_slice(include_bytes!(
-            "../../../patompong-docs/tests/support-discovery/fixtures/vectors.json"
+            "../tests/fixtures/support-discovery/vectors.json"
         ))
         .unwrap();
         for document in vectors["documents"].as_array().unwrap() {
@@ -1084,7 +1042,7 @@ mod tests {
         });
         let moved = Catalog::from_packages(vec![moved_alias], DiscoveryLimits::default()).unwrap();
         let vectors: Value = serde_json::from_slice(include_bytes!(
-            "../../../patompong-docs/tests/support-discovery/fixtures/vectors.json"
+            "../tests/fixtures/support-discovery/vectors.json"
         ))
         .unwrap();
         assert_eq!(
@@ -1193,4 +1151,5 @@ mod tests {
         mutate(&mut index);
         package.index_bytes = serde_json::to_vec(&index).unwrap();
     }
+    include!("support/schema_regressions.rs");
 }

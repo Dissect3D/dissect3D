@@ -144,7 +144,7 @@ pub(crate) fn tasks(
     }
 }
 
-fn connected<T>(
+pub(super) fn connected<T>(
     config: &ConfigFile,
     config_path: &Path,
     client_limits: ClientLimits,

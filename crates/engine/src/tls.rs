@@ -7,8 +7,8 @@
 
 use dissect3d_platform::{OwnedRoot, PlatformError, RelativePath};
 use rcgen::{
-    BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
-    KeyUsagePurpose,
+    BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa,
+    Issuer, KeyPair, KeyUsagePurpose,
 };
 use sha2::{Digest, Sha256};
 use std::net::{IpAddr, Ipv4Addr};
@@ -105,6 +105,12 @@ fn create_server_config(ca_der: &[u8], ca_key_der: &[u8]) -> Result<Arc<ServerCo
     let mut leaf_parameters =
         CertificateParams::new(vec![IpAddr::V4(Ipv4Addr::LOCALHOST).to_string()])
             .map_err(|_| TlsError::Certificate)?;
+    // Keep the leaf subject distinct from the installation CA subject. Both
+    // otherwise inherit rcgen's generic default CN, which makes OpenSSL treat
+    // the presented leaf as self-signed when building a path to the pinned CA.
+    let mut distinguished_name = DistinguishedName::new();
+    distinguished_name.push(DnType::CommonName, "Dissect3D loopback server");
+    leaf_parameters.distinguished_name = distinguished_name;
     leaf_parameters.key_usages = vec![KeyUsagePurpose::DigitalSignature];
     leaf_parameters.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
     let leaf = leaf_parameters

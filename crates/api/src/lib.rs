@@ -9,10 +9,11 @@ mod client;
 mod decode;
 mod discovery;
 mod error;
+mod submission;
 mod types;
 
 #[cfg(feature = "client")]
-pub use client::{Client, ClientError, ClientLimits, ConnectionMaterial};
+pub use client::{Client, ClientError, ClientLimits, ConnectionMaterial, SubmissionClientError};
 pub use decode::{DecodeError, decode_json};
 pub use discovery::{
     DiscoveryCapability, DiscoveryObservation, EligibilityObservation, EvidenceObservation,
@@ -23,6 +24,15 @@ pub use discovery::{
     TaskLookup, TaskSummary,
 };
 pub use error::{ApiError, ApiErrorBody, ErrorCode};
+pub use submission::{
+    AcceptanceReceipt, AdapterSnapshot, AssetSnapshot, CodeSnapshot, ContentDigest, DecimalToken,
+    InputId, InputIdentity, InputReceipt, InputRef, JobId, JobPage, JobRequest, JobSnapshot,
+    JobState, JobSummary, JobsQuery, PatchSnapshot, PreparedReadiness, ResolvedJob, SchemaSnapshot,
+    SelectionSnapshot, StorageStatus, SubmissionDecodeError, SubmissionId, SubmissionValue,
+    SubmittedTask, ValidationEvidence, decode_job_request, decode_submission_json,
+    encode_job_request,
+};
+pub use types::SubmissionCapability;
 pub use types::{
     AuthRevokeRequest, AuthStatus, BootstrapAddress, ClientId, CorrelationId, DiscoveryRecord,
     EngineInfo, EnginePhase, EnrollmentId, EnrollmentReceipt, IdempotencyKey, InstallationId,

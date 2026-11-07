@@ -20,7 +20,7 @@ impl Default for CorePolicy {
         Self {
             queue_capacity: 64,
             busy_timeout_ms: 2_000,
-            maximum_value_bytes: 65_536,
+            maximum_value_bytes: 1_048_576,
             control_response_bytes: 262_144,
             request_timeout_ms: 5_000,
             shutdown_timeout_ms: 5_000,

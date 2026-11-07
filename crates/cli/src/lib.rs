@@ -6,11 +6,14 @@ mod commands;
 mod config;
 mod connection;
 mod output;
+mod submissions;
 
 use std::path::PathBuf;
 use std::time::Duration;
 
-use args::{Cli, Command, ConfigCommand, ModelsCommand, RuntimesCommand, TasksCommand};
+use args::{
+    Cli, Command, ConfigCommand, JobsCommand, ModelsCommand, RuntimesCommand, TasksCommand,
+};
 use clap::{Parser, error::ErrorKind};
 use config::{ConfigEnvironment, ConfigFile, ConfigProblem, default_config_path, resolve_config};
 use output::{CommandOutcome, ErrorInfo, render};
@@ -68,6 +71,19 @@ pub fn run() -> i32 {
     }
 
     let (config_path, explicitly_selected) = config_path(&environment);
+    #[cfg(windows)]
+    let config_path = if config_path.is_absolute() {
+        std::fs::canonicalize(&config_path).unwrap_or_else(|_| {
+            // Win32 final-component aliases must select the same sibling lock.
+            let mut path = config_path.clone();
+            if let Some(name) = config_path.file_name().and_then(|name| name.to_str()) {
+                path.set_file_name(name.trim_end_matches([' ', '.']));
+            }
+            path
+        })
+    } else {
+        config_path
+    };
     if !config_path.is_absolute() {
         let outcome = CommandOutcome::failure(
             "config",
@@ -79,6 +95,13 @@ pub fn run() -> i32 {
             eprintln!("Configuration path must be absolute");
         }
         return 2;
+    }
+    if let Some(exit_code) = stage3_preflight(
+        cli.command.as_ref(),
+        &config_path,
+        cli.json || requested_json,
+    ) {
+        return exit_code;
     }
     let allow_create = matches!(
         &cli.command,
@@ -203,6 +226,49 @@ pub fn run() -> i32 {
                 json_output,
             )
         }
+        Some(Command::Jobs {
+            command: JobsCommand::Submit(args),
+        }) => run_connected_command(
+            "jobs submit",
+            commands::submission::submit(args, &config, &config_path, client_limits),
+            json_output,
+        ),
+        Some(Command::Run(args)) if args.detach => run_connected_command(
+            "run",
+            commands::submission::submit(args.definition, &config, &config_path, client_limits),
+            json_output,
+        ),
+        Some(Command::Jobs {
+            command: JobsCommand::Recover { sub_id },
+        }) => run_connected_command(
+            "jobs recover",
+            commands::submission::recover(&sub_id, &config, &config_path, client_limits),
+            json_output,
+        ),
+        Some(Command::Jobs {
+            command: command @ (JobsCommand::List { .. } | JobsCommand::Show { .. }),
+        }) => {
+            let name = if matches!(&command, JobsCommand::List { .. }) {
+                "jobs list"
+            } else {
+                "jobs show"
+            };
+            match commands::jobs::inspect(command, &config, &config_path, client_limits) {
+                Ok(raw) => {
+                    if output::render_checked(&CommandOutcome::success_raw(name, raw), json_output)
+                        .is_ok()
+                    {
+                        0
+                    } else {
+                        19
+                    }
+                }
+                Err(error) => run_connected_command(name, Err(error), json_output),
+            }
+        }
+        Some(Command::Run(_)) => {
+            unreachable!("Stage 3 commands are returned by the preflight gate")
+        }
         None => {
             let outcome = CommandOutcome::failure(
                 "cli",
@@ -214,6 +280,70 @@ pub fn run() -> i32 {
     }
 }
 
+fn stage3_preflight(
+    command: Option<&Command>,
+    config_path: &std::path::Path,
+    json: bool,
+) -> Option<i32> {
+    let failure = |name: &str, category: &'static str, message: &'static str, exit_code: i32| {
+        let outcome = CommandOutcome::failure_with_context(
+            name,
+            ErrorInfo::new(category, message),
+            Some(serde_json::Value::Bool(false)),
+            None,
+            None,
+        );
+        render(&outcome, json);
+        exit_code
+    };
+    match command {
+        Some(Command::Run(args)) if !args.detach => Some(failure(
+            "run",
+            "operation_unavailable",
+            "Foreground run is not implemented; no input will be uploaded or accepted.",
+            5,
+        )),
+        Some(Command::Run(_)) => None,
+        Some(Command::Jobs {
+            command: JobsCommand::Recover { sub_id },
+        }) => {
+            if dissect3d_api::SubmissionId::parse(sub_id.clone()).is_err() {
+                return Some(failure(
+                    "jobs recover",
+                    "usage_error",
+                    "Submission ID is invalid.",
+                    2,
+                ));
+            }
+            let id = dissect3d_api::SubmissionId::parse(sub_id.clone()).unwrap();
+            let result = (|| {
+                let profile = submissions::SubmissionRecords::open_existing(config_path)?;
+                let records = submissions::SubmissionRecords::lock(&profile)?;
+                records.load(&id)
+            })();
+            match result {
+                Err(error) => {
+                    let error = commands::submission::record_error(error);
+                    Some(failure(
+                        "jobs recover",
+                        error.category,
+                        error.message,
+                        error.exit_code,
+                    ))
+                }
+                Ok(_) => None,
+            }
+        }
+        Some(Command::Jobs {
+            command: JobsCommand::Submit(_),
+        }) => None,
+        Some(Command::Jobs {
+            command: JobsCommand::List { .. } | JobsCommand::Show { .. },
+        }) => None,
+        _ => None,
+    }
+}
+
 fn run_connected_command(
     command: &str,
     result: Result<serde_json::Value, commands::CommandError>,
@@ -221,7 +351,17 @@ fn run_connected_command(
 ) -> i32 {
     match result {
         Ok(data) => {
-            render(&CommandOutcome::success(command, data), json_output);
+            if output::render_checked(&CommandOutcome::success(command, data.clone()), json_output)
+                .is_err()
+            {
+                if data.get("accepted").and_then(serde_json::Value::as_bool) == Some(true) {
+                    eprintln!(
+                        "The job was accepted; output could not be written. Recovery identity: {}",
+                        data.get("sub_id").unwrap_or(&serde_json::Value::Null)
+                    );
+                }
+                return 19;
+            }
             0
         }
         Err(error) => {
@@ -294,12 +434,16 @@ fn run_config(
             Ok(serde_json::json!({"key": key, "value": value, "source": source.as_str()}))
         }
         ConfigCommand::Set { key, value } => {
-            let updated = config.with_override(&key, &value)?;
+            let _lock = config::lock_mutation(path)?;
+            let latest = ConfigFile::load(path, false, true)?;
+            let updated = latest.with_override(&key, &value)?;
             updated.save(path)?;
             Ok(serde_json::json!({"key": key, "value": updated.stored_value(&key)?}))
         }
         ConfigCommand::Unset { key } => {
-            let updated = config.without_override(&key)?;
+            let _lock = config::lock_mutation(path)?;
+            let latest = ConfigFile::load(path, false, false)?;
+            let updated = latest.without_override(&key)?;
             updated.save(path)?;
             Ok(serde_json::json!({"key": key, "removed": true}))
         }

@@ -20,11 +20,13 @@ pub(crate) enum ConfigProblem {
     UnknownKey,
     InvalidValue,
     Missing,
+    Busy,
 }
 
 impl ConfigProblem {
     pub(crate) fn safe_message(&self) -> &'static str {
         match self {
+            Self::Busy => "The selected configuration is busy; retry the command",
             Self::Io => "Could not read or write the selected configuration",
             Self::Invalid => "The selected configuration is malformed or unsupported",
             Self::UnknownKey => "Unknown configuration key",
@@ -593,6 +595,23 @@ fn resolve_string(
         return Ok((serde_json::json!(value), Source::Configuration));
     }
     Ok((serde_json::json!(default), Source::Default))
+}
+
+/// Persistent sibling identity survives atomic config replacement. Native file
+/// locking resolves case and parent-directory aliases without pathname hashing.
+/// Never unlink this file, including after owner exit.
+pub(crate) fn lock_mutation(path: &Path) -> Result<std::fs::File, ConfigProblem> {
+    let parent = path.parent().ok_or(ConfigProblem::Io)?;
+    fs::create_dir_all(parent).map_err(|_| ConfigProblem::Io)?;
+    let mut name = path.as_os_str().to_os_string();
+    name.push(".lock");
+    let file =
+        dissect3d_platform::open_config_lock(Path::new(&name)).map_err(|_| ConfigProblem::Io)?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(std::fs::TryLockError::WouldBlock) => Err(ConfigProblem::Busy),
+        Err(std::fs::TryLockError::Error(_)) => Err(ConfigProblem::Io),
+    }
 }
 
 #[cfg(test)]

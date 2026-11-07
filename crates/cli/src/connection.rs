@@ -43,6 +43,12 @@ pub(crate) struct ProfileCredential {
     pub(crate) enrollment_id: EnrollmentId,
     pub(crate) secret_hex: String,
     pub(crate) state: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub(crate) submission_access: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 pub(crate) struct AccessCredential {
@@ -109,6 +115,24 @@ pub(crate) fn connection_binding(root: &Path) -> String {
 }
 
 impl Profile {
+    pub(crate) fn open_existing(config_path: &Path) -> Result<Self, ConnectionError> {
+        let mut path = config_path.as_os_str().to_os_string();
+        path.push(".state");
+        let root =
+            OwnedRoot::open(Path::new(&path), RootPurpose::ClientConfig).map_err(|error| {
+                if error == PlatformError::NotFound {
+                    ConnectionError::Unavailable
+                } else {
+                    ConnectionError::Storage
+                }
+            })?;
+        Ok(Self { root })
+    }
+
+    pub(crate) fn root(&self) -> &OwnedRoot {
+        &self.root
+    }
+
     pub(crate) fn open(config_path: &Path) -> Result<Self, ConnectionError> {
         let mut state_path = config_path.as_os_str().to_os_string();
         state_path.push(".state");
@@ -163,6 +187,13 @@ impl Profile {
             return Err(ConnectionError::Invalid);
         }
         Ok(Some(credential))
+    }
+
+    pub(crate) fn has_saved_records(&self) -> Result<bool, ConnectionError> {
+        if self.load()?.is_some() {
+            return Ok(true);
+        }
+        Ok(self.load_pending_stop()?.is_some())
     }
 
     /// Reconcile an active installation credential to a freshly verified
@@ -391,17 +422,55 @@ impl DiscoveredEngine {
         &self,
         credential: &ProfileCredential,
     ) -> Result<EnrollmentReceipt, ConnectionError> {
-        let endpoint = match &self.discovery.bootstrap_endpoint {
-            BootstrapAddress::Unix { path } => BootstrapEndpoint::Unix { path: path.into() },
-            BootstrapAddress::WindowsPipe { name } => {
-                BootstrapEndpoint::WindowsPipe { name: name.clone() }
-            }
-        };
+        self.enroll_with_kind(credential, "enroll")
+    }
+
+    pub(crate) fn enroll_submission(
+        &self,
+        credential: &ProfileCredential,
+    ) -> Result<EnrollmentReceipt, ConnectionError> {
+        self.enroll_with_kind(credential, "enroll_submission")
+    }
+
+    pub(crate) fn supports_submission_access(&self) -> Result<(), ConnectionError> {
+        let endpoint = native_endpoint(&self.discovery.bootstrap_endpoint);
         let owner = current_owner_identity().map_err(|_| ConnectionError::Unavailable)?;
         let mut channel = connect_bootstrap(&endpoint, &owner, self.client_limits.connect_timeout)
             .map_err(|_| ConnectionError::Unavailable)?;
         let request = serde_json::json!({
-            "kind": "enroll",
+            "kind": "capabilities",
+            "bootstrap_version": "1.0",
+            "instance_id": self.discovery.instance_id,
+        });
+        let encoded = serde_json::to_vec(&request).map_err(|_| ConnectionError::Invalid)?;
+        channel
+            .write_frame(&encoded)
+            .map_err(|_| ConnectionError::Unavailable)?;
+        let response = channel
+            .read_frame()
+            .map_err(|_| ConnectionError::Unavailable)?;
+        let receipt = decode_capabilities_response(&response)?;
+        if receipt.bootstrap_version != "1.0"
+            || receipt.installation_id != self.discovery.installation_id
+            || receipt.instance_id != self.discovery.instance_id
+            || receipt.enrollment_policies != ["core-v1", "submission-v1"]
+        {
+            return Err(ConnectionError::Incompatible);
+        }
+        Ok(())
+    }
+
+    fn enroll_with_kind(
+        &self,
+        credential: &ProfileCredential,
+        kind: &'static str,
+    ) -> Result<EnrollmentReceipt, ConnectionError> {
+        let endpoint = native_endpoint(&self.discovery.bootstrap_endpoint);
+        let owner = current_owner_identity().map_err(|_| ConnectionError::Unavailable)?;
+        let mut channel = connect_bootstrap(&endpoint, &owner, self.client_limits.connect_timeout)
+            .map_err(|_| ConnectionError::Unavailable)?;
+        let request = serde_json::json!({
+            "kind": kind,
             "bootstrap_version": "1.0",
             "installation_id": credential.installation_id,
             "instance_id": credential.instance_id,
@@ -429,6 +498,44 @@ impl DiscoveredEngine {
         }
         Ok(receipt)
     }
+}
+
+fn native_endpoint(address: &BootstrapAddress) -> BootstrapEndpoint {
+    match address {
+        BootstrapAddress::Unix { path } => BootstrapEndpoint::Unix { path: path.into() },
+        BootstrapAddress::WindowsPipe { name } => {
+            BootstrapEndpoint::WindowsPipe { name: name.clone() }
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BootstrapCapabilities {
+    bootstrap_version: String,
+    installation_id: InstallationId,
+    instance_id: InstanceId,
+    enrollment_policies: Vec<String>,
+}
+
+fn decode_capabilities_response(bytes: &[u8]) -> Result<BootstrapCapabilities, ConnectionError> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Rejection {
+        bootstrap_version: String,
+        error: String,
+    }
+    if let Ok(rejection) = decode_json::<Rejection>(bytes) {
+        if rejection.bootstrap_version != "1.0" {
+            return Err(ConnectionError::Incompatible);
+        }
+        return Err(match rejection.error.as_str() {
+            "invalid_request" => ConnectionError::Incompatible,
+            "unauthorized" => ConnectionError::Unauthorized,
+            _ => ConnectionError::Unavailable,
+        });
+    }
+    decode_json(bytes).map_err(|_| ConnectionError::Incompatible)
 }
 
 fn decode_enrollment_response(bytes: &[u8]) -> Result<EnrollmentReceipt, ConnectionError> {
@@ -512,6 +619,41 @@ mod enrollment_response_tests {
         assert!(matches!(
             decode_enrollment_response(b"{"),
             Err(ConnectionError::Invalid)
+        ));
+    }
+}
+
+#[cfg(test)]
+mod submission_enrollment_tests {
+    use super::*;
+
+    #[test]
+    fn old_profiles_default_to_core_policy_and_pending_policy_is_retained() {
+        let mut credential: ProfileCredential = decode_json(
+            br#"{"installation_id":"ins_0123456789abcdef0123456789abcdef","instance_id":"eng_0123456789abcdef0123456789abcdef","client_id":"cli_0123456789abcdef0123456789abcdef","enrollment_id":"enr_0123456789abcdef0123456789abcdef","secret_hex":"abababababababababababababababababababababababababababababababab","state":"pending"}"#,
+        )
+        .expect("existing pending profile");
+        assert!(!credential.submission_access);
+        let core_record = serde_json::to_value(&credential).expect("core profile encoding");
+        assert!(core_record.get("submission_access").is_none());
+
+        credential.submission_access = true;
+        let submission_record = serde_json::to_value(&credential).expect("pending policy encoding");
+        assert_eq!(submission_record["submission_access"], true);
+        let recovered: ProfileCredential = serde_json::from_value(submission_record)
+            .expect("pending opt-in policy remains readable");
+        assert!(recovered.submission_access);
+    }
+
+    #[test]
+    fn old_peer_capability_rejection_is_classified_as_incompatible() {
+        let response = serde_json::to_vec(
+            &serde_json::json!({"bootstrap_version":"1.0","error":"invalid_request"}),
+        )
+        .unwrap();
+        assert!(matches!(
+            decode_capabilities_response(&response),
+            Err(ConnectionError::Incompatible)
         ));
     }
 }

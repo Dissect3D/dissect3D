@@ -415,6 +415,7 @@ dependencies = [
 name = "dissect3d-api"
 version = "0.1.0-dev"
 dependencies = [
+ "futures-util",
  "reqwest",
  "serde",
  "serde_json",
@@ -460,7 +461,9 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "dissect3d-api",
+ "dissect3d-connection",
  "dissect3d-platform",
+ "futures-util",
  "getrandom 0.4.3",
  "hyper",
  "hyper-util",

@@ -435,11 +435,16 @@ impl BootstrapListener {
                             // A local peer that lacks the owner identity must
                             // not make the listener unavailable to a valid
                             // setup client.
+                            if Instant::now() >= deadline {
+                                return Err(PlatformError::Busy);
+                            }
                             continue;
                         }
-                        if deadline.saturating_duration_since(Instant::now()).is_zero() {
-                            return Err(PlatformError::Busy);
-                        }
+                        #[cfg(test)]
+                        ACCEPTED_PEER_PAUSE.with(|pause| std::thread::sleep(pause.get()));
+                        // The accept budget bounds listener polling. Once a
+                        // verified peer is accepted, frame I/O owns its separate
+                        // deadline, including after a scheduler pause here.
                         stream
                             .set_nonblocking(true)
                             .map_err(|_| PlatformError::Io)?;
@@ -497,9 +502,9 @@ impl BootstrapListener {
                     }
                     continue;
                 }
-                if Instant::now() >= deadline {
-                    return Err(PlatformError::Busy);
-                }
+                #[cfg(test)]
+                ACCEPTED_PEER_PAUSE.with(|pause| std::thread::sleep(pause.get()));
+                // A verified connected pipe owns the independent frame budget.
                 return Ok(PeerChannel {
                     cancellation: None,
                     stream: pipe,
@@ -823,4 +828,69 @@ fn unix_peer_identity(
     _stream: &std::os::unix::net::UnixStream,
 ) -> Result<OwnerIdentity, PlatformError> {
     Err(PlatformError::UnsupportedRoot)
+}
+
+#[cfg(all(test, any(unix, windows)))]
+thread_local! {
+    static ACCEPTED_PEER_PAUSE: std::cell::Cell<Duration> = const { std::cell::Cell::new(Duration::ZERO) };
+}
+
+#[cfg(all(test, unix))]
+mod accept_boundary_tests {
+    use super::*;
+    use crate::{OwnedRoot, RootPurpose, current_owner_identity};
+
+    #[test]
+    fn verified_accepted_peer_keeps_its_independent_frame_budget() {
+        let parent = tempfile::tempdir().unwrap();
+        let root =
+            OwnedRoot::create_private(&parent.path().join("engine"), RootPurpose::EngineData)
+                .unwrap();
+        let listener =
+            BootstrapListener::bind(&root, "eng_0123456789abcdef0123456789abcdef").unwrap();
+        let owner = current_owner_identity().unwrap();
+        let mut client = connect(listener.endpoint(), &owner, Duration::from_secs(2)).unwrap();
+        client.write_frame(b"ready peer").unwrap();
+        // Model a scheduler pause after the kernel accepted and verified the
+        // peer. The listener's polling budget no longer owns this channel.
+        ACCEPTED_PEER_PAUSE.with(|pause| pause.set(Duration::from_millis(150)));
+        let accepted =
+            listener.accept_with_frame_timeout(Duration::from_millis(100), Duration::from_secs(1));
+        ACCEPTED_PEER_PAUSE.with(|pause| pause.set(Duration::ZERO));
+        let mut channel = accepted.expect("accepted verified peer receives its frame budget");
+        assert_eq!(channel.read_frame().unwrap(), b"ready peer");
+        channel.write_frame(b"confirmed").unwrap();
+        assert_eq!(client.read_frame().unwrap(), b"confirmed");
+    }
+}
+
+#[cfg(all(test, windows))]
+mod pipe_accept_boundary_tests {
+    use super::*;
+    use crate::{OwnedRoot, RootPurpose, current_owner_identity};
+
+    #[test]
+    fn verified_connected_pipe_keeps_its_independent_frame_budget() {
+        let parent = tempfile::tempdir().unwrap();
+        let root =
+            OwnedRoot::create_private(&parent.path().join("engine"), RootPurpose::EngineData)
+                .unwrap();
+        let listener =
+            BootstrapListener::bind(&root, "eng_0123456789abcdef0123456789abcdef").unwrap();
+        let endpoint = listener.endpoint().clone();
+        let owner = current_owner_identity().unwrap();
+        let server = std::thread::spawn(move || {
+            ACCEPTED_PEER_PAUSE.with(|pause| pause.set(Duration::from_millis(1100)));
+            let accepted =
+                listener.accept_with_frame_timeout(Duration::from_secs(1), Duration::from_secs(1));
+            ACCEPTED_PEER_PAUSE.with(|pause| pause.set(Duration::ZERO));
+            let mut channel = accepted.expect("verified connected pipe receives frame budget");
+            assert_eq!(channel.read_frame().unwrap(), b"ready peer");
+            channel.write_frame(b"confirmed").unwrap();
+        });
+        let mut client = connect(&endpoint, &owner, Duration::from_secs(3)).unwrap();
+        client.write_frame(b"ready peer").unwrap();
+        assert_eq!(client.read_frame().unwrap(), b"confirmed");
+        server.join().unwrap();
+    }
 }

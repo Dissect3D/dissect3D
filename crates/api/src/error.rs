@@ -30,13 +30,26 @@ pub enum ErrorCode {
     AmbiguousSelection,
     InventoryCursorExpired,
     Busy,
+    InputUnavailable,
+    NotPrepared,
+    IncompatibleProfile,
+    JobCursorExpired,
+    DataDeleted,
+    LengthRequired,
+    PayloadTooLarge,
+    UnsupportedMediaType,
+    InvalidInput,
+    UnsupportedParameter,
+    CapacityExceeded,
+    EngineStopping,
+    StoreUnavailable,
+    StorageIntegrityFault,
 }
 
 /// Bounded public error details. Fields contain categories, never source strings.
 /// `details` is reserved for explicitly approved structured fields, not an
 /// arbitrary serialization of an internal error.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ApiErrorBody {
     pub code: ErrorCode,
     pub message: String,
@@ -48,7 +61,6 @@ pub struct ApiErrorBody {
 
 /// Versioned safe error envelope returned by the local control API.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ApiError {
     pub api_version: String,
     pub error: ApiErrorBody,
