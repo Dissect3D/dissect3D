@@ -74,6 +74,14 @@ pub async fn run_discovery_test_engine(data_root: &Path) -> Result<(), StartupEr
     run_engine_with_catalog(data_root, catalog).await
 }
 
+/// Supplementary ambiguity/pagination host; has no prepared admission fixture.
+#[cfg(feature = "test-support")]
+pub async fn run_selection_test_engine(data_root: &Path) -> Result<(), StartupError> {
+    let catalog =
+        crate::support::test_support::selection_catalog().map_err(|_| StartupError::Discovery)?;
+    run_engine_with_catalog(data_root, catalog).await
+}
+
 /// Isolated host composition backed by an explicitly prepared CPU fixture.
 #[cfg(feature = "test-support")]
 pub async fn run_submission_test_engine(data_root: &Path) -> Result<(), StartupError> {

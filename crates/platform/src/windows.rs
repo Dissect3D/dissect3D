@@ -882,9 +882,11 @@ pub(crate) fn remove_input_durable(
     sync_input_ancestors(root, path)
 }
 
-pub(crate) fn open_lease_file(root: &OwnedRoot) -> Result<File, PlatformError> {
-    let path = RelativePath::parse("authority.lock")?;
-    open_relative_file(root, &path, true, true, false)
+pub(crate) fn open_lease_file_at(
+    root: &OwnedRoot,
+    path: &RelativePath,
+) -> Result<File, PlatformError> {
+    open_relative_file(root, path, true, true, false)
 }
 
 fn open_relative_file(

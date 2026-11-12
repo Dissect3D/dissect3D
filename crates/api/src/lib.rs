@@ -15,6 +15,8 @@ mod types;
 #[cfg(feature = "client")]
 pub use client::{Client, ClientError, ClientLimits, ConnectionMaterial, SubmissionClientError};
 pub use decode::{DecodeError, decode_json};
+mod declaration_json;
+pub use declaration_json::{DeclarationNumber, DeclarationValue};
 pub use discovery::{
     DiscoveryCapability, DiscoveryObservation, EligibilityObservation, EvidenceObservation,
     ExecutionAuthorizationObservation, InstallationObservation, InventoryDetail, InventoryPage,

@@ -5,13 +5,14 @@ use super::{
     SchemaRecord, TaskBindingRecord,
 };
 use super::{ObservationFacts, for_model_binding, for_runtime, observe};
+use dissect3d_api::DeclarationValue as Value;
 use dissect3d_api::{
     ModelDetail, ModelSummary, RuntimeDetail, RuntimeSummary, SchemaAttachment, TaskBindingDetail,
     TaskKey, decode_json,
 };
 use serde::Deserialize;
 use serde::Serialize;
-use serde_json::{Map, Value};
+type Map<K, V> = BTreeMap<K, V>;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -765,13 +766,7 @@ fn validate_support_inner(
     {
         return Err(CatalogError::InvalidPackage);
     }
-    validate_tested_profiles(
-        value,
-        &declared_tasks,
-        &variant_ids,
-        &runtime_refs,
-        &evidence_ids,
-    )?;
+    validate_tested_profiles(value, &declared_tasks, &evidence_ids)?;
     for variant in variants {
         if string_array(&variant["evidence_ids"], 1024)
             .unwrap_or_default()
@@ -826,9 +821,15 @@ fn validate_support_inner(
         unresolved_paths,
         tasks: declared_tasks.into_iter().map(|(_, task)| task).collect(),
     };
-    let detail = serde_json::to_vec(
-        &serde_json::json!({"declaration":model.declaration,"schemas":model.schemas}),
-    )
+    #[derive(Serialize)]
+    struct DetailSize<'a> {
+        declaration: &'a Value,
+        schemas: &'a [SchemaAttachment],
+    }
+    let detail = serde_json::to_vec(&DetailSize {
+        declaration: &model.declaration,
+        schemas: &model.schemas,
+    })
     .map_err(|_| CatalogError::InvalidPackage)?;
     if detail.len() > 196_608 {
         return Err(CatalogError::LimitExceeded);
@@ -986,6 +987,7 @@ fn validate_runtime_rights(
         }
         text(&right["license"], 4096).ok_or(CatalogError::InvalidPackage)?;
         text(&right["source"], 4096).ok_or(CatalogError::InvalidPackage)?;
+        credential_free_provenance(&right["source"])?;
         string_array(&right["notices"], 1024).ok_or(CatalogError::InvalidPackage)?;
         string_array(&right["access_prerequisites"], 1024).ok_or(CatalogError::InvalidPackage)?;
         string_array(&right["unresolved"], 1024).ok_or(CatalogError::InvalidPackage)?;
@@ -1087,8 +1089,6 @@ fn validate_resources_lifecycle(value: &Value) -> Result<(), CatalogError> {
 fn validate_tested_profiles(
     value: &Value,
     tasks: &[(TaskKey, TaskBindingRecord)],
-    variants: &BTreeSet<String>,
-    runtimes: &[String],
     evidence_ids: &BTreeSet<String>,
 ) -> Result<(), CatalogError> {
     let mut profile_ids = BTreeSet::new();
@@ -1115,12 +1115,12 @@ fn validate_tested_profiles(
         )
         .map_err(|_| CatalogError::InvalidPackage)?;
         if !tasks.iter().any(|(key, _)| key == &task)
-            || !runtimes.contains(
-                &string(&profile["runtime_ref"])
-                    .ok_or(CatalogError::InvalidPackage)?
-                    .to_owned(),
+            || !super::compatibility::structurally_compatible(
+                value,
+                &task,
+                string(&profile["runtime_ref"]).ok_or(CatalogError::InvalidPackage)?,
+                string(&profile["variant"]).ok_or(CatalogError::InvalidPackage)?,
             )
-            || !variants.contains(string(&profile["variant"]).ok_or(CatalogError::InvalidPackage)?)
         {
             return Err(CatalogError::InvalidPackage);
         }
@@ -1338,7 +1338,10 @@ fn all_task_schema(
         }
     }
     let _ = schemas;
-    Ok(serde_json::json!({"properties":props}))
+    Ok(Value::Object(BTreeMap::from([(
+        "properties".into(),
+        Value::Object(props),
+    )])))
 }
 
 fn validate_schema_use(schema: &SchemaRecord, usage: SchemaUse) -> Result<(), CatalogError> {
@@ -1543,12 +1546,15 @@ fn validate_schema_tree(
         ("minLength", "maxLength"),
         ("minimum", "maximum"),
     ] {
-        if let (Some(a), Some(b)) = (
-            object.get(min).and_then(Value::as_f64),
-            object.get(max).and_then(Value::as_f64),
-        ) && a > b
-        {
-            return Err(());
+        if let (Some(a), Some(b)) = (object.get(min), object.get(max)) {
+            let ordering = a
+                .as_number()
+                .ok_or(())?
+                .compare(b.as_number().ok_or(())?)
+                .ok_or(())?;
+            if ordering == std::cmp::Ordering::Greater {
+                return Err(());
+            }
         }
     }
     if let Some(default) = object.get("default") {
@@ -1576,6 +1582,15 @@ fn validate_schema_tree(
 }
 
 fn has_unknown_schema_keyword(root: &Value, value: &Value, edges: usize) -> bool {
+    unknown_schema_keyword(root, value, edges, &mut BTreeMap::new())
+}
+
+fn unknown_schema_keyword(
+    root: &Value,
+    value: &Value,
+    edges: usize,
+    checked: &mut BTreeMap<(String, usize), bool>,
+) -> bool {
     if edges > 16 {
         return true;
     }
@@ -1608,10 +1623,19 @@ fn has_unknown_schema_keyword(root: &Value, value: &Value, edges: usize) -> bool
         return false;
     };
     if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
-        return reference
-            .strip_prefix("#/$defs/")
-            .and_then(|name| root.get("$defs")?.get(name))
-            .is_none_or(|target| has_unknown_schema_keyword(root, target, edges + 1));
+        let Some(name) = reference.strip_prefix("#/$defs/") else {
+            return true;
+        };
+        let key = (name.to_owned(), edges);
+        if let Some(unknown) = checked.get(&key) {
+            return *unknown;
+        }
+        let unknown = root
+            .get("$defs")
+            .and_then(|defs| defs.get(name))
+            .is_none_or(|target| unknown_schema_keyword(root, target, edges + 1, checked));
+        checked.insert(key, unknown);
+        return unknown;
     }
     object.iter().any(|(key, child)| {
         !KNOWN.contains(&key.as_str())
@@ -1619,9 +1643,9 @@ fn has_unknown_schema_keyword(root: &Value, value: &Value, edges: usize) -> bool
                 "properties" | "$defs" => child.as_object().is_some_and(|items| {
                     items
                         .values()
-                        .any(|sub| has_unknown_schema_keyword(root, sub, edges))
+                        .any(|sub| unknown_schema_keyword(root, sub, edges, checked))
                 }),
-                "items" => has_unknown_schema_keyword(root, child, edges),
+                "items" => unknown_schema_keyword(root, child, edges, checked),
                 "x-output-policy" => false,
                 _ => false,
             }
@@ -1640,6 +1664,7 @@ fn validate_schema_refs(root: &Value) -> Result<(), ()> {
         stack: &mut Vec<String>,
         edges: usize,
         depth: usize,
+        checked: &mut BTreeSet<(String, usize, usize)>,
     ) -> Result<(), ()> {
         let object = value.as_object().ok_or(())?;
         // Count expanded containers, not reference hops or the $defs storage map.
@@ -1670,9 +1695,16 @@ fn validate_schema_refs(root: &Value) -> Result<(), ()> {
             if edges >= 16 || stack.contains(&name.to_owned()) {
                 return Err(());
             }
+            // A shared definition has the same result at the same remaining
+            // edge/container budgets. Check cycles before consulting this cache.
+            let key = (name.to_owned(), edges, depth);
+            if checked.contains(&key) {
+                return Ok(());
+            }
             stack.push(name.to_owned());
-            scan(target, defs, stack, edges + 1, depth)?;
+            scan(target, defs, stack, edges + 1, depth, checked)?;
             stack.pop();
+            checked.insert(key);
         }
         for (key, child) in object {
             if key == "$defs" {
@@ -1681,18 +1713,19 @@ fn validate_schema_refs(root: &Value) -> Result<(), ()> {
             if matches!(key.as_str(), "properties" | "items") {
                 if key == "properties" {
                     for sub in child.as_object().ok_or(())?.values() {
-                        scan(sub, defs, stack, edges, depth)?;
+                        scan(sub, defs, stack, edges, depth, checked)?;
                     }
                 } else {
-                    scan(child, defs, stack, edges, depth)?;
+                    scan(child, defs, stack, edges, depth, checked)?;
                 }
             }
         }
         Ok(())
     }
-    scan(root, &defs, &mut Vec::new(), 0, 0)?;
+    let mut checked = BTreeSet::new();
+    scan(root, &defs, &mut Vec::new(), 0, 0, &mut checked)?;
     for def in defs.values() {
-        scan(def, &defs, &mut Vec::new(), 0, 0)?;
+        scan(def, &defs, &mut Vec::new(), 0, 0, &mut checked)?;
     }
     Ok(())
 }
@@ -1730,17 +1763,17 @@ fn value_matches(
     {
         return Some(false);
     }
-    if let Some(n) = value.as_f64()
-        && (object
-            .get("minimum")
-            .and_then(Value::as_f64)
-            .is_some_and(|min| n < min)
-            || object
-                .get("maximum")
-                .and_then(Value::as_f64)
-                .is_some_and(|max| n > max))
-    {
-        return Some(false);
+    if let Some(n) = value.as_number() {
+        for (key, rejected) in [
+            ("minimum", std::cmp::Ordering::Less),
+            ("maximum", std::cmp::Ordering::Greater),
+        ] {
+            if let Some(bound) = object.get(key)
+                && n.compare(bound.as_number()?)? == rejected
+            {
+                return Some(false);
+            }
+        }
     }
     if let Some(s) = value.as_str() {
         let len = s.chars().count();
@@ -2052,4 +2085,104 @@ fn valid_rfc3339(value: &str) -> bool {
         _ => return false,
     };
     day > 0 && day <= month_days
+}
+
+#[cfg(test)]
+mod reference_work_regressions {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn runtime_rights_sources_are_credential_free() {
+        for (source, valid) in [
+            ("https://example.org/license", true),
+            ("https://user:secret@example.org/license", false),
+            ("https://user@example.org/license", false),
+            ("https://@example.org/license", false),
+        ] {
+            let rights: Value = json!([{
+                "id":"license", "component_ids":[], "license":"MIT", "notices":[],
+                "source":source, "access_prerequisites":[], "distribution":"unknown",
+                "unresolved":[]
+            }])
+            .into();
+            assert_eq!(
+                validate_runtime_rights(&rights, &BTreeSet::new()).is_ok(),
+                valid
+            );
+        }
+    }
+
+    #[test]
+    fn shared_reference_graph_does_not_expand_every_path() {
+        // A small acyclic document describes 8^12 paths. It must remain cheap
+        // without reducing the accepted reference or container-depth limits.
+        let mut defs = serde_json::Map::new();
+        for level in 0..12 {
+            let child = if level == 11 {
+                json!({"type":"boolean"})
+            } else {
+                json!({"$ref":format!("#/$defs/node{}", level + 1)})
+            };
+            let props: serde_json::Map<String, serde_json::Value> = (0..8)
+                .map(|index| (format!("child{index}"), child.clone()))
+                .collect();
+            defs.insert(
+                format!("node{level}"),
+                json!({
+                    "type":"object", "properties":props, "additionalProperties":false
+                }),
+            );
+        }
+        let schema: Value = json!({
+            "$schema":"https://json-schema.org/draft/2020-12/schema",
+            "type":"object", "properties":{"root":{"$ref":"#/$defs/node0"}},
+            "additionalProperties":false, "$defs":defs, "default":{}
+        })
+        .into();
+        assert!(validate_schema_refs(&schema).is_ok());
+        let mut unresolved = Vec::new();
+        assert!(validate_schema_tree(&schema, &schema, &mut unresolved, "schema", 0).is_ok());
+        assert!(unresolved.is_empty());
+
+        let mut unknown = schema;
+        unknown["$defs"]["node11"]["properties"]["child0"]["future"] = Value::Bool(true);
+        assert!(validate_schema_refs(&unknown).is_ok());
+        assert!(validate_schema_tree(&unknown, &unknown, &mut unresolved, "schema", 0).is_ok());
+        assert!(!unresolved.is_empty());
+    }
+
+    #[test]
+    fn shared_targets_retain_each_paths_reference_and_container_limits() {
+        let mut defs = serde_json::Map::new();
+        defs.insert("shared".into(), json!({"type":"boolean"}));
+        for index in 0..16 {
+            let next = if index == 15 {
+                "shared".into()
+            } else {
+                format!("node{}", index + 1)
+            };
+            defs.insert(
+                format!("node{index}"),
+                json!({"$ref":format!("#/$defs/{next}")}),
+            );
+        }
+        // The shared target is first checked on a short path, then a path over 16 edges.
+        let schema: Value = json!({"type":"object", "additionalProperties":false,
+            "properties":{"a":{"$ref":"#/$defs/shared"},"b":{"$ref":"#/$defs/node0"}},
+            "$defs":defs})
+        .into();
+        assert!(validate_schema_refs(&schema).is_err());
+
+        let mut shared = json!({"type":"boolean"});
+        for _ in 0..30 {
+            shared = json!({"type":"array", "items":shared});
+        }
+        let schema: Value = json!({"type":"object", "additionalProperties":false,
+            "properties":{"a":{"$ref":"#/$defs/shared"},"b":{"type":"array",
+                "items":{"type":"array","items":{"$ref":"#/$defs/shared"}}}},
+            "$defs":{"shared":shared}})
+        .into();
+        assert!(validate_schema_refs(&schema).is_err());
+    }
 }

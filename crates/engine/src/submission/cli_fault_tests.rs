@@ -1,6 +1,9 @@
 //! Real CLI/native discovery/HTTPS against the normal engine composition.
 //! Faults are private per-root Rust-test latches, never public API operations.
 
+#[path = "coordination_regressions.rs"]
+mod coordination_regressions;
+
 use super::test_support::{Hooks, register};
 use crate::submission_fixture;
 use dissect3d_api::{
@@ -288,7 +291,7 @@ async fn interrupts_before_upload_or_post_never_submit_and_after_send_is_uncerta
     assert_eq!(output["accepted"], false);
     let _ = release.send(());
     assert_eq!(host.hooks.submit_seen.load(Ordering::Acquire), 0);
-    let (entered, release) = host.hooks.pause_info(3);
+    let (entered, release) = host.hooks.pause_info(4);
     let child = piped(host.submit("interrupt-before-post"));
     tokio::time::timeout(Duration::from_secs(5), entered)
         .await
@@ -362,7 +365,7 @@ async fn unsafe_pending_storage_prevents_post_and_receipt_failure_preserves_acce
     assert_eq!(output["accepted"], false);
     assert_eq!(host.hooks.submit_seen.load(Ordering::Acquire), 0);
     profile.remove_file(&quota).unwrap();
-    let (entered, release) = host.hooks.pause_info(3);
+    let (entered, release) = host.hooks.pause_info(4);
     let child = piped(host.submit("receipt-quota"));
     tokio::time::timeout(Duration::from_secs(5), entered)
         .await

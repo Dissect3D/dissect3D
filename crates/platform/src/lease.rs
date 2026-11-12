@@ -1,9 +1,9 @@
-//! Exclusive owner lease held for the lifetime of metadata authority.
+//! Cross-process exclusive leases for protected authorities and records.
 //!
 //! The lock file is persistent. Removing and recreating a locked inode could
 //! let two processes each hold a lock on a different file with the same name.
 
-use crate::{OwnedRoot, PlatformError};
+use crate::{OwnedRoot, PlatformError, RelativePath};
 use std::fs::File;
 
 #[cfg(unix)]
@@ -22,11 +22,18 @@ pub struct AuthorityLease {
 impl AuthorityLease {
     /// Acquire the permanent lock file without replacing or unlinking it.
     pub fn acquire(root: &OwnedRoot) -> Result<Self, PlatformError> {
+        Self::acquire_at(root, &RelativePath::parse("authority.lock")?)
+    }
+
+    /// Acquire a permanent named lease under an owner-validated root.
+    /// Callers bound the namespace and must never unlink a published lock file.
+    pub fn acquire_at(root: &OwnedRoot, path: &RelativePath) -> Result<Self, PlatformError> {
         #[cfg(unix)]
         {
+            let (parent, name) = root.open_parent(path, true)?;
             let descriptor = openat(
-                root.directory(),
-                "authority.lock",
+                &parent,
+                name.as_str(),
                 OFlags::RDWR
                     | OFlags::NONBLOCK
                     | OFlags::CREATE
@@ -54,7 +61,7 @@ impl AuthorityLease {
         {
             #[cfg(windows)]
             {
-                let file = crate::windows::open_lease_file(root)?;
+                let file = crate::windows::open_lease_file_at(root, path)?;
                 match file.try_lock() {
                     Ok(()) => Ok(Self { _file: file }),
                     Err(std::fs::TryLockError::WouldBlock) => Err(PlatformError::Busy),
@@ -63,7 +70,7 @@ impl AuthorityLease {
             }
             #[cfg(not(windows))]
             {
-                let _ = root;
+                let _ = (root, path);
                 Err(PlatformError::UnsupportedRoot)
             }
         }

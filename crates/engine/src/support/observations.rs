@@ -274,7 +274,10 @@ pub(crate) fn for_model_binding(
                 && selected_runtime.is_none_or(|v| profile["runtime_ref"] == v)
                 && selected_variant.is_none_or(|v| profile["variant"] == v)
         })
-        .cloned()
+        .map(|profile| {
+            serde_json::to_value(profile)
+                .expect("validated tested profiles contain no numeric fields")
+        })
         .collect();
     Ok((scope, evidence, tested_profiles))
 }
@@ -314,29 +317,12 @@ fn inspection_selection(
         .as_deref()
         .or_else(|| model.declaration["default_variant"].as_str())
         .ok_or_else(|| ambiguous(&model.id))?;
-    let variant = model.declaration["variants"]
-        .as_array()
-        .and_then(|variants| {
-            variants
-                .iter()
-                .find(|candidate| candidate["id"] == variant_id)
-        })
-        .ok_or(DiscoveryError::NotFound)?;
-    let compatible = model.declaration["runtime_refs"]
-        .as_array()
-        .is_some_and(|refs| {
-            refs.iter()
-                .any(|reference| reference == &runtime.runtime_ref)
-        })
-        && variant["runtime_refs"].as_array().is_some_and(|refs| {
-            refs.iter()
-                .any(|reference| reference == &runtime.runtime_ref)
-        })
-        && variant["task_keys"].as_array().is_some_and(|keys| {
-            keys.iter()
-                .any(|key| key["id"] == task.task.id() && key["version"] == task.task.version())
-        });
-    if !compatible {
+    if !super::compatibility::structurally_compatible(
+        &model.declaration,
+        &task.task,
+        &runtime.runtime_ref,
+        variant_id,
+    ) {
         return Err(DiscoveryError::NotFound);
     }
     let mut unresolved_paths = model.unresolved_paths.clone();
@@ -361,62 +347,37 @@ fn ambiguous(id: &str) -> DiscoveryError {
 }
 
 fn model_evidence(model: &ModelRecord) -> EvidenceObservation {
-    let records = model.declaration["evidence"].as_array();
-    let ids = records
-        .into_iter()
-        .flatten()
-        .filter_map(|item| item["id"].as_str().map(str::to_owned))
-        .collect::<Vec<_>>();
-    let mut limitations = if model.test_only {
-        vec!["Synthetic only".to_owned()]
-    } else {
-        records
-            .into_iter()
-            .flatten()
-            .flat_map(|item| item["limitations"].as_array().into_iter().flatten())
-            .filter_map(Value::as_str)
-            .map(str::to_owned)
-            .collect()
-    };
-    limitations.sort();
-    limitations.dedup();
-    let status = if model.test_only {
-        "incomplete"
-    } else if ids.is_empty() {
-        "unknown"
-    } else if limitations.is_empty() {
-        "complete"
-    } else {
-        "incomplete"
-    };
-    EvidenceObservation {
-        status: status.to_owned(),
-        ids,
-        limitations,
-    }
+    declaration_evidence(&model.declaration, model.test_only)
 }
 
 fn runtime_evidence(runtime: &RuntimeRecord) -> EvidenceObservation {
-    let records = runtime.declaration["evidence"].as_array();
+    declaration_evidence(&runtime.declaration, runtime.test_only)
+}
+
+fn declaration_evidence(
+    declaration: &dissect3d_api::DeclarationValue,
+    test_only: bool,
+) -> EvidenceObservation {
+    let records = declaration["evidence"].as_array();
     let ids = records
         .into_iter()
         .flatten()
         .filter_map(|item| item["id"].as_str().map(str::to_owned))
         .collect::<Vec<_>>();
-    let mut limitations = if runtime.test_only {
+    let mut limitations = if test_only {
         vec!["Synthetic only".to_owned()]
     } else {
         records
             .into_iter()
             .flatten()
             .flat_map(|item| item["limitations"].as_array().into_iter().flatten())
-            .filter_map(Value::as_str)
+            .filter_map(dissect3d_api::DeclarationValue::as_str)
             .map(str::to_owned)
             .collect()
     };
     limitations.sort();
     limitations.dedup();
-    let status = if runtime.test_only {
+    let status = if test_only {
         "incomplete"
     } else if ids.is_empty() {
         "unknown"

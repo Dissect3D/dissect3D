@@ -570,4 +570,5 @@ mod tests {
             "[\"string\",\"รฉ\"]".as_bytes()
         );
     }
+    include!("numeric_regressions.rs");
 }

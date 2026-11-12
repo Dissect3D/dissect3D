@@ -15,6 +15,13 @@ use std::path::{Path, PathBuf};
 
 const MAX_DEFINITION_BYTES: usize = 65_536;
 
+#[derive(Clone, serde::Serialize)]
+pub(crate) struct SubmissionSuccess {
+    pub(crate) sub_id: Option<dissect3d_api::SubmissionId>,
+    #[serde(flatten)]
+    pub(crate) receipt: dissect3d_api::AcceptanceReceipt,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct DefinitionError;
 
@@ -205,9 +212,12 @@ async fn submit_inner(
     config_path: &Path,
     limits: dissect3d_api::ClientLimits,
     control: &SubmissionControl,
-) -> Result<serde_json::Value, super::CommandError> {
+) -> Result<SubmissionSuccess, super::CommandError> {
     use crate::submissions::{PendingSubmission, SubmissionRecords};
-    use dissect3d_api::{IdempotencyKey, ModelLookup, PageQuery, SubmissionId, TaskListQuery};
+    use dissect3d_api::{
+        IdempotencyKey, ModelLookup, ObservationScope, PageQuery, SubmissionId, TaskKey,
+        TaskListQuery,
+    };
 
     let key = match args.idempotency_key.as_deref() {
         Some(value) => IdempotencyKey::parse(value).map_err(|_| definition_error())?,
@@ -226,12 +236,11 @@ async fn submit_inner(
         )
     })?;
     let profile = crate::connection::Profile::open(config_path).map_err(before_connection_error)?;
-    let records = SubmissionRecords::lock(&profile).map_err(record_error)?;
     let engine = profile
         .connection(&root, limits.connect_timeout, limits)
         .map_err(before_connection_error)?;
     let credential = profile
-        .selected_credential(config, &engine)
+        .credential_snapshot(config, &engine)
         .map_err(before_connection_error)?;
     let installation_id = credential.installation_id.clone();
     let client_id = credential.client_id.clone();
@@ -240,23 +249,24 @@ async fn submit_inner(
         control.checkpoint().await?;
         let info = client.info().await.map_err(before_client_error)?;
         require_operations(&info)?;
+        let mut model_selector = definition.model.clone();
         let declared = if definition.task.is_none() {
             let model = client
                 .model(ModelLookup {
                     selector: definition.model.clone(),
-                    runtime_ref: definition.runtime.clone(),
-                    variant: definition.variant.clone(),
                     ..Default::default()
                 })
                 .await
                 .map_err(before_client_error)?;
+            // Discover the complete task identity before applying selection selectors.
+            model_selector = model.item.summary.support_ref;
             let tasks = client
                 .tasks(TaskListQuery {
                     page: PageQuery {
                         limit: Some(2),
                         cursor: None,
                     },
-                    support_ref: Some(model.item.summary.support_ref),
+                    support_ref: Some(model_selector.clone()),
                 })
                 .await
                 .map_err(before_client_error)?;
@@ -280,6 +290,37 @@ async fn submit_inner(
         definition
             .validate_selected_task(task.clone())
             .map_err(|_| definition_error())?;
+        let selected = client
+            .model(ModelLookup {
+                selector: model_selector.clone(),
+                task: Some(TaskKey::new(&task.id, &task.version).map_err(|_| definition_error())?),
+                runtime_ref: definition.runtime.clone(),
+                variant: definition.variant.clone(),
+            })
+            .await
+            .map_err(before_client_error)?;
+        let summary = selected.item.summary;
+        let [observation] = summary.observations.as_slice() else {
+            return Err(before_client_error(
+                dissect3d_api::ClientError::InvalidResponse,
+            ));
+        };
+        let selection = &observation.selection;
+        if observation.scope != ObservationScope::Selection
+            || (definition.task.is_none() && summary.support_ref != model_selector)
+            || selection["support_ref"] != summary.support_ref
+            || selection["task"] != serde_json::json!(task)
+            || selection["runtime_ref"].as_str().is_none_or(str::is_empty)
+            || selection["variant"].as_str().is_none_or(str::is_empty)
+            || definition
+                .variant
+                .as_ref()
+                .is_some_and(|variant| selection["variant"] != *variant)
+        {
+            return Err(before_client_error(
+                dissect3d_api::ClientError::InvalidResponse,
+            ));
+        }
         // Open and validate every selected regular file before the first upload.
         let inputs = definition.open_inputs().map_err(|_| definition_error())?;
         let mut references: BTreeMap<String, Vec<InputRef>> = BTreeMap::new();
@@ -315,8 +356,12 @@ async fn submit_inner(
         };
         control.local_id(record.sub_id.clone());
         control.checkpoint().await?;
-        records.save_new(&record).map_err(record_error)?;
-        send_record(&client, &records, &record, control).await
+        let record_lease = {
+            let records = SubmissionRecords::lock(&profile).map_err(record_error)?;
+            records.save_new(&record).map_err(record_error)?;
+            records.coordinate(&record).map_err(record_error)?
+        };
+        send_record(&client, &record_lease, &record, control).await
     }
 }
 
@@ -325,7 +370,7 @@ pub(crate) fn submit(
     config: &crate::config::ConfigFile,
     path: &Path,
     limits: dissect3d_api::ClientLimits,
-) -> Result<serde_json::Value, super::CommandError> {
+) -> Result<SubmissionSuccess, super::CommandError> {
     let runtime = super::tokio_runtime();
     let (control, signal) = SubmissionControl::new(&runtime)?;
     runtime.block_on(control.run(signal, submit_inner(args, config, path, limits, &control)))
@@ -336,36 +381,59 @@ pub(crate) fn recover(
     config: &crate::config::ConfigFile,
     path: &Path,
     limits: dissect3d_api::ClientLimits,
-) -> Result<serde_json::Value, super::CommandError> {
+) -> Result<SubmissionSuccess, super::CommandError> {
     use crate::submissions::SubmissionRecords;
     let runtime = super::tokio_runtime();
     let (control, signal) = SubmissionControl::new(&runtime)?;
-    runtime.block_on(control.run(signal,async {
-        let id=dissect3d_api::SubmissionId::parse(id).map_err(|_|definition_error())?;
-        let profile=SubmissionRecords::open_existing(path).map_err(record_error)?;
-        let records=SubmissionRecords::lock(&profile).map_err(record_error)?;
-        let record=records.load(&id).map_err(record_error)?;
-        control.local_id(id);
-        if let Some(receipt)=&record.receipt {control.accepted(receipt.clone());}
+    runtime.block_on(control.run(signal, async {
+        let id = dissect3d_api::SubmissionId::parse(id).map_err(|_| definition_error())?;
+        let profile = SubmissionRecords::open_existing(path).map_err(record_error)?;
+        let (record, record_lease) = {
+            let records = SubmissionRecords::lock(&profile).map_err(|error| {
+                let mut failure = record_error(error);
+                if error == crate::submissions::RecordError::Busy {
+                    failure.context.get_or_insert_with(Default::default).accepted = Some(serde_json::Value::Null);
+                }
+                failure
+            })?;
+            let record = records.load(&id).map_err(record_error)?;
+            control.local_id(id);
+            if let Some(receipt) = &record.receipt {
+                control.accepted(receipt.clone());
+            } else {
+                control.recovering_unknown();
+            }
+            let record_lease = records.coordinate(&record).map_err(record_error)?;
+            (record, record_lease)
+        };
         use std::io::Write;
-        let _=writeln!(std::io::stderr().lock(),"Explicit recovery may FIRST accept a job; it repeats the stored request and key without reading or uploading source files.");
-        let root=super::data_root(config,path).ok_or_else(||failure("engine_unavailable","Configure the original engine connection before recovery",3,Some(false),None))?;
-        let engine=profile.connection(&root,limits.connect_timeout,limits).map_err(before_connection_error)?;
-        let credential=profile.selected_credential(config,&engine).map_err(before_connection_error)?;
-        if credential.installation_id!=record.installation_id || credential.client_id!=record.client_id {
-            return Err(failure("recovery_identity_mismatch","Recovery requires the original installation and credential",5,Some(false),None));
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "Explicit recovery may FIRST accept a job; it repeats the stored request and key without reading or uploading source files."
+        );
+        let root = super::data_root(config, path).ok_or_else(|| failure(
+            "engine_unavailable", "Configure the original engine connection before recovery",
+            3, Some(false), None,
+        ))?;
+        let engine = profile.connection(&root, limits.connect_timeout, limits).map_err(before_connection_error)?;
+        let credential = profile.credential_snapshot(config, &engine).map_err(before_connection_error)?;
+        if credential.installation_id != record.installation_id || credential.client_id != record.client_id {
+            return Err(failure(
+                "recovery_identity_mismatch", "Recovery requires the original installation and credential",
+                5, Some(false), None,
+            ));
         }
-        let client=engine.client(credential).map_err(before_connection_error)?;
-        send_record(&client,&records,&record,&control).await
+        let client = engine.client(credential).map_err(before_connection_error)?;
+        send_record(&client, &record_lease, &record, &control).await
     }))
 }
 
 async fn send_record(
     client: &dissect3d_api::Client,
-    records: &crate::submissions::SubmissionRecords<'_>,
+    records: &crate::submissions::SubmissionRecordLease<'_>,
     record: &crate::submissions::PendingSubmission,
     control: &SubmissionControl,
-) -> Result<serde_json::Value, super::CommandError> {
+) -> Result<SubmissionSuccess, super::CommandError> {
     let request = dissect3d_api::decode_job_request(record.request_body_utf8.as_bytes())
         .map_err(|_| record_error(crate::submissions::RecordError::Invalid))?;
     let receipt = match client
@@ -377,21 +445,24 @@ async fn send_record(
             return control.interrupt_outcome();
         }
         Err(error) => {
-            if matches!(&error, dissect3d_api::SubmissionClientError::Rejected(_)) {
-                control.rejected();
+            if let dissect3d_api::SubmissionClientError::Rejected(rejection) = &error {
+                control.rejected_by(rejection.error.code);
             }
             return Err(send_error(error, &record.sub_id));
         }
     };
     control.accepted(receipt.clone());
-    let data = serde_json::json!({"accepted":true,"sub_id":record.sub_id,"job_id":receipt.job_id,"replayed":receipt.replayed});
+    let data = SubmissionSuccess {
+        sub_id: Some(record.sub_id.clone()),
+        receipt: receipt.clone(),
+    };
     if records.save_receipt(record, receipt).is_err() {
         return Err(failure(
             "recovery_storage_failed",
             "The job was accepted, but its local receipt could not be saved",
             19,
             Some(true),
-            Some(data),
+            None,
         ));
     }
     Ok(data)
@@ -451,6 +522,15 @@ fn require_operations(info: &dissect3d_api::EngineInfo) -> Result<(), super::Com
 
 pub(crate) fn record_error(error: crate::submissions::RecordError) -> super::CommandError {
     use crate::submissions::RecordError;
+    if error == RecordError::RecordBusy {
+        return failure(
+            "profile_busy",
+            "This submission is in use by another process; retry the same record",
+            2,
+            None,
+            None,
+        );
+    }
     let (category, message) = match error {
         RecordError::Missing => (
             "recovery_record_unavailable",
@@ -472,6 +552,7 @@ pub(crate) fn record_error(error: crate::submissions::RecordError) -> super::Com
             "profile_busy",
             "The selected profile is busy; retry the command",
         ),
+        RecordError::RecordBusy => unreachable!("handled above"),
     };
     failure(category, message, 2, Some(false), None)
 }
@@ -556,6 +637,7 @@ fn failure(
             accepted: accepted.map(serde_json::Value::Bool),
             data,
             operation_id: None,
+            raw_data: None,
         })),
     }
 }

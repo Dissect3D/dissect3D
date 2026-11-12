@@ -4,7 +4,7 @@ use super::{
     AdapterIdentity, AssetIdentity, Catalog, CodeIdentity, DiscoveryError, PatchIdentity,
     ResolvedSelection, SchemaIdentity, Selection,
 };
-use serde_json::Value;
+use dissect3d_api::DeclarationValue as Value;
 
 #[cfg_attr(
     all(not(unix), not(test), not(feature = "test-support")),
@@ -64,22 +64,12 @@ pub(super) fn resolve(
             candidates: vec![model.id.clone()],
             candidates_truncated: false,
         })?;
-    let variant = declaration["variants"]
-        .as_array()
-        .and_then(|variants| variants.iter().find(|item| item["id"] == variant_id))
-        .ok_or(DiscoveryError::NotFound)?;
-    let runtime_compatible = declaration["runtime_refs"]
-        .as_array()
-        .is_some_and(|items| items.iter().any(|item| item == runtime_ref))
-        && variant["runtime_refs"]
-            .as_array()
-            .is_some_and(|items| items.iter().any(|item| item == runtime_ref));
-    let task_compatible = variant["task_keys"].as_array().is_some_and(|items| {
-        items.iter().any(|item| {
-            item["id"] == selection.task.id() && item["version"] == selection.task.version()
-        })
-    });
-    if !runtime_compatible || !task_compatible {
+    if !super::compatibility::structurally_compatible(
+        declaration,
+        &selection.task,
+        runtime_ref,
+        variant_id,
+    ) {
         return Err(DiscoveryError::NotFound);
     }
 

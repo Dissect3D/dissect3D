@@ -1,8 +1,8 @@
 //! Closed schema semantics implemented by the controlled fixture validator.
 
 use super::admission::AdmissionError;
+use dissect3d_api::DeclarationValue as Value;
 use dissect3d_api::{JobRequest, SubmissionValue};
-use serde_json::Value;
 use std::collections::BTreeMap;
 
 pub(super) fn schema_for_binding<'a>(
@@ -24,7 +24,7 @@ pub(super) fn schema_for_binding<'a>(
                 && schema.document["version"] == "1.0"
                 && schema.document["id"] == schema_ref["id"]
                 && schema.document["version"] == schema_ref["version"]
-                && schema.sha256 == schema_ref["sha256"]
+                && schema_ref["sha256"] == schema.sha256
         })
         .map(|schema| &schema.document["schema"])
         .ok_or(AdmissionError::UnsupportedSelection)

@@ -16,7 +16,7 @@ use std::path::Path;
 
 pub(crate) struct Success {
     pub(crate) command: &'static str,
-    pub(crate) data: Value,
+    pub(crate) data: Box<serde_json::value::RawValue>,
     pub(crate) warnings: Vec<String>,
 }
 
@@ -152,12 +152,11 @@ pub(super) fn connected<T>(
 ) -> Result<T, CommandError> {
     let root = data_root(config, config_path).ok_or_else(read_unconfigured("unavailable"))?;
     let profile = Profile::open(config_path).map_err(CommandError::connection)?;
-    let _profile_control = profile.lock_control().map_err(CommandError::connection)?;
     let engine = profile
         .connection(&root, client_limits.connect_timeout, client_limits)
         .map_err(CommandError::connection)?;
     let credential = profile
-        .selected_credential(config, &engine)
+        .credential_snapshot(config, &engine)
         .map_err(CommandError::connection)?;
     let client = engine
         .client(credential)
@@ -166,8 +165,10 @@ pub(super) fn connected<T>(
 }
 
 fn success<T: Serialize>(command: &'static str, value: T) -> Result<Success, CommandError> {
-    let data = serde_json::to_value(value).map_err(|_| invalid_error())?;
-    let warnings = if contains_unsupported_semantics(&data) {
+    let data = serde_json::value::to_raw_value(&value).map_err(|_| invalid_error())?;
+    let inspected: dissect3d_api::DeclarationValue =
+        serde_json::from_str(data.get()).map_err(|_| invalid_error())?;
+    let warnings = if contains_unsupported_semantics(&inspected) {
         vec!["required_feature_unsupported".to_owned()]
     } else {
         Vec::new()
@@ -179,15 +180,33 @@ fn success<T: Serialize>(command: &'static str, value: T) -> Result<Success, Com
     })
 }
 
-fn contains_unsupported_semantics(value: &Value) -> bool {
-    match value {
-        Value::Object(object) => {
-            object.get("code").and_then(Value::as_str) == Some("required_feature_unsupported")
-                || object.values().any(contains_unsupported_semantics)
-        }
-        Value::Array(values) => values.iter().any(contains_unsupported_semantics),
-        _ => false,
+fn contains_unsupported_semantics(value: &dissect3d_api::DeclarationValue) -> bool {
+    fn item_has_warning(item: &dissect3d_api::DeclarationValue) -> bool {
+        item["observations"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|observation| {
+                observation["eligibility"]["blockers"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(|reason| reason["code"] == "required_feature_unsupported")
+            })
     }
+    // Raw declarations can contain arbitrary user-defined "code" members.
+    // Only engine-owned observation reasons establish this warning.
+    value["items"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(item_has_warning)
+        || item_has_warning(&value["item"])
+        || value["item"]["bindings"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(item_has_warning)
 }
 
 fn discovery_error(error: ClientError) -> CommandError {
@@ -280,5 +299,52 @@ fn usage_error() -> CommandError {
             accepted: Some(Value::Null),
             ..Default::default()
         })),
+    }
+}
+
+#[cfg(test)]
+mod numeric_output_regressions {
+    #[test]
+    fn declaration_output_preserves_exact_tokens_and_warnings() {
+        let value: dissect3d_api::DeclarationValue = dissect3d_api::decode_json(
+            br#"{"item":{"declaration":{"number":9007199254740993.0000000000000001,"future":{"$serde_json::private::Number":"123"}},"observations":[{"eligibility":{"blockers":[{"code":"required_feature_unsupported"}]}}]}}"#,
+        ).unwrap();
+        let success =
+            super::success("models show", &value).unwrap_or_else(|_| panic!("discovery output"));
+        assert_eq!(success.warnings, ["required_feature_unsupported"]);
+        let encoded = success.data.get();
+        assert!(encoded.contains("9007199254740993.0000000000000001"));
+        let again: dissect3d_api::DeclarationValue =
+            dissect3d_api::decode_json(encoded.as_bytes()).unwrap();
+        assert_eq!(again, value);
+    }
+}
+
+#[cfg(test)]
+mod warning_regressions {
+    #[test]
+    fn declaration_content_cannot_invent_an_engine_warning() {
+        let value = serde_json::json!({"item": {
+            "declaration":{"future":{"code":"required_feature_unsupported"}},
+            "observations":[]
+        }});
+        let result =
+            super::success("models show", value).unwrap_or_else(|_| panic!("discovery output"));
+        assert!(result.warnings.is_empty());
+    }
+
+    #[test]
+    fn list_and_task_binding_observations_retain_warnings() {
+        let observation = serde_json::json!({
+            "eligibility":{"blockers":[{"code":"required_feature_unsupported"}]}
+        });
+        for value in [
+            serde_json::json!({"items":[{"observations":[observation.clone()]}]}),
+            serde_json::json!({"item":{"bindings":[{"observations":[observation]}]}}),
+        ] {
+            let result =
+                super::success("tasks show", value).unwrap_or_else(|_| panic!("discovery output"));
+            assert_eq!(result.warnings, ["required_feature_unsupported"]);
+        }
     }
 }

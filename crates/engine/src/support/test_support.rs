@@ -25,3 +25,30 @@ fn fixture_package() -> ControlledPackage {
         ],
     }
 }
+
+// Separate supplementary fixture; accepted package bytes above remain unchanged.
+pub(crate) fn selection_catalog() -> Result<Catalog, CatalogError> {
+    use serde_json::{Value, json};
+
+    let mut package = fixture_package();
+    let mut model: Value = serde_json::from_slice(&package.document_bytes[7])
+        .map_err(|_| CatalogError::InvalidPackage)?;
+    let original = model["tasks"][0].clone();
+    for version in ["2.0", "3.0"] {
+        let mut binding = original.clone();
+        binding["task"]["version"] = json!(version);
+        model["tasks"].as_array_mut().unwrap().push(binding);
+        model["variants"][0]["task_keys"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"id": original["task"]["id"], "version": version}));
+    }
+    let bytes = serde_json::to_vec(&model).map_err(|_| CatalogError::InvalidPackage)?;
+    let mut index: Value =
+        serde_json::from_slice(&package.index_bytes).map_err(|_| CatalogError::InvalidPackage)?;
+    index["documents"][7]["sha256"] = json!(super::digest(&bytes));
+    index["documents"][7]["byte_length"] = json!(bytes.len());
+    package.document_bytes[7] = bytes;
+    package.index_bytes = serde_json::to_vec(&index).map_err(|_| CatalogError::InvalidPackage)?;
+    Catalog::from_packages(vec![package], DiscoveryLimits::default())
+}

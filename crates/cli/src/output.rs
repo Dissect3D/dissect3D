@@ -47,12 +47,18 @@ impl CommandOutcome {
     }
 
     pub(crate) fn success_raw(command: &str, data: Box<serde_json::value::RawValue>) -> Self {
+        #[derive(serde::Deserialize, Default)]
+        struct Metadata {
+            accepted: Option<bool>,
+            operation_id: Option<String>,
+        }
+        let metadata: Metadata = serde_json::from_str(data.get()).unwrap_or_default();
         Self {
             cli_output_version: "1.0",
             command: command.into(),
             ok: true,
-            accepted: None,
-            operation_id: None,
+            accepted: metadata.accepted.map(serde_json::Value::Bool),
+            operation_id: metadata.operation_id,
             data: Some(OutputData::Raw(data)),
             warnings: Vec::new(),
             error: None,
@@ -82,6 +88,18 @@ impl CommandOutcome {
             warnings,
             error: None,
         }
+    }
+
+    pub(crate) fn with_raw_data(mut self, data: Option<Box<serde_json::value::RawValue>>) -> Self {
+        if let Some(data) = data {
+            self.data = Some(OutputData::Raw(data));
+        }
+        self
+    }
+
+    pub(crate) fn with_warnings(mut self, warnings: Vec<String>) -> Self {
+        self.warnings = warnings;
+        self
     }
 
     pub(crate) fn failure(command: &str, error: ErrorInfo) -> Self {

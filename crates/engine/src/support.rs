@@ -1,5 +1,6 @@
 //! Engine-owned immutable support catalog construction.
 
+mod compatibility;
 #[cfg(any(test, feature = "test-support"))]
 mod declarations;
 mod observations;
@@ -9,17 +10,14 @@ mod resolver;
 pub mod test_support;
 
 use dissect3d_api::{SchemaAttachment, TaskKey};
+#[cfg(test)]
 use serde_json::Value;
 use std::collections::BTreeMap;
 
 pub(crate) use observations::{ObservationFacts, for_model_binding, for_runtime, observe};
 pub(crate) use pagination::{InventoryQuery, InventoryResult};
 
-#[cfg(test)]
-use serde::Deserialize;
 use sha2::{Digest, Sha256};
-#[cfg(test)]
-use std::collections::BTreeSet;
 
 fn digest(bytes: &[u8]) -> String {
     use std::fmt::Write;
@@ -28,38 +26,6 @@ fn digest(bytes: &[u8]) -> String {
         let _ = write!(result, "{byte:02x}");
     }
     result
-}
-
-#[cfg(test)]
-fn valid_name(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 128
-        && value != "."
-        && value != ".."
-        && value
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
-}
-
-#[cfg(test)]
-fn valid_reference(value: &str, schema: bool) -> bool {
-    let Some((name, revision)) = value.split_once('@') else {
-        return false;
-    };
-    if !valid_name(name) || !valid_name(revision) {
-        return false;
-    }
-    if !schema {
-        return true;
-    }
-    let mut parts = revision.split('.');
-    let valid = |part: &str| {
-        !part.is_empty()
-            && !(part.len() > 1 && part.starts_with('0'))
-            && part.bytes().all(|b| b.is_ascii_digit())
-            && part.parse::<u16>().is_ok()
-    };
-    matches!((parts.next(), parts.next(), parts.next()), (Some(a), Some(b), None) if valid(a) && valid(b))
 }
 
 /// Exact package bytes accepted only through engine-owned composition.
@@ -127,7 +93,7 @@ pub(crate) struct ModelRecord {
     pub(crate) document_sha256: String,
     pub(crate) description: String,
     pub(crate) test_only: bool,
-    pub(crate) declaration: Value,
+    pub(crate) declaration: dissect3d_api::DeclarationValue,
     pub(crate) schemas: Vec<SchemaAttachment>,
     pub(crate) tasks: Vec<TaskBindingRecord>,
     #[cfg(test)]
@@ -149,7 +115,7 @@ pub(crate) struct RuntimeRecord {
     pub(crate) document_sha256: String,
     pub(crate) description: String,
     pub(crate) test_only: bool,
-    pub(crate) declaration: Value,
+    pub(crate) declaration: dissect3d_api::DeclarationValue,
     pub(crate) unresolved_paths: Vec<String>,
 }
 
@@ -157,7 +123,7 @@ pub(crate) struct RuntimeRecord {
 #[derive(Clone, Debug)]
 pub(crate) struct SchemaRecord {
     pub(crate) sha256: String,
-    pub(crate) document: Value,
+    pub(crate) document: dissect3d_api::DeclarationValue,
     pub(crate) unresolved_paths: Vec<String>,
 }
 
@@ -167,7 +133,7 @@ pub(crate) struct TaskBindingRecord {
     pub(crate) task: TaskKey,
     pub(crate) support_ref: String,
     pub(crate) description: String,
-    pub(crate) binding: Value,
+    pub(crate) binding: dissect3d_api::DeclarationValue,
     pub(crate) schemas: Vec<SchemaAttachment>,
     pub(crate) unresolved_paths: Vec<String>,
 }
@@ -377,105 +343,18 @@ impl Catalog {
     }
 }
 
-#[cfg(test)]
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Index {
-    schema_version: String,
-    required_features: Vec<String>,
-    documents: Vec<Document>,
-    aliases: Vec<Alias>,
-}
-
-#[cfg(test)]
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Document {
-    kind: String,
-    #[serde(rename = "ref")]
-    reference: String,
-    sha256: String,
-    byte_length: u64,
-}
-
-#[cfg(test)]
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Alias {
-    kind: String,
-    name: String,
-    target: String,
-}
-
-/// Validates package index identity against separately supplied exact bytes.
-/// This is only the index and byte-integrity layer; declaration validation is
-/// required before any catalog can be published.
+/// Exercise the real catalog integrity check from the original index regression.
 #[cfg(test)]
 pub(crate) fn index_revision(index_bytes: &[u8], documents: &[Vec<u8>]) -> Result<String, ()> {
-    if index_bytes.len() > 8_388_608 {
-        return Err(());
-    }
-    let index: Index = dissect3d_api::decode_json(index_bytes).map_err(|_| ())?;
-    if index.schema_version != "1.0"
-        || !index.required_features.is_empty()
-        || index.documents.len() != documents.len()
-        || index.documents.len() > 1024
-        || index.aliases.len() > 1024
-    {
-        return Err(());
-    }
-    let mut total = index_bytes.len();
-    let mut identities = BTreeMap::new();
-    let mut rows = BTreeSet::new();
-    for (entry, bytes) in index.documents.iter().zip(documents) {
-        total = total.checked_add(bytes.len()).ok_or(())?;
-        if total > 8_388_608
-            || !matches!(entry.kind.as_str(), "support" | "runtime" | "schema")
-            || !valid_reference(&entry.reference, entry.kind == "schema")
-            || entry.byte_length != bytes.len() as u64
-            || digest(bytes) != entry.sha256
-        {
-            return Err(());
-        }
-        let _: serde_json::Value = dissect3d_api::decode_json(bytes).map_err(|_| ())?;
-        let key = (entry.kind.as_str(), entry.reference.as_str());
-        if let Some(previous) = identities.insert(key, (entry.sha256.as_str(), bytes))
-            && previous != (entry.sha256.as_str(), bytes)
-        {
-            return Err(());
-        }
-        rows.insert(format!(
-            "D\t{}\t{}\t{}\n",
-            entry.kind, entry.reference, entry.sha256
-        ));
-    }
-    let mut aliases = BTreeSet::new();
-    let mut alias_rows = BTreeSet::new();
-    for alias in &index.aliases {
-        let kind = match alias.kind.as_str() {
-            "model" => "support",
-            "runtime" => "runtime",
-            _ => return Err(()),
-        };
-        if !valid_name(&alias.name)
-            || ["mdl_", "rtp_", "tsk_"]
-                .iter()
-                .any(|prefix| alias.name.starts_with(prefix))
-            || !aliases.insert((&alias.kind, &alias.name))
-            || !identities.contains_key(&(kind, alias.target.as_str()))
-        {
-            return Err(());
-        }
-        alias_rows.insert(format!(
-            "A\t{}\t{}\t{}\n",
-            alias.kind, alias.name, alias.target
-        ));
-    }
-    let mut preimage = String::from("dissect3d-catalog-v1\n");
-    for row in rows.iter().chain(alias_rows.iter()) {
-        preimage.push_str(row);
-    }
-    Ok(digest(preimage.as_bytes()))
+    Catalog::from_packages(
+        vec![ControlledPackage {
+            index_bytes: index_bytes.to_vec(),
+            document_bytes: documents.to_vec(),
+        }],
+        DiscoveryLimits::default(),
+    )
+    .map(|catalog| catalog.revision)
+    .map_err(|_| ())
 }
 
 /// The revision of an empty catalog is the hash of the catalog header.
@@ -1152,4 +1031,6 @@ mod tests {
         package.index_bytes = serde_json::to_vec(&index).unwrap();
     }
     include!("support/schema_regressions.rs");
+    include!("support/selection_regressions.rs");
+    include!("support/numeric_regressions.rs");
 }

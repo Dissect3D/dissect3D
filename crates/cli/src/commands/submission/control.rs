@@ -10,6 +10,7 @@ use std::sync::{
 enum SubmissionSendState {
     NotSent,
     MayHaveBeenSent,
+    RecoveryUnknown,
     Rejected,
     Accepted(Box<AcceptanceReceipt>),
 }
@@ -61,8 +62,10 @@ impl SubmissionControl {
     pub(super) async fn run(
         &self,
         mut signal: tokio::sync::oneshot::Receiver<()>,
-        work: impl std::future::Future<Output = Result<serde_json::Value, super::super::CommandError>>,
-    ) -> Result<serde_json::Value, super::super::CommandError> {
+        work: impl std::future::Future<
+            Output = Result<super::SubmissionSuccess, super::super::CommandError>,
+        >,
+    ) -> Result<super::SubmissionSuccess, super::super::CommandError> {
         tokio::task::yield_now().await;
         let result =
             tokio::select! {biased;result=work=>result,_=&mut signal=>self.interrupt_outcome()};
@@ -75,16 +78,34 @@ impl SubmissionControl {
     pub(super) fn accepted(&self, receipt: AcceptanceReceipt) {
         *self.state.borrow_mut() = SubmissionSendState::Accepted(Box::new(receipt));
     }
+    pub(super) fn recovering_unknown(&self) {
+        *self.state.borrow_mut() = SubmissionSendState::RecoveryUnknown;
+    }
     pub(super) fn rejected(&self) {
         if !matches!(*self.state.borrow(), SubmissionSendState::Accepted(_)) {
             *self.state.borrow_mut() = SubmissionSendState::Rejected;
         }
     }
+    pub(super) fn rejected_by(&self, code: dissect3d_api::ErrorCode) {
+        use dissect3d_api::ErrorCode;
+        if matches!(*self.state.borrow(), SubmissionSendState::RecoveryUnknown)
+            && !matches!(
+                code,
+                ErrorCode::InputUnavailable | ErrorCode::IdempotencyConflict
+            )
+        {
+            return;
+        }
+        self.rejected();
+    }
     pub(super) fn begin_send(&self) -> bool {
         if self.interrupted.load(Ordering::Acquire) {
             return false;
         }
-        if !matches!(*self.state.borrow(), SubmissionSendState::Accepted(_)) {
+        if !matches!(
+            *self.state.borrow(),
+            SubmissionSendState::Accepted(_) | SubmissionSendState::RecoveryUnknown
+        ) {
             *self.state.borrow_mut() = SubmissionSendState::MayHaveBeenSent;
         }
         true
@@ -108,22 +129,23 @@ impl SubmissionControl {
             .as_ref()
             .map(|id| serde_json::json!({"sub_id":id}))
     }
-    fn accepted_data(&self) -> Option<serde_json::Value> {
+    fn accepted_data(&self) -> Option<super::SubmissionSuccess> {
         match &*self.state.borrow() {
-            SubmissionSendState::Accepted(receipt) => Some(
-                serde_json::json!({"accepted":true,"job_id":receipt.job_id,"sub_id":*self.local_id.borrow(),"replayed":receipt.replayed}),
-            ),
+            SubmissionSendState::Accepted(receipt) => Some(super::SubmissionSuccess {
+                sub_id: self.local_id.borrow().clone(),
+                receipt: (**receipt).clone(),
+            }),
             _ => None,
         }
     }
     pub(super) fn interrupt_outcome(
         &self,
-    ) -> Result<serde_json::Value, super::super::CommandError> {
+    ) -> Result<super::SubmissionSuccess, super::super::CommandError> {
         if let Some(data) = self.accepted_data() {
             return Ok(data);
         }
         let (category, message, exit, accepted) = match *self.state.borrow() {
-            SubmissionSendState::MayHaveBeenSent => (
+            SubmissionSendState::MayHaveBeenSent | SubmissionSendState::RecoveryUnknown => (
                 "submission_uncertain",
                 "Interrupted after submission may have reached the engine; use explicit jobs recover",
                 15,
@@ -160,7 +182,18 @@ impl SubmissionControl {
             error.exit_code = 19;
             let context = error.context.get_or_insert_with(Default::default);
             context.accepted = Some(serde_json::Value::Bool(true));
-            context.data = Some(data);
+            context.data = None;
+            context.raw_data = serde_json::value::to_raw_value(&data).ok();
+        } else if matches!(*self.state.borrow(), SubmissionSendState::RecoveryUnknown)
+            && error.category != "recovery_identity_mismatch"
+        {
+            // Auth, capacity and storage failures can precede binding lookup.
+            // They cannot establish whether an earlier same-key attempt committed.
+            let context = error.context.get_or_insert_with(Default::default);
+            context.accepted = Some(serde_json::Value::Null);
+            if context.data.is_none() {
+                context.data = self.recovery_data();
+            }
         }
         error
     }
@@ -176,6 +209,8 @@ impl Drop for SubmissionControl {
 
 #[cfg(test)]
 mod tests {
+    include!("numeric_regressions.rs");
+    include!("coordination_control_regressions.rs");
     use super::*;
     fn control() -> SubmissionControl {
         SubmissionControl {

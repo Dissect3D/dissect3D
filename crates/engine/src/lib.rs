@@ -29,6 +29,8 @@ pub use policy::CorePolicy;
 #[cfg(feature = "test-support")]
 pub use startup::run_discovery_test_engine;
 #[cfg(feature = "test-support")]
+pub use startup::run_selection_test_engine;
+#[cfg(feature = "test-support")]
 pub use startup::run_submission_test_engine;
 pub use startup::{StartupError, run_engine};
 pub use store::{CoreError, Store, StoreIdentity};

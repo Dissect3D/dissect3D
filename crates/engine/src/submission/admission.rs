@@ -907,7 +907,7 @@ mod tests {
             .values_mut()
             .next()
             .expect("fixture model");
-        model.tasks[0].binding["preprocessing"] = serde_json::json!([{"kind":"unknown"}]);
+        model.tasks[0].binding["preprocessing"] = serde_json::json!([{"kind":"unknown"}]).into();
         assert!(matches!(
             fixture.candidate(&changed_catalog, &input, "{}", "[]"),
             Err(AdmissionError::UnsupportedSelection)
@@ -924,7 +924,7 @@ mod tests {
             .iter_mut()
             .find(|schema| schema.document["id"] == "test.mesh")
             .expect("fixture input schema");
-        input_schema.document["id"] = Value::String("test.unknown".to_owned());
+        input_schema.document["id"] = Value::String("test.unknown".to_owned()).into();
         let mut unknown_prepared =
             PreparedAdmission::from_verified_fixture(&fixture.prepared.readiness);
         unknown_prepared

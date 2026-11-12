@@ -263,7 +263,9 @@ pub fn run() -> i32 {
                         19
                     }
                 }
-                Err(error) => run_connected_command(name, Err(error), json_output),
+                Err(error) => {
+                    run_connected_command::<serde_json::Value>(name, Err(error), json_output)
+                }
             }
         }
         Some(Command::Run(_)) => {
@@ -344,20 +346,30 @@ fn stage3_preflight(
     }
 }
 
-fn run_connected_command(
+fn run_connected_command<T: serde::Serialize>(
     command: &str,
-    result: Result<serde_json::Value, commands::CommandError>,
+    result: Result<T, commands::CommandError>,
     json_output: bool,
 ) -> i32 {
     match result {
         Ok(data) => {
-            if output::render_checked(&CommandOutcome::success(command, data.clone()), json_output)
+            let raw = match serde_json::value::to_raw_value(&data) {
+                Ok(raw) => raw,
+                Err(_) => return 19,
+            };
+            #[derive(serde::Deserialize, Default)]
+            struct Metadata {
+                accepted: Option<bool>,
+                sub_id: Option<String>,
+            }
+            let metadata: Metadata = serde_json::from_str(raw.get()).unwrap_or_default();
+            if output::render_checked(&CommandOutcome::success_raw(command, raw), json_output)
                 .is_err()
             {
-                if data.get("accepted").and_then(serde_json::Value::as_bool) == Some(true) {
+                if metadata.accepted == Some(true) {
                     eprintln!(
                         "The job was accepted; output could not be written. Recovery identity: {}",
-                        data.get("sub_id").unwrap_or(&serde_json::Value::Null)
+                        metadata.sub_id.as_deref().unwrap_or("unknown")
                     );
                 }
                 return 19;
@@ -372,7 +384,8 @@ fn run_connected_command(
                 context.accepted,
                 context.operation_id,
                 context.data,
-            );
+            )
+            .with_raw_data(context.raw_data);
             render(&outcome, json_output);
             error.exit_code
         }
@@ -387,11 +400,8 @@ fn run_discovery_command(
     match result {
         Ok(success) => {
             render(
-                &CommandOutcome::success_with_warnings(
-                    success.command,
-                    success.data,
-                    success.warnings,
-                ),
+                &CommandOutcome::success_raw(success.command, success.data)
+                    .with_warnings(success.warnings),
                 json_output,
             );
             0
@@ -404,7 +414,8 @@ fn run_discovery_command(
                 context.accepted,
                 context.operation_id,
                 context.data,
-            );
+            )
+            .with_raw_data(context.raw_data);
             render(&outcome, json_output);
             error.exit_code
         }

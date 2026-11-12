@@ -21,6 +21,7 @@ pub(crate) enum RecordError {
     Storage,
     Capacity,
     Busy,
+    RecordBusy,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -133,13 +134,63 @@ impl PendingSubmission {
     }
 }
 
-/// Holding this value serializes scan/check/write across CLI processes.
+/// Hold only during bounded local scan/check/write operations, never network work.
 pub(crate) struct SubmissionRecords<'a> {
     profile: &'a Profile,
     _lease: AuthorityLease,
 }
 
+/// One record's send/recovery owner. The permanent lock survives receipt replacement;
+/// the OS releases ownership on drop/process death without unlinking the lock file.
+pub(crate) struct SubmissionRecordLease<'a> {
+    profile: &'a Profile,
+    sub_id: SubmissionId,
+    _lease: AuthorityLease,
+}
+
+impl SubmissionRecordLease<'_> {
+    pub(crate) fn save_receipt(
+        &self,
+        record: &PendingSubmission,
+        receipt: AcceptanceReceipt,
+    ) -> Result<(), RecordError> {
+        if self.sub_id != record.sub_id {
+            return Err(RecordError::Invalid);
+        }
+        SubmissionRecords::lock(self.profile)?.save_receipt(record, receipt)
+    }
+}
+
 impl<'a> SubmissionRecords<'a> {
+    pub(crate) fn coordinate(
+        &self,
+        record: &PendingSubmission,
+    ) -> Result<SubmissionRecordLease<'a>, RecordError> {
+        // Publish first, then acquire while the profile lease still excludes other
+        // acquirers. No missing-record recovery can create an orphan lock namespace.
+        let current = self.load(&record.sub_id)?;
+        if serde_json::to_vec(&current).map_err(|_| RecordError::Invalid)?
+            != serde_json::to_vec(record).map_err(|_| RecordError::Invalid)?
+        {
+            return Err(RecordError::Invalid);
+        }
+        let path = RelativePath::parse(format!("submission-locks/{}.lock", record.sub_id.as_str()))
+            .unwrap();
+        // Never wait here: receipt saving holds a record lease before the profile
+        // lease. Nonblocking acquisition prevents the reverse-order deadlock.
+        let lease = AuthorityLease::acquire_at(self.profile.root(), &path).map_err(|error| {
+            if error == PlatformError::Busy {
+                RecordError::RecordBusy
+            } else {
+                RecordError::Storage
+            }
+        })?;
+        Ok(SubmissionRecordLease {
+            profile: self.profile,
+            sub_id: record.sub_id.clone(),
+            _lease: lease,
+        })
+    }
     pub(crate) fn open_existing(config: &Path) -> Result<Profile, RecordError> {
         // Distinguish absence before acquiring a lock: recovery must not create
         // a root merely to discover that its record is missing.
@@ -336,6 +387,7 @@ fn check_capacity(
 
 #[cfg(test)]
 mod tests {
+    include!("submission_coordination_regressions.rs");
     use super::*;
     use dissect3d_api::{ContentDigest, InputId};
 

@@ -109,7 +109,7 @@ pub struct TaskSummary {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SchemaAttachment {
-    pub document: Value,
+    pub document: crate::DeclarationValue,
     pub sha256: String,
 }
 
@@ -118,7 +118,7 @@ pub struct SchemaAttachment {
 pub struct ModelDetail {
     #[serde(flatten)]
     pub summary: ModelSummary,
-    pub declaration: Value,
+    pub declaration: crate::DeclarationValue,
     pub schemas: Vec<SchemaAttachment>,
 }
 
@@ -127,7 +127,7 @@ pub struct ModelDetail {
 pub struct RuntimeDetail {
     #[serde(flatten)]
     pub summary: RuntimeSummary,
-    pub declaration: Value,
+    pub declaration: crate::DeclarationValue,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -139,7 +139,7 @@ pub struct TaskBindingDetail {
     pub description: String,
     pub test_only: bool,
     pub observations: Vec<DiscoveryObservation>,
-    pub binding: Value,
+    pub binding: crate::DeclarationValue,
     pub schemas: Vec<SchemaAttachment>,
 }
 

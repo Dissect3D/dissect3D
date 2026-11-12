@@ -27,6 +27,7 @@ pub(crate) struct CommandErrorContext {
     pub(crate) accepted: Option<serde_json::Value>,
     pub(crate) operation_id: Option<String>,
     pub(crate) data: Option<serde_json::Value>,
+    pub(crate) raw_data: Option<Box<serde_json::value::RawValue>>,
 }
 
 impl CommandError {
@@ -39,6 +40,7 @@ impl CommandError {
                 context: Some(Box::new(CommandErrorContext {
                     accepted: None,
                     operation_id: None,
+                    raw_data: None,
                     data: Some(serde_json::json!({
                     "status": "unavailable",
                     "detail": "engine_unavailable"
@@ -116,12 +118,11 @@ pub(crate) fn engine(
             let root =
                 data_root(config, config_path).ok_or_else(read_unconfigured("unavailable"))?;
             let profile = Profile::open(config_path).map_err(CommandError::connection)?;
-            let _profile_control = profile.lock_control().map_err(CommandError::connection)?;
             let engine = profile
                 .connection(&root, client_limits.connect_timeout, client_limits)
                 .map_err(CommandError::connection)?;
             let credential = profile
-                .selected_credential(config, &engine)
+                .credential_snapshot(config, &engine)
                 .map_err(CommandError::connection)?;
             let client = engine
                 .client(credential)
@@ -137,12 +138,11 @@ pub(crate) fn engine(
             let root =
                 data_root(config, config_path).ok_or_else(read_unconfigured("unavailable"))?;
             let profile = Profile::open(config_path).map_err(CommandError::connection)?;
-            let _profile_control = profile.lock_control().map_err(CommandError::connection)?;
             let engine = profile
                 .connection(&root, client_limits.connect_timeout, client_limits)
                 .map_err(CommandError::connection)?;
             let credential = profile
-                .selected_credential(config, &engine)
+                .credential_snapshot(config, &engine)
                 .map_err(CommandError::connection)?;
             let client = engine
                 .client(credential)
@@ -274,15 +274,16 @@ pub(crate) fn auth(
                 .load()
                 .map_err(CommandError::connection)?
                 .ok_or_else(unauthorized)?;
+            if credential.installation_id != engine.discovery.installation_id {
+                return Err(unauthorized());
+            }
             if credential.state == "revoked" {
                 return Ok(serde_json::json!({
                     "client_id": credential.client_id,
                     "revoked": true
                 }));
             }
-            if credential.state != "active"
-                || credential.installation_id != engine.discovery.installation_id
-            {
+            if credential.state != "active" {
                 return Err(unauthorized());
             }
             credential.instance_id = engine.discovery.instance_id.clone();
@@ -707,6 +708,7 @@ fn with_known_shutdown_receipt(
     error.context = Some(Box::new(CommandErrorContext {
         accepted: Some(serde_json::Value::Bool(true)),
         operation_id: Some(operation_id),
+        raw_data: None,
         data: Some(serde_json::json!({
             "operation": operation,
             "process_exit_confirmed": false,
@@ -728,6 +730,7 @@ fn shutdown_receipt_storage_error(
         context: Some(Box::new(CommandErrorContext {
             accepted: Some(serde_json::Value::Bool(true)),
             operation_id: Some(operation_id),
+            raw_data: None,
             data: Some(serde_json::json!({
                 "operation": operation,
                 "process_exit_confirmed": process_exit_confirmed,
@@ -939,6 +942,7 @@ fn unconfirmed_stop_with_receipt(
         context: Some(Box::new(CommandErrorContext {
             accepted: Some(serde_json::Value::Bool(true)),
             operation_id: Some(operation_id),
+            raw_data: None,
             data: Some(serde_json::json!({
                 "operation": operation,
                 "process_exit_confirmed": false,

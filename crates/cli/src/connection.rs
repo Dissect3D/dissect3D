@@ -297,6 +297,17 @@ impl Profile {
         })
     }
 
+    /// Snapshot the selected credential, including any instance-rebind update,
+    /// under short profile coordination. The caller does network work afterward.
+    pub(crate) fn credential_snapshot(
+        &self,
+        config: &crate::config::ConfigFile,
+        engine: &DiscoveredEngine,
+    ) -> Result<AccessCredential, ConnectionError> {
+        let _control = self.lock_control()?;
+        self.selected_credential(config, engine)
+    }
+
     pub(crate) fn save(&self, credential: &ProfileCredential) -> Result<(), ConnectionError> {
         let bytes = serde_json::to_vec(credential).map_err(|_| ConnectionError::Invalid)?;
         self.root
