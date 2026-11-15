@@ -1,0 +1,73 @@
+{
+  "api_version": "1.0",
+  "engine_version": "0.1.0",
+  "installation_id": "ins_0123456789abcdef0123456789abcdef",
+  "instance_id": "eng_0123456789abcdef0123456789abcdef",
+  "phase": "ready",
+  "supported_operations": [
+    "engine.info"
+  ],
+  "granted_operations": [
+    "engine.info",
+    "inputs.create",
+    "jobs.submit",
+    "jobs.list",
+    "jobs.show",
+    "jobs.cancel",
+    "jobs.retry"
+  ],
+  "required_features": [],
+  "limits": {},
+  "platform": {
+    "os": "windows",
+    "architecture": "x86_64"
+  },
+  "submission": {
+    "version": "1.0",
+    "dispatch_enabled": true,
+    "operations": [
+      "inputs.create",
+      "jobs.submit",
+      "jobs.list",
+      "jobs.show"
+    ],
+    "limits": {
+      "input_bytes_max": 268435456,
+      "job_input_bytes_max": 1073741824,
+      "upload_concurrency_max": 2,
+      "staging_reserved_bytes_max": 2147483648,
+      "staged_input_ttl_ms": 86400000,
+      "upload_idle_timeout_ms": 30000,
+      "upload_total_timeout_ms": 600000,
+      "queued_jobs_max": 128,
+      "submission_bindings_max": 65536,
+      "submission_binding_bytes_max": 16384,
+      "captured_input_bytes_max": 17179869184,
+      "storage_free_reserve_bytes": 1073741824,
+      "job_control_bytes_max": 65536,
+      "job_metadata_bytes_max": 262144,
+      "job_inputs_max": 64,
+      "job_roles_max": 16,
+      "job_list_default": 20,
+      "job_list_max": 100,
+      "job_cursor_bytes_max": 1024
+    },
+    "limits_source": "built_in"
+  },
+  "job_execution": {
+    "contract_version": "we-0.1",
+    "dispatch_enabled": true,
+    "operations": [
+      "inputs.create",
+      "jobs.submit",
+      "jobs.list",
+      "jobs.show",
+      "jobs.cancel",
+      "jobs.retry"
+    ],
+    "limits": {
+      "execution_timeout_ms_max": 86400000
+    },
+    "required_features": []
+  }
+}

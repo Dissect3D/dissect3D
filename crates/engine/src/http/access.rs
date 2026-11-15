@@ -646,6 +646,13 @@ fn error_message(code: ErrorCode) -> &'static str {
         ErrorCode::EngineStopping => "Engine is stopping",
         ErrorCode::StoreUnavailable => "Engine metadata store is unavailable",
         ErrorCode::StorageIntegrityFault => "Stored input integrity could not be verified",
+        ErrorCode::ExecutionDeadlineExceeded => "The execution deadline was exceeded",
+        ErrorCode::WorkerProtocolError => "The worker protocol failed",
+        ErrorCode::WorkerLaunchFailed => "The worker could not be launched",
+        ErrorCode::WorkerFailed => "The worker failed",
+        ErrorCode::CleanupUnconfirmed => "Worker cleanup is unconfirmed",
+        ErrorCode::JobNotTerminal => "The source job is not terminal",
+        ErrorCode::RetryPrerequisiteUnavailable => "A retry prerequisite is unavailable",
     }
 }
 

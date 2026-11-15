@@ -9,6 +9,8 @@ mod client;
 mod decode;
 mod discovery;
 mod error;
+mod execution;
+pub use execution::*;
 mod submission;
 mod types;
 

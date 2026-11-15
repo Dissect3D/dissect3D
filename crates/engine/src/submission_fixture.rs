@@ -209,9 +209,7 @@ pub fn write_submission_provider_manifest(
     {
         return Err(FixtureError::InvalidRoot);
     }
-    let canonical_root = std::fs::canonicalize(data_root).map_err(|_| FixtureError::InvalidRoot)?;
-    let root = OwnedRoot::open(&canonical_root, RootPurpose::EngineData)
-        .map_err(|_| FixtureError::InvalidRoot)?;
+    let (root, canonical_root, output_path) = provider_export_paths(data_root, output)?;
     let executable = std::env::current_exe().map_err(|_| FixtureError::Probe)?;
     let fixture = load_prepared_fixture(&root, &executable)?;
     let verified = dissect3d_connection::verify_engine(&root, std::time::Duration::from_secs(2))
@@ -242,7 +240,6 @@ pub fn write_submission_provider_manifest(
         return Err(FixtureError::Credential);
     }
 
-    let output_path = relative_under_root(&canonical_root, output)?;
     let output_name = output_path.as_str();
     let ca_path = "submission-fixture/ca.pem";
     let credential_a_path = "submission-fixture/client-a.json";
@@ -425,6 +422,23 @@ fn write_provider_credential(
     bytes.fill(0);
     result
 }
+
+fn provider_export_paths(
+    data_root: &Path,
+    output: &Path,
+) -> Result<(OwnedRoot, PathBuf, RelativePath), FixtureError> {
+    // Validate the selected path before canonicalization can hide a reparse root.
+    let root = OwnedRoot::open(data_root, RootPurpose::EngineData)
+        .map_err(|_| FixtureError::InvalidRoot)?;
+    // Output need not exist. Keep it in the caller's namespace, including on Windows.
+    let output_path = relative_under_root(data_root, output)?;
+    let canonical_root = std::fs::canonicalize(data_root).map_err(|_| FixtureError::InvalidRoot)?;
+    Ok((root, canonical_root, output_path))
+}
+
+#[cfg(test)]
+#[path = "submission_fixture/export_regressions.rs"]
+mod export_regressions;
 
 fn relative_under_root(root: &Path, path: &Path) -> Result<RelativePath, FixtureError> {
     if !path.is_absolute() {

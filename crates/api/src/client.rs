@@ -27,6 +27,10 @@ use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::sync::mpsc;
 
+mod execution;
+#[cfg(test)]
+mod execution_tests;
+
 const API_VERSION: &str = "1.0";
 const MAX_CLIENT_RESPONSE_BYTES: usize = 262_144;
 const MAX_SUBMISSION_REQUEST_BYTES: usize = 65_536;
@@ -320,6 +324,21 @@ impl Client {
             .copied()
             .ok_or(ClientError::Incompatible)?
             .min(MAX_INPUT_BYTES);
+        self.create_input_inner(source, length, media_type, maximum, false)
+            .await
+    }
+
+    async fn create_input_inner<R>(
+        &self,
+        source: R,
+        length: u64,
+        media_type: &str,
+        maximum: u64,
+        execution: bool,
+    ) -> Result<InputReceipt, ClientError>
+    where
+        R: AsyncRead + Send + Unpin + 'static,
+    {
         if !(1..=maximum).contains(&length) || !valid_media_type(media_type) {
             return Err(ClientError::InvalidMaterial);
         }
@@ -334,16 +353,18 @@ impl Client {
             receiver.recv().await.map(|chunk| (chunk, receiver))
         });
         let body = Body::wrap_stream(stream);
-        let response = self
+        let mut request = self
             .upload_http
             .post(format!("{}/v1/inputs", self.base_url))
             .header(AUTHORIZATION, authorization)
             .header(reqwest::header::CONTENT_TYPE, media_type.as_str())
             .header(reqwest::header::CONTENT_LENGTH, length)
             .timeout(INPUT_UPLOAD_TOTAL_TIMEOUT)
-            .body(body)
-            .send()
-            .await;
+            .body(body);
+        if execution {
+            request = request.header(crate::JOB_CONTRACT_HEADER, crate::JOB_CONTRACT);
+        }
+        let response = request.send().await;
 
         let response = match response {
             Ok(response) => response,

@@ -44,6 +44,13 @@ pub enum ErrorCode {
     EngineStopping,
     StoreUnavailable,
     StorageIntegrityFault,
+    ExecutionDeadlineExceeded,
+    WorkerProtocolError,
+    WorkerLaunchFailed,
+    WorkerFailed,
+    CleanupUnconfirmed,
+    JobNotTerminal,
+    RetryPrerequisiteUnavailable,
 }
 
 /// Bounded public error details. Fields contain categories, never source strings.

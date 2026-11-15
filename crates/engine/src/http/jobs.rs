@@ -166,6 +166,8 @@ pub(super) fn error(problem: SubmissionError) -> Response {
         ErrorCode::Forbidden => (StatusCode::FORBIDDEN, false),
         ErrorCode::NotFound | ErrorCode::InputUnavailable => (StatusCode::NOT_FOUND, false),
         ErrorCode::IdempotencyConflict
+        | ErrorCode::JobNotTerminal
+        | ErrorCode::RetryPrerequisiteUnavailable
         | ErrorCode::NotPrepared
         | ErrorCode::IncompatibleProfile
         | ErrorCode::IncompatibleContract

@@ -238,7 +238,8 @@ pub(crate) fn build_candidate(
 
     let canonical = canonicalize(request, &identities).map_err(|error| match error {
         super::equivalence::CanonicalError::MissingInput => AdmissionError::InputUnavailable,
-        super::equivalence::CanonicalError::InvalidDecimal => AdmissionError::InvalidRequest,
+        super::equivalence::CanonicalError::InvalidDecimal
+        | super::equivalence::CanonicalError::InvalidRequest => AdmissionError::InvalidRequest,
         super::equivalence::CanonicalError::TooLarge => AdmissionError::CapacityExceeded,
     })?;
     if canonical.bytes.len() > CANONICAL_BYTES_MAX {

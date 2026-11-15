@@ -4,18 +4,24 @@ use dissect3d_api::{InputIdentity, JobRequest, SubmissionValue};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
+#[cfg(test)]
+#[path = "execution_equivalence_tests.rs"]
+mod execution_equivalence_tests;
+
 const MAX_CANONICAL_BYTES: usize = 262_144;
 const FINGERPRINT_PREFIX: &[u8] = b"dissect3d-job-submission-v1\n";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CanonicalizationVersion {
     V1,
+    V2,
 }
 
 impl CanonicalizationVersion {
     pub(crate) const fn as_i64(self) -> i64 {
         match self {
             Self::V1 => 1,
+            Self::V2 => 2,
         }
     }
 }
@@ -32,6 +38,7 @@ pub(crate) enum CanonicalError {
     MissingInput,
     InvalidDecimal,
     TooLarge,
+    InvalidRequest,
 }
 
 /// Verified engine identities replace client input IDs without changing their
@@ -41,6 +48,27 @@ pub(crate) type VerifiedInputMap = BTreeMap<String, InputIdentity>;
 pub(crate) fn canonicalize(
     request: &JobRequest,
     verified_inputs: &VerifiedInputMap,
+) -> Result<CanonicalSubmission, CanonicalError> {
+    canonicalize_inner(request, verified_inputs, None)
+}
+
+// WE-P03 owns persistence/activation of v2 bindings; v1 callers stay unchanged.
+#[allow(
+    dead_code,
+    reason = "WE-P03 integrates execution-aware binding persistence"
+)]
+pub(crate) fn canonicalize_execution(
+    request: &dissect3d_api::ExecutionJobRequest,
+    verified_inputs: &VerifiedInputMap,
+) -> Result<CanonicalSubmission, CanonicalError> {
+    dissect3d_api::encode_execution_request(request).map_err(|_| CanonicalError::InvalidRequest)?;
+    canonicalize_inner(&request.request, verified_inputs, Some(&request.execution))
+}
+
+fn canonicalize_inner(
+    request: &JobRequest,
+    verified_inputs: &VerifiedInputMap,
+    execution: Option<&dissect3d_api::ExecutionPolicy>,
 ) -> Result<CanonicalSubmission, CanonicalError> {
     let mut inputs = BTreeMap::new();
     for (role, references) in &request.inputs {
@@ -107,16 +135,34 @@ pub(crate) fn canonicalize(
         boolean(request.evaluation_consent),
     );
 
+    if let Some(policy) = execution {
+        let mut fields = BTreeMap::new();
+        if let Some(timeout) = policy.timeout_ms {
+            fields.insert(
+                "timeout_ms",
+                value_number(SubmissionValue::Integer(timeout as i64)),
+            );
+        }
+        envelope.insert("execution".to_owned(), object(fields));
+    }
+    let version = if execution.is_some() {
+        CanonicalizationVersion::V2
+    } else {
+        CanonicalizationVersion::V1
+    };
     let mut bytes = Vec::new();
     encode_value(&object(envelope), &mut bytes)?;
     if bytes.len() > MAX_CANONICAL_BYTES {
         return Err(CanonicalError::TooLarge);
     }
     let mut digest = Sha256::new();
-    digest.update(FINGERPRINT_PREFIX);
+    digest.update(match version {
+        CanonicalizationVersion::V1 => FINGERPRINT_PREFIX,
+        CanonicalizationVersion::V2 => b"dissect3d-job-submission-v2\n",
+    });
     digest.update(&bytes);
     Ok(CanonicalSubmission {
-        version: CanonicalizationVersion::V1,
+        version,
         bytes,
         fingerprint: digest.finalize().into(),
     })

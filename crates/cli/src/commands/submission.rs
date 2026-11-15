@@ -680,6 +680,13 @@ fn rejected_error(
         ErrorCode::EngineStopping => "engine_stopping",
         ErrorCode::StoreUnavailable => "store_unavailable",
         ErrorCode::StorageIntegrityFault => "storage_integrity_fault",
+        ErrorCode::ExecutionDeadlineExceeded => "execution_deadline_exceeded",
+        ErrorCode::WorkerProtocolError => "worker_protocol_error",
+        ErrorCode::WorkerLaunchFailed => "worker_launch_failed",
+        ErrorCode::WorkerFailed => "worker_failed",
+        ErrorCode::CleanupUnconfirmed => "cleanup_unconfirmed",
+        ErrorCode::JobNotTerminal => "job_not_terminal",
+        ErrorCode::RetryPrerequisiteUnavailable => "retry_prerequisite_unavailable",
     };
     let exit = match code {
         ErrorCode::Unauthorized
