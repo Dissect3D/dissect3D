@@ -4,7 +4,7 @@ use dissect3d_api::{EnrollmentId, TokenDigest};
 use dissect3d_platform::RootPurpose;
 use tempfile::{TempDir, tempdir};
 
-const UPGRADE_BACKUP: &str = "recovery/metadata-v6-upgrade.sqlite3";
+const UPGRADE_BACKUP: &str = "recovery/metadata-v7-upgrade.sqlite3";
 const LEGACY_BACKUP: &str = "recovery/metadata-upgrade.sqlite3";
 
 #[cfg(unix)]
@@ -144,7 +144,7 @@ fn downgrade_to(fixture: &Fixture, version: i64) {
     let connection = Connection::open(fixture.root_path.join(DATABASE_NAME))
         .expect("historical fixture database");
     connection
-        .execute_batch("DROP TABLE job_inputs; DROP TABLE submission_bindings; DROP TABLE job_acceptance_events; DROP TABLE jobs; DROP TABLE job_sequence; DROP TABLE engine_clock; DROP TABLE captured_inputs; DROP TABLE input_upload_reservations;")
+        .execute_batch("DROP TABLE job_events; DROP TABLE resource_reservations; DROP TABLE job_attempts; DROP TABLE retry_bindings; DROP TABLE job_execution; DROP TABLE client_authorizations; DROP TABLE job_inputs; DROP TABLE submission_bindings; DROP TABLE job_acceptance_events; DROP TABLE jobs; DROP TABLE job_sequence; DROP TABLE engine_clock; DROP TABLE captured_inputs; DROP TABLE input_upload_reservations;")
         .expect("remove v3-to-v4 schema difference");
     if version == 1 {
         connection
@@ -625,6 +625,11 @@ fn failed_upgrade_second_start_preserves_both_images_until_explicit_archive_and_
                 from: 5,
                 to: 6,
                 apply: add_job_tables,
+            },
+            MigrationStep {
+                from: 6,
+                to: 7,
+                apply: add_execution_tables,
             },
         ];
         let result = if sync_failure {

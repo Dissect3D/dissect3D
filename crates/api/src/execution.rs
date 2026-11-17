@@ -4,6 +4,8 @@ use crate::{
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::collections::BTreeMap;
+mod native;
+pub use native::*;
 mod local;
 pub use local::*;
 

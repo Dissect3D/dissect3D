@@ -7,20 +7,34 @@
 mod bootstrap;
 mod credentials;
 mod diagnostics;
+#[allow(
+    dead_code,
+    reason = "WE-P06 composes supervision; dispatch and public routes stay inactive"
+)]
+mod execution;
 mod http;
 #[cfg(unix)]
 mod inputs;
 #[cfg(unix)]
 mod jobs;
 mod policy;
+#[allow(
+    dead_code,
+    reason = "RP-P02/03 integrate private candidate capture and publication"
+)]
+mod publication;
 mod startup;
 mod store;
-#[cfg(any(unix, test, feature = "test-support"))]
 mod submission;
 #[cfg(feature = "test-support")]
 mod submission_fixture;
 pub(crate) mod support;
 mod tls;
+#[allow(
+    dead_code,
+    reason = "WE-P04 supervisor consumes the codec; dispatch stays inactive"
+)]
+mod worker_protocol;
 
 pub use bootstrap::{BootstrapServeError, serve_bootstrap_once};
 pub use credentials::{AuthContext, VerifiedEnrollment};

@@ -87,6 +87,32 @@ pub(crate) struct Profile {
     root: OwnedRoot,
 }
 
+/// Proof that this process holds one profile's control lease. Only this module
+/// constructs it, so an API that takes `&ControlLease` cannot be reached by a
+/// caller that skipped coordination. The lease is not re-entrant; a holder
+/// passes this proof instead of acquiring the lease again.
+#[must_use]
+pub(crate) struct ControlLease<'p> {
+    profile: &'p Profile,
+    _lease: dissect3d_platform::AuthorityLease,
+}
+
+impl ControlLease<'_> {
+    /// Refuse a proof for a different profile handle.
+    ///
+    /// This deliberately compares handles, not profile-root identity: a second
+    /// `Profile` opened for the same directory is refused with `Conflict`, which
+    /// fails closed. Callers (including WE-P08's command wiring) must pass the
+    /// same `Profile` handle that produced the lease.
+    fn require(&self, profile: &Profile) -> Result<(), ConnectionError> {
+        if std::ptr::eq(self.profile, profile) {
+            Ok(())
+        } else {
+            Err(ConnectionError::Conflict)
+        }
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PendingStop {
@@ -161,6 +187,14 @@ impl Profile {
             } else {
                 ConnectionError::Storage
             }
+        })
+    }
+
+    /// Acquire the control lease as a typed proof for APIs that must run under it.
+    pub(crate) fn control_lease(&self) -> Result<ControlLease<'_>, ConnectionError> {
+        Ok(ControlLease {
+            profile: self,
+            _lease: self.lock_control()?,
         })
     }
 
@@ -550,6 +584,11 @@ fn decode_capabilities_response(bytes: &[u8]) -> Result<BootstrapCapabilities, C
 }
 
 fn decode_enrollment_response(bytes: &[u8]) -> Result<EnrollmentReceipt, ConnectionError> {
+    decode_native_response(bytes)
+}
+fn decode_native_response<T: serde::de::DeserializeOwned>(
+    bytes: &[u8],
+) -> Result<T, ConnectionError> {
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Rejection {
@@ -668,3 +707,9 @@ mod submission_enrollment_tests {
         ));
     }
 }
+
+#[allow(
+    dead_code,
+    reason = "WE-P08 connects native execution authorization after its dependency gates"
+)]
+mod execution;

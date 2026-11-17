@@ -52,11 +52,7 @@ pub(crate) fn canonicalize(
     canonicalize_inner(request, verified_inputs, None)
 }
 
-// WE-P03 owns persistence/activation of v2 bindings; v1 callers stay unchanged.
-#[allow(
-    dead_code,
-    reason = "WE-P03 integrates execution-aware binding persistence"
-)]
+// V2 binds execution policy without changing any v1 preimage.
 pub(crate) fn canonicalize_execution(
     request: &dissect3d_api::ExecutionJobRequest,
     verified_inputs: &VerifiedInputMap,
@@ -617,4 +613,49 @@ mod tests {
         );
     }
     include!("numeric_regressions.rs");
+}
+
+/// Shared submitted identity; stored configuration is never re-resolved on replay.
+#[cfg(unix)]
+#[derive(Clone)]
+pub(crate) enum SubmittedJobRequest {
+    Legacy(JobRequest),
+    Execution(dissect3d_api::ExecutionJobRequest),
+}
+#[cfg(unix)]
+impl SubmittedJobRequest {
+    pub(crate) fn base(&self) -> &JobRequest {
+        match self {
+            Self::Legacy(r) => r,
+            Self::Execution(r) => &r.request,
+        }
+    }
+    pub(crate) fn version(&self) -> i64 {
+        match self {
+            Self::Legacy(_) => 1,
+            Self::Execution(_) => 2,
+        }
+    }
+    pub(crate) fn execution(&self) -> Option<&dissect3d_api::ExecutionPolicy> {
+        match self {
+            Self::Legacy(_) => None,
+            Self::Execution(r) => Some(&r.execution),
+        }
+    }
+    pub(crate) fn canonicalize(
+        &self,
+        inputs: &VerifiedInputMap,
+    ) -> Result<CanonicalSubmission, CanonicalError> {
+        match self {
+            Self::Legacy(r) => canonicalize(r, inputs),
+            Self::Execution(r) => canonicalize_execution(r, inputs),
+        }
+    }
+    pub(crate) fn encoded_size(&self) -> Result<usize, dissect3d_api::SubmissionDecodeError> {
+        match self {
+            Self::Legacy(r) => dissect3d_api::encode_job_request(r),
+            Self::Execution(r) => dissect3d_api::encode_execution_request(r),
+        }
+        .map(|b| b.len())
+    }
 }

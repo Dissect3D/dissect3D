@@ -347,7 +347,7 @@ fn compare_start_marker(
     }
 }
 
-fn process_start_marker(pid: u32) -> Result<String, PlatformError> {
+pub(crate) fn process_start_marker(pid: u32) -> Result<String, PlatformError> {
     #[cfg(target_os = "linux")]
     {
         let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).map_err(|error| {

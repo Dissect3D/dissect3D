@@ -110,6 +110,21 @@ impl Read for PrivateInputReader {
 }
 
 impl OwnedRoot {
+    /// Root-specific namespace preflight, not a durability witness for a later
+    /// mutation. Every actual write must still execute all of its barriers.
+    /// Windows remains unavailable until its full external-chain protocol is
+    /// established; passing low-level input-file tests cannot enable it.
+    pub fn check_durable_mutation_support(&self) -> Result<(), PlatformError> {
+        #[cfg(unix)]
+        {
+            sync_root_ancestors(self)
+        }
+        #[cfg(not(unix))]
+        {
+            Err(PlatformError::UnsupportedRoot)
+        }
+    }
+
     /// Persist client recovery metadata before a mutation can be sent. The
     /// ordinary atomic writer alone does not prove the entire namespace chain.
     pub fn write_recovery_record(
@@ -120,9 +135,9 @@ impl OwnedRoot {
         if bytes.is_empty() || bytes.len() > 1_048_576 {
             return Err(PlatformError::InvalidFile);
         }
+        self.check_durable_mutation_support()?;
         #[cfg(unix)]
         {
-            sync_root_ancestors(self)?;
             self.write_atomic(relative, bytes)?;
             let (parent, name) = self.open_parent(relative, false)?;
             let file = File::from(
@@ -457,7 +472,18 @@ impl PrivateInputWriter {
 pub(crate) fn sync_root_ancestors(root: &OwnedRoot) -> Result<(), PlatformError> {
     sync_root_ancestors_with(root, |path, private| {
         let directory = if private {
-            root.directory()
+            use std::os::unix::fs::MetadataExt;
+            let selected = OwnedRoot::open(root.path(), RootPurpose::EngineData)?;
+            let expected = root.directory().metadata().map_err(|_| PlatformError::Io)?;
+            let actual = selected
+                .directory()
+                .metadata()
+                .map_err(|_| PlatformError::Io)?;
+            if expected.dev() != actual.dev() || expected.ino() != actual.ino() {
+                return Err(PlatformError::UnsafeRoot);
+            }
+            selected
+                .directory()
                 .try_clone()
                 .map_err(|_| PlatformError::Io)?
         } else if path == std::path::Path::new("/") {

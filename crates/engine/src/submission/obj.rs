@@ -76,6 +76,14 @@ pub(super) fn validate_obj_in<R: Read>(
     deadline: Instant,
     _permit: &ValidationPermit<'_>,
 ) -> Result<ObjSummary, ObjError> {
+    parse_obj_until(reader, deadline)
+}
+
+/// Pure grammar shared by admission and independently budgeted output validation.
+pub(crate) fn parse_obj_until<R: Read>(
+    reader: R,
+    deadline: Instant,
+) -> Result<ObjSummary, ObjError> {
     let mut reader = BufReader::new(reader).take((MAX_BYTES + 1) as u64);
     let mut line = Vec::with_capacity(256);
     let mut bytes = 0usize;

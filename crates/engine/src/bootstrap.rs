@@ -4,7 +4,7 @@
 //! This module then validates a closed JSON record, removes the raw secret from
 //! the request, and gives only its digest to the serialized metadata store.
 
-use crate::{CoreError, Store, VerifiedEnrollment};
+use crate::{CoreError, Store, VerifiedEnrollment, credentials::GrantPolicy};
 use dissect3d_api::{
     ClientId, EnrollmentId, EnrollmentReceipt, InstallationId, InstanceId, decode_json,
 };
@@ -37,6 +37,29 @@ enum Request {
     Capabilities {
         bootstrap_version: String,
         instance_id: InstanceId,
+    },
+    ExecutionCapabilities {
+        bootstrap_version: String,
+        instance_id: InstanceId,
+    },
+    EnrollExecution {
+        bootstrap_version: String,
+        execution_contract: String,
+        installation_id: InstallationId,
+        instance_id: InstanceId,
+        enrollment_id: EnrollmentId,
+        client_id: ClientId,
+        client_kind: String,
+        secret_hex: SecretHex,
+    },
+    AuthorizeExecution {
+        bootstrap_version: String,
+        execution_contract: String,
+        installation_id: InstallationId,
+        instance_id: InstanceId,
+        client_id: ClientId,
+        authorization_id: String,
+        secret_hex: SecretHex,
     },
     Enroll {
         bootstrap_version: String,
@@ -216,6 +239,8 @@ enum Response {
     Probe(ProbeReceipt),
     Capabilities(CapabilitiesReceipt),
     Enrollment(EnrollmentReceipt),
+    ExecutionCapabilities(dissect3d_api::ExecutionEnrollmentCapability),
+    Authorization(dissect3d_api::ExecutionAuthorizationReceipt),
     Error(ErrorResponse),
 }
 
@@ -228,6 +253,8 @@ impl Serialize for Response {
             Self::Probe(receipt) => receipt.serialize(serializer),
             Self::Capabilities(receipt) => receipt.serialize(serializer),
             Self::Enrollment(receipt) => receipt.serialize(serializer),
+            Self::ExecutionCapabilities(receipt) => receipt.serialize(serializer),
+            Self::Authorization(receipt) => receipt.serialize(serializer),
             Self::Error(error) => error.serialize(serializer),
         }
     }
@@ -247,6 +274,89 @@ fn process_request(
 ) -> Result<Response, RequestError> {
     let identity = store.identity().map_err(RequestError::from)?;
     match request {
+        Request::ExecutionCapabilities {
+            bootstrap_version,
+            instance_id,
+        } => {
+            if cfg!(windows)
+                || bootstrap_version != BOOTSTRAP_VERSION
+                || instance_id != identity.instance_id
+            {
+                return Err(RequestError::Invalid);
+            }
+            Ok(Response::ExecutionCapabilities(
+                dissect3d_api::ExecutionEnrollmentCapability {
+                    bootstrap_version: BOOTSTRAP_VERSION.into(),
+                    contract_version: dissect3d_api::EXECUTION_AUTHORIZATION_CONTRACT.into(),
+                    installation_id: identity.installation_id,
+                    instance_id: identity.instance_id,
+                    enrollment_policies: vec!["execution-v1".into()],
+                    authorization_operations: vec![
+                        "enroll_execution".into(),
+                        "authorize_execution".into(),
+                    ],
+                },
+            ))
+        }
+        Request::EnrollExecution {
+            bootstrap_version,
+            execution_contract,
+            installation_id,
+            instance_id,
+            enrollment_id,
+            client_id,
+            client_kind,
+            secret_hex,
+        } => {
+            if cfg!(windows)
+                || execution_contract != dissect3d_api::EXECUTION_AUTHORIZATION_CONTRACT
+            {
+                return Err(RequestError::Invalid);
+            }
+            process_enrollment(
+                store,
+                &identity,
+                peer,
+                bootstrap_version,
+                installation_id,
+                instance_id,
+                enrollment_id,
+                client_id,
+                client_kind,
+                secret_hex,
+                GrantPolicy::ExecutionV1,
+            )
+        }
+        Request::AuthorizeExecution {
+            bootstrap_version,
+            execution_contract,
+            installation_id,
+            instance_id,
+            client_id,
+            authorization_id,
+            secret_hex,
+        } => {
+            if cfg!(windows)
+                || bootstrap_version != BOOTSTRAP_VERSION
+                || execution_contract != dissect3d_api::EXECUTION_AUTHORIZATION_CONTRACT
+                || installation_id != identity.installation_id
+                || instance_id != identity.instance_id
+            {
+                return Err(RequestError::Invalid);
+            }
+            let token_digest = secret_hex.digest()?;
+            store
+                .authorize_execution(crate::store::reauthorization::VerifiedAuthorization {
+                    owner: peer,
+                    installation_id,
+                    instance_id,
+                    client_id,
+                    token_digest,
+                    authorization_id,
+                })
+                .map(Response::Authorization)
+                .map_err(Into::into)
+        }
         Request::Probe {
             bootstrap_version,
             instance_id,
@@ -294,7 +404,7 @@ fn process_request(
             client_id,
             client_kind,
             secret_hex,
-            false,
+            GrantPolicy::CoreV1,
         ),
         Request::EnrollSubmission {
             bootstrap_version,
@@ -315,7 +425,7 @@ fn process_request(
             client_id,
             client_kind,
             secret_hex,
-            true,
+            GrantPolicy::SubmissionV1,
         ),
     }
 }
@@ -332,7 +442,7 @@ fn process_enrollment(
     client_id: ClientId,
     client_kind: String,
     secret_hex: SecretHex,
-    submission_access: bool,
+    grant_policy: GrantPolicy,
 ) -> Result<Response, RequestError> {
     if bootstrap_version != BOOTSTRAP_VERSION
         || installation_id != identity.installation_id
@@ -344,24 +454,32 @@ fn process_enrollment(
     let digest = secret_hex.digest()?;
     // This owner came from the channel's OS credential check, never from a
     // client supplied field. Only the distinct native message selects policy.
-    let enrollment = if submission_access {
-        VerifiedEnrollment::new_submission_access(
+    let enrollment = match grant_policy {
+        GrantPolicy::CoreV1 => VerifiedEnrollment::new(
             peer,
             installation_id,
             instance_id,
             enrollment_id,
             client_id,
             digest,
-        )
-    } else {
-        VerifiedEnrollment::new(
+        ),
+        GrantPolicy::SubmissionV1 => VerifiedEnrollment::new_submission_access(
             peer,
             installation_id,
             instance_id,
             enrollment_id,
             client_id,
             digest,
-        )
+        ),
+        GrantPolicy::ExecutionV1 => VerifiedEnrollment {
+            owner: peer,
+            installation_id,
+            instance_id,
+            enrollment_id,
+            client_id,
+            token_digest: digest,
+            grant_policy,
+        },
     };
     store
         .enroll(enrollment)

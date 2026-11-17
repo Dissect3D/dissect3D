@@ -44,6 +44,29 @@ use windows_sys::core::PWSTR;
 const MAX_TOKEN_INFO_BYTES: u32 = 64 * 1024;
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+pub(crate) fn quote_argument(value: &std::ffi::OsStr) -> Result<Vec<u16>, PlatformError> {
+    let mut result = vec![u16::from(b'"')];
+    let mut slashes = 0;
+    for unit in value.encode_wide() {
+        if unit == 0 {
+            return Err(PlatformError::InvalidPath);
+        }
+        if unit == u16::from(b'\\') {
+            slashes += 1;
+            continue;
+        }
+        result.extend(std::iter::repeat_n(u16::from(b'\\'), slashes));
+        if unit == u16::from(b'"') {
+            result.extend(std::iter::repeat_n(u16::from(b'\\'), slashes + 1));
+        }
+        slashes = 0;
+        result.push(unit);
+    }
+    result.extend(std::iter::repeat_n(u16::from(b'\\'), slashes * 2));
+    result.push(u16::from(b'"'));
+    Ok(result)
+}
+
 /// Launch without inheriting any launcher handles, including captured output.
 pub(crate) fn spawn_detached_engine(
     command: &std::process::Command,
@@ -52,37 +75,15 @@ pub(crate) fn spawn_detached_engine(
         CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_UNICODE_ENVIRONMENT,
         CreateProcessW, DETACHED_PROCESS, PROCESS_INFORMATION, STARTUPINFOW,
     };
-    fn quoted(value: &std::ffi::OsStr) -> Result<Vec<u16>, PlatformError> {
-        let mut result = vec![u16::from(b'"')];
-        let mut slashes = 0;
-        for unit in value.encode_wide() {
-            if unit == 0 {
-                return Err(PlatformError::InvalidPath);
-            }
-            if unit == u16::from(b'\\') {
-                slashes += 1;
-                continue;
-            }
-            result.extend(std::iter::repeat_n(u16::from(b'\\'), slashes));
-            if unit == u16::from(b'"') {
-                result.extend(std::iter::repeat_n(u16::from(b'\\'), slashes + 1));
-            }
-            slashes = 0;
-            result.push(unit);
-        }
-        result.extend(std::iter::repeat_n(u16::from(b'\\'), slashes * 2));
-        result.push(u16::from(b'"'));
-        Ok(result)
-    }
     let application = command
         .get_program()
         .encode_wide()
         .chain(Some(0))
         .collect::<Vec<_>>();
-    let mut arguments = quoted(command.get_program())?;
+    let mut arguments = quote_argument(command.get_program())?;
     for argument in command.get_args() {
         arguments.push(u16::from(b' '));
-        arguments.extend(quoted(argument)?);
+        arguments.extend(quote_argument(argument)?);
     }
     arguments.push(0);
     let mut environment = Vec::new();

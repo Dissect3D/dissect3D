@@ -20,3 +20,7 @@ client = ["dep:futures-util", "dep:reqwest", "dep:tokio"]
 
 [lints]
 workspace = true
+
+[[test]]
+name = "result_protocol"
+path = "tests/result_protocol.rs"

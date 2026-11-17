@@ -8,6 +8,10 @@ mod cli_fault_tests;
 mod crash_tests;
 #[cfg(any(unix, test))]
 pub(crate) mod equivalence;
+#[cfg_attr(
+    windows,
+    allow(dead_code, reason = "input admission remains unavailable on Windows")
+)]
 pub(crate) mod obj;
 #[cfg(unix)]
 pub(crate) mod service;
@@ -47,3 +51,6 @@ impl From<crate::CoreError> for SubmissionError {
         }
     }
 }
+
+#[cfg(all(unix, test, feature = "test-support"))]
+mod execution_submission_tests;

@@ -2,6 +2,7 @@
 
 use super::SubmissionError;
 use super::admission::{AdmissionError, PreparedAdmission, build_candidate};
+use super::equivalence::SubmittedJobRequest;
 use crate::{AuthContext, Store, support::Catalog};
 use dissect3d_api::{AcceptanceReceipt, ErrorCode, IdempotencyKey, JobRequest};
 use dissect3d_platform::{OwnedRoot, RelativePath};
@@ -54,12 +55,15 @@ impl SubmissionService {
         &self,
         auth: AuthContext,
         key: IdempotencyKey,
-        request: JobRequest,
+        request: SubmittedJobRequest,
     ) -> Result<Option<AcceptanceReceipt>, SubmissionError> {
         let store = self.store.clone();
-        tokio::task::spawn_blocking(move || store.probe_job_binding(auth, key, request))
-            .await
-            .map_err(|_| SubmissionError::from(ErrorCode::StoreUnavailable))?
+        tokio::task::spawn_blocking(move || match request {
+            SubmittedJobRequest::Legacy(r) => store.probe_job_binding(auth, key, r),
+            SubmittedJobRequest::Execution(r) => store.probe_execution_binding(auth, key, r),
+        })
+        .await
+        .map_err(|_| SubmissionError::from(ErrorCode::StoreUnavailable))?
     }
 
     pub(crate) async fn submit(
@@ -68,6 +72,52 @@ impl SubmissionService {
         key: IdempotencyKey,
         request: JobRequest,
     ) -> Result<AcceptanceReceipt, SubmissionError> {
+        self.submit_request(auth, key, SubmittedJobRequest::Legacy(request))
+            .await
+    }
+    #[allow(
+        dead_code,
+        reason = "WE-P06 routes are inactive until all execution dependencies are ready"
+    )]
+    pub(crate) async fn submit_execution(
+        &self,
+        auth: AuthContext,
+        key: IdempotencyKey,
+        request: dissect3d_api::ExecutionJobRequest,
+    ) -> Result<AcceptanceReceipt, SubmissionError> {
+        self.submit_request(auth, key, SubmittedJobRequest::Execution(request))
+            .await
+    }
+    /// WE-003 exact linked retry. Replay of a retained binding never consults
+    /// readiness or reconciliation; fresh work requires both.
+    #[allow(
+        dead_code,
+        reason = "WE-P06 routes are inactive until all execution dependencies are ready"
+    )]
+    pub(crate) async fn retry_execution(
+        &self,
+        auth: AuthContext,
+        key: IdempotencyKey,
+        source: dissect3d_api::JobId,
+    ) -> Result<dissect3d_api::ExecutionAcceptance, SubmissionError> {
+        let prerequisites = crate::store::retry::RetryPrerequisites {
+            prepared: self.prepared.clone(),
+            reconciled: self.inputs.is_reconciled() && self.jobs.is_reconciled(),
+        };
+        let store = self.store.clone();
+        tokio::task::spawn_blocking(move || store.retry_job(auth, key, source, prerequisites))
+            .await
+            .map_err(|_| SubmissionError::from(ErrorCode::StoreUnavailable))?
+    }
+    async fn submit_request(
+        &self,
+        auth: AuthContext,
+        key: IdempotencyKey,
+        request: SubmittedJobRequest,
+    ) -> Result<AcceptanceReceipt, SubmissionError> {
+        request
+            .encoded_size()
+            .map_err(|_| SubmissionError::from(ErrorCode::InvalidRequest))?;
         #[cfg(test)]
         if self
             .test_hooks
@@ -134,12 +184,12 @@ impl SubmissionService {
         &self,
         auth: AuthContext,
         key: IdempotencyKey,
-        request: JobRequest,
+        request: SubmittedJobRequest,
     ) -> Result<AcceptanceReceipt, SubmissionError> {
         if !self.inputs.is_reconciled() || !self.jobs.is_reconciled() {
             return Err(ErrorCode::EngineRecovering.into());
         }
-        if !request.required_features.is_empty() {
+        if request.version() == 1 && !request.base().required_features.is_empty() {
             return Err(ErrorCode::RequiredFeatureUnsupported.into());
         }
         let permit = self
@@ -159,6 +209,7 @@ impl SubmissionService {
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
             let ids = request
+                .base()
                 .inputs
                 .values()
                 .flatten()
@@ -175,16 +226,28 @@ impl SubmissionService {
                     .map_err(|_| SubmissionError::from(ErrorCode::StorageIntegrityFault))?;
                 readers.insert(identity.input_id.as_str().to_owned(), Box::new(reader));
             }
-            let size = dissect3d_api::encode_job_request(&request)
-                .map_err(|_| SubmissionError::from(ErrorCode::InvalidRequest))?
-                .len();
-            let candidate = build_candidate(&catalog, &prepared, &request, size, pins, readers)
-                .map_err(admission_error)?;
+            let size = request
+                .encoded_size()
+                .map_err(|_| SubmissionError::from(ErrorCode::InvalidRequest))?;
+            let candidate = match &request {
+                SubmittedJobRequest::Legacy(r) => {
+                    build_candidate(&catalog, &prepared, r, size, pins, readers)
+                }
+                SubmittedJobRequest::Execution(r) => super::admission::build_execution_candidate(
+                    &catalog, &prepared, r, size, pins, readers,
+                ),
+            }
+            .map_err(admission_error)?;
             #[cfg(test)]
             if !test_hooks.before_commit() {
                 return Err(ErrorCode::StoreUnavailable.into());
             }
-            store.accept_job(auth, key, request, candidate)
+            match request {
+                SubmittedJobRequest::Legacy(r) => store.accept_job(auth, key, r, candidate),
+                SubmittedJobRequest::Execution(r) => {
+                    store.accept_execution_job(auth, key, r, candidate)
+                }
+            }
         })
         .await
         .map_err(|_| SubmissionError::from(ErrorCode::StoreUnavailable))?

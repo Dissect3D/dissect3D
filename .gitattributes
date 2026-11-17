@@ -1,0 +1,46 @@
+# Line-ending policy. The repository stores text as LF; working-tree line
+# endings follow each contributor's settings, except for the byte-exact files
+# below, which must check out identically on every OS.
+
+# Default: detect text files and normalize them to LF in the repository.
+* text=auto
+
+# Test fixtures are hashed or embedded byte for byte (include_bytes!, digests,
+# support-discovery vectors), so they stay LF even under Windows autocrlf.
+/crates/*/tests/fixtures/** text eol=lf
+# These fixtures were recorded with CRLF (the worker-execution inventory hashes
+# illustrative-acceptance.json); keep their exact bytes.
+/crates/api/tests/fixtures/execution-info.json text eol=crlf
+/crates/api/tests/fixtures/execution-snapshot.json text eol=crlf
+/crates/api/tests/fixtures/result_publication.json text eol=crlf
+/crates/cli/tests/fixtures/PROVENANCE.md text eol=crlf
+/crates/cli/tests/fixtures/illustrative-acceptance.json text eol=crlf
+
+# Protected source tests: the core-service and support-discovery manifests hash
+# their original CRLF bytes (patompong-docs/tests/core-service/verify_inputs.py).
+/crates/api/tests/decode.rs text eol=crlf
+/crates/api/tests/discovery.rs text eol=crlf
+/crates/api/tests/types.rs text eol=crlf
+/crates/cli/tests/audit_limits.rs text eol=crlf
+/crates/cli/tests/core_service.rs text eol=crlf
+/crates/cli/tests/core_service_windows.rs text eol=crlf
+/crates/cli/tests/offline.rs text eol=crlf
+/crates/cli/tests/support_discovery.rs text eol=crlf
+/crates/connection/tests/discovery.rs text eol=crlf
+/crates/engine/tests/access_http.rs text eol=crlf
+/crates/engine/tests/bootstrap.rs text eol=crlf
+/crates/engine/tests/shutdown_boundaries.rs text eol=crlf
+/crates/engine/tests/signal_shutdown.rs text eol=crlf
+/crates/engine/tests/store.rs text eol=crlf
+/crates/platform/tests/atomic_recovery.rs text eol=crlf
+/crates/platform/tests/audit_regressions.rs text eol=crlf
+/crates/platform/tests/authority.rs text eol=crlf
+/crates/platform/tests/bootstrap_peer.rs text eol=crlf
+/crates/platform/tests/bootstrap_peer_windows.rs text eol=crlf
+/crates/platform/tests/native_cancellation.rs text eol=crlf
+/crates/platform/tests/owned_root.rs text eol=crlf
+/crates/platform/tests/process_lifetime.rs text eol=crlf
+
+# Planning documents and evidence have byte-defined identities. The folder is
+# git-ignored today; if it is ever tracked, never convert its line endings.
+/patompong-docs/** -text

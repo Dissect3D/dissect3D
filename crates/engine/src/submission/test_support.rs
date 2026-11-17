@@ -32,9 +32,49 @@ pub(crate) struct Hooks {
     audit: Mutex<Option<CommitPause>>,
     upload_finish: Mutex<Option<CommitPause>>,
     upload_complete: Mutex<Option<CommitPause>>,
+    observations: Mutex<Option<ObservationSamples>>,
+}
+
+/// Opt-in measurement of fresh-admission observation age, never an assertion.
+#[derive(Default, Debug)]
+pub(crate) struct ObservationSamples {
+    /// Age when the actor begins a fresh finish.
+    pub(crate) finish_entry: Vec<std::time::Duration>,
+    /// Age immediately before COMMIT starts, for committed attempts.
+    pub(crate) commit_start: Vec<std::time::Duration>,
+    /// Fresh finishes returned as stale because of age.
+    pub(crate) aged: usize,
+    /// Fresh finishes returned as stale because admission facts changed.
+    pub(crate) changed: usize,
+}
+#[derive(Clone, Copy)]
+pub(crate) enum Observation {
+    FinishEntry(std::time::Duration),
+    CommitStart(std::time::Duration),
+    Aged,
+    Changed,
 }
 
 impl Hooks {
+    #[cfg(feature = "test-support")]
+    pub(crate) fn sample_observations(&self) {
+        *self.observations.lock().unwrap() = Some(ObservationSamples::default());
+    }
+    #[cfg(feature = "test-support")]
+    pub(crate) fn take_observations(&self) -> Option<ObservationSamples> {
+        self.observations.lock().unwrap().take()
+    }
+    pub(crate) fn observe(&self, observation: Observation) {
+        if let Some(samples) = self.observations.lock().unwrap().as_mut() {
+            match observation {
+                Observation::FinishEntry(age) => samples.finish_entry.push(age),
+                Observation::CommitStart(age) => samples.commit_start.push(age),
+                Observation::Aged => samples.aged += 1,
+                Observation::Changed => samples.changed += 1,
+            }
+        }
+    }
+
     #[cfg(feature = "test-support")]
     pub(crate) fn pause_upload_finalization(
         &self,

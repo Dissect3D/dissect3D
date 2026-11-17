@@ -26,6 +26,7 @@ pub struct VerifiedEnrollment {
 pub(crate) enum GrantPolicy {
     CoreV1,
     SubmissionV1,
+    ExecutionV1,
 }
 
 impl GrantPolicy {
@@ -33,6 +34,7 @@ impl GrantPolicy {
         match self {
             Self::CoreV1 => "core-v1",
             Self::SubmissionV1 => "submission-v1",
+            Self::ExecutionV1 => "execution-v1",
         }
     }
 
@@ -40,9 +42,16 @@ impl GrantPolicy {
         match self {
             Self::CoreV1 => &INITIAL_GRANTS,
             Self::SubmissionV1 => &SUBMISSION_GRANTS,
+            Self::ExecutionV1 => &EXECUTION_GRANTS,
         }
     }
 
+    pub(crate) const fn storage_policy(self) -> Self {
+        match self {
+            Self::ExecutionV1 => Self::SubmissionV1,
+            other => other,
+        }
+    }
     pub(crate) fn parse(value: &str) -> Option<Self> {
         match value {
             "core-v1" => Some(Self::CoreV1),
@@ -136,3 +145,6 @@ pub(crate) const SUBMISSION_GRANTS: [&str; 9] = [
     "jobs.submit",
     "operation.show_own",
 ];
+
+/// The native contract fixes these names; only the Store grants them.
+pub(crate) use dissect3d_api::EXECUTION_GRANTS;

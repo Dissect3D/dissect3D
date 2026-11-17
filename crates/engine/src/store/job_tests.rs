@@ -12,7 +12,7 @@ fn v5_upgrade_preserves_prior_backup_and_creates_distinct_v6_image() {
     let identity = store.identity().unwrap();
     drop(store);
     let db = Connection::open(path.join(DATABASE_NAME)).unwrap();
-    db.execute_batch("PRAGMA foreign_keys=OFF; DROP TABLE job_acceptance_events; DROP TABLE job_inputs; DROP TABLE submission_bindings; DROP TABLE jobs; DROP TABLE job_sequence; PRAGMA user_version=5;").unwrap();
+    db.execute_batch("PRAGMA foreign_keys=OFF; DROP TABLE job_events; DROP TABLE resource_reservations; DROP TABLE job_attempts; DROP TABLE retry_bindings; DROP TABLE job_execution; DROP TABLE client_authorizations; DROP TABLE job_acceptance_events; DROP TABLE job_inputs; DROP TABLE submission_bindings; DROP TABLE jobs; DROP TABLE job_sequence; PRAGMA user_version=5;").unwrap();
     drop(db);
     let root = OwnedRoot::open(&path, dissect3d_platform::RootPurpose::EngineData).unwrap();
     let prior = RelativePath::parse("recovery/metadata-v5-upgrade.sqlite3").unwrap();
@@ -30,7 +30,7 @@ fn v5_upgrade_preserves_prior_backup_and_creates_distinct_v6_image() {
         b"immutable earlier upgrade image"
     );
     let backup = Connection::open_with_flags(
-        path.join("recovery/metadata-v6-upgrade.sqlite3"),
+        path.join("recovery/metadata-v7-upgrade.sqlite3"),
         OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .unwrap();

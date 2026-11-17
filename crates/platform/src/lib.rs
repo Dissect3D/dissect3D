@@ -8,10 +8,13 @@ mod identity;
 mod input_files;
 mod ipc;
 mod lease;
+#[cfg(feature = "native-test-hooks")]
+pub mod native_test_hooks;
 mod process;
 mod root;
 #[cfg(windows)]
 mod windows;
+mod worker;
 
 pub use files::{RelativePath, SafeFileMetadata, open_config_lock, open_regular_file};
 pub use identity::{OwnerIdentity, current_owner_identity};
@@ -26,3 +29,4 @@ pub use process::{
     launch_engine, process_matches, wait_for_process_exit,
 };
 pub use root::{OwnedRoot, PlatformError, RootPurpose};
+pub use worker::{CleanupConfirmed, CleanupFault, WorkerCommand, WorkerIdentity, WorkerProcess};

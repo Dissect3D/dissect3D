@@ -185,12 +185,22 @@ fn symlinks_and_fifo_sources_never_grant_file_authority() {
     assert!(root.begin_input(&path("link")).is_err());
     assert!(root.open_immutable_input(&path("link")).is_err());
     assert!(root.remove_durable(&path("link")).is_err());
+    #[cfg(not(target_os = "macos"))]
     rustix::fs::mkfifoat(
         rustix::fs::CWD,
         root.path().join("fifo"),
         rustix::fs::Mode::from_bits_truncate(0o600),
     )
     .unwrap();
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let fifo = std::ffi::CString::new(root.path().join("fifo").as_os_str().as_bytes()).unwrap();
+        // Fixture-only portability: macOS lacks rustix::fs::mkfifoat.
+        if unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) } != 0 {
+            panic!("create FIFO fixture: {}", std::io::Error::last_os_error());
+        }
+    }
     assert!(root.open_immutable_input(&path("fifo")).is_err());
     assert_eq!(std::fs::read(outside).unwrap(), b"outside");
 }

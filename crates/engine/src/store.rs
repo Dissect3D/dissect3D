@@ -39,12 +39,38 @@ use crate::inputs::policy::{
 #[cfg(unix)]
 use inputs::{abandon_upload, complete_upload, reserve_upload};
 #[cfg(unix)]
+pub(crate) mod admission;
+#[cfg(unix)]
 pub(crate) mod jobs;
+#[cfg(unix)]
+pub(crate) mod retry;
 #[cfg(unix)]
 pub(crate) mod submission;
 
+#[allow(
+    dead_code,
+    reason = "WE-P04/07 report attempt cleanup through this seam; dispatch stays inactive"
+)]
+pub(crate) mod cleanup;
+#[allow(
+    dead_code,
+    reason = "WE-P04/06 integrate the private lifecycle seam; dispatch stays inactive"
+)]
+pub(crate) mod execution;
+#[cfg(unix)]
+#[allow(dead_code, reason = "WE-P06 owns public execution read activation")]
+mod execution_reads;
+mod execution_schema;
+#[allow(
+    dead_code,
+    reason = "WE-P04/06 compose supervised finalization; dispatch stays inactive"
+)]
+pub(crate) mod finalize;
+pub(crate) mod reauthorization;
+use execution_schema::add_execution_tables;
+
 const APPLICATION_ID: i64 = 0x4433_4431;
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 const DATABASE_NAME: &str = "metadata.sqlite3";
 // `recovery/metadata-upgrade.sqlite3` is a legacy artifact and is never opened
 // or replaced by this migration. Keep the v3 pre-upgrade image distinct.
@@ -141,9 +167,13 @@ pub struct StoreIdentity {
 }
 
 enum Command {
+    #[cfg(unix)]
+    ExecutionRead(execution_reads::ReadCommand),
+    #[allow(dead_code, reason = "private execution consumers follow in WE-P04/06")]
+    Execution(execution::ExecutionCommand),
     #[cfg(all(test, unix, feature = "test-support"))]
     JobLimits(
-        submission::AcceptanceLimits,
+        admission::AcceptanceLimits,
         mpsc::SyncSender<Result<(), CoreError>>,
     ),
     Identity(mpsc::SyncSender<Result<StoreIdentity, CoreError>>),
@@ -212,22 +242,41 @@ enum Command {
     #[cfg(unix)]
     InputFileKnown(InputId, mpsc::SyncSender<Result<bool, CoreError>>),
     #[cfg(unix)]
-    ProbeJobBinding(
+    ReadSubmission(
         AuthContext,
         IdempotencyKey,
-        dissect3d_api::JobRequest,
-        mpsc::SyncSender<
-            Result<Option<dissect3d_api::AcceptanceReceipt>, crate::submission::SubmissionError>,
+        crate::submission::equivalence::SubmittedJobRequest,
+        SyncSender<Result<submission::ReadState, crate::submission::SubmissionError>>,
+    ),
+    #[cfg(unix)]
+    FinishSubmission(
+        AuthContext,
+        IdempotencyKey,
+        crate::submission::equivalence::SubmittedJobRequest,
+        Option<Arc<crate::submission::admission::AdmissionCandidate>>,
+        Box<submission::Prepared>,
+        SyncSender<
+            Result<
+                Option<Option<dissect3d_api::AcceptanceReceipt>>,
+                crate::submission::SubmissionError,
+            >,
         >,
     ),
     #[cfg(unix)]
-    AcceptJob(
+    ReadRetry(
         AuthContext,
         IdempotencyKey,
-        dissect3d_api::JobRequest,
-        Box<crate::submission::admission::AdmissionCandidate>,
-        mpsc::SyncSender<
-            Result<dissect3d_api::AcceptanceReceipt, crate::submission::SubmissionError>,
+        dissect3d_api::JobId,
+        SyncSender<Result<retry::RetryRead, crate::submission::SubmissionError>>,
+    ),
+    #[cfg(unix)]
+    FinishRetry(
+        AuthContext,
+        IdempotencyKey,
+        dissect3d_api::JobId,
+        Box<retry::RetryPrepared>,
+        SyncSender<
+            Result<Option<dissect3d_api::ExecutionAcceptance>, crate::submission::SubmissionError>,
         >,
     ),
     #[cfg(unix)]
@@ -260,7 +309,13 @@ enum Command {
     ),
     #[cfg(all(unix, test, feature = "test-support"))]
     FailNextJobCommit(mpsc::SyncSender<Result<(), CoreError>>),
+    AuthorizeExecution(
+        reauthorization::VerifiedAuthorization,
+        SyncSender<Result<reauthorization::AuthorizationReceipt, CoreError>>,
+    ),
     Close,
+    #[cfg(all(test, unix, feature = "test-support"))]
+    PauseExecutionQueue(SyncSender<()>, Receiver<()>),
     #[cfg(test)]
     LimitDatabasePages(mpsc::SyncSender<Result<(), CoreError>>),
     #[cfg(test)]
@@ -271,6 +326,58 @@ enum Command {
     SeedOperationHistory(usize, mpsc::SyncSender<Result<(), CoreError>>),
 }
 
+/// How a handled command affects in-flight caller-side admission preparations.
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PreparationEffect {
+    /// Changes no fact behind a preparation, or only facts `finish` rechecks
+    /// in SQL or that can only make the free-space observation conservative.
+    Keeps,
+    /// May change disk usage the caller-side free-space observation cannot see.
+    Invalidates,
+}
+
+#[cfg(unix)]
+impl Command {
+    /// Explicit classification; unknown and new commands invalidate by default.
+    fn preparation_effect(&self) -> PreparationEffect {
+        use PreparationEffect::{Invalidates, Keeps};
+        match self {
+            // Read-only commands.
+            Command::Identity(_)
+            | Command::Authenticate(..)
+            | Command::Snapshot(..)
+            | Command::ShowOperation(..)
+            | Command::ExecutionRead(_)
+            | Command::ReadSubmission(..)
+            | Command::ReadRetry(..)
+            | Command::ShowJob(..)
+            | Command::ListJobs(..)
+            | Command::InputFileKnown(..)
+            | Command::JobAuditBatch(..) => Keeps,
+            // In-memory pins plus a forward clock write; finish rechecks expiry
+            // with its own clock observation.
+            Command::PinVerifiedInputs(..) => Keeps,
+            // A new reservation is charged in SQL when finish sums reservations.
+            Command::ReserveUpload(..) => Keeps,
+            // These only free disk (staging/input files are removed first), so an
+            // older observation can only understate free space. For abandonment
+            // that order is the caller's: `inputs.rs::cleanup_incomplete` removes the
+            // staging file and calls `abandon_upload` only after removal or NotFound.
+            Command::AbandonUpload(..)
+            | Command::ClaimInputCleanup(..)
+            | Command::ConfirmInputCleanup(..) => Keeps,
+            // A committed sibling is charged one growth allowance through
+            // `AdmissionEpoch::admissions`; the handler escalates an uncertain commit.
+            Command::FinishSubmission(..) | Command::FinishRetry(..) => Keeps,
+            // `CompleteUpload` drops the reservation that covered bytes which may
+            // have landed after the observation. Everything else, including test
+            // commands and future variants, invalidates by default.
+            _ => Invalidates,
+        }
+    }
+}
+
 /// Bounded handle to the only thread allowed to own SQLite and the lease.
 /// Dropping the handle waits for the actor to close SQLite before releasing
 /// authority, preventing another process from opening the store too early.
@@ -278,6 +385,12 @@ pub struct Store {
     sender: SyncSender<Command>,
     thread: Option<JoinHandle<()>>,
     stopping: Arc<AtomicBool>,
+    #[cfg(unix)]
+    preparation_root: Arc<OwnedRoot>,
+    /// Submission/retry admission only (`bounded_admission`). Execution reads
+    /// use the bounded actor queue and never take a slot.
+    #[cfg(unix)]
+    submission_preparation: admission::PreparationGate,
 }
 
 impl Store {
@@ -306,6 +419,11 @@ impl Store {
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
         let stopping = Arc::new(AtomicBool::new(false));
         let actor_stopping = stopping.clone();
+        let root = Arc::new(root);
+        #[cfg(unix)]
+        let preparation_root = root.clone();
+        #[cfg(unix)]
+        let preparation_capacity = policy.queue_capacity;
         let policy = policy.clone();
         let thread = thread::Builder::new()
             .name("dissect3d-store".to_owned())
@@ -326,6 +444,10 @@ impl Store {
                 sender,
                 thread: Some(thread),
                 stopping,
+                #[cfg(unix)]
+                preparation_root,
+                #[cfg(unix)]
+                submission_preparation: admission::PreparationGate::new(preparation_capacity),
             }),
             Err(error) => {
                 let _ = thread.join();
@@ -336,17 +458,7 @@ impl Store {
 
     /// Read the durable installation and current instance identities.
     pub fn identity(&self) -> Result<StoreIdentity, CoreError> {
-        let (response_tx, response_rx) = mpsc::sync_channel(1);
-        match self.sender.try_send(Command::Identity(response_tx)) {
-            Ok(()) => {}
-            Err(mpsc::TrySendError::Full(_)) => return Err(CoreError::Busy),
-            Err(mpsc::TrySendError::Disconnected(_)) => {
-                return Err(CoreError::StoreUnavailable);
-            }
-        }
-        response_rx
-            .recv()
-            .map_err(|_| CoreError::StoreUnavailable)?
+        self.request(Command::Identity)
     }
 
     /// Durably enroll a natively verified client and return the exact replay receipt.
@@ -477,7 +589,12 @@ impl Store {
         key: IdempotencyKey,
         request: dissect3d_api::JobRequest,
     ) -> Result<Option<dissect3d_api::AcceptanceReceipt>, crate::submission::SubmissionError> {
-        self.request_job(|reply| Command::ProbeJobBinding(auth, key, request, reply))
+        self.prepare_submission(
+            auth,
+            key,
+            crate::submission::equivalence::SubmittedJobRequest::Legacy(request),
+            None,
+        )
     }
 
     #[cfg(unix)]
@@ -488,11 +605,53 @@ impl Store {
         request: dissect3d_api::JobRequest,
         candidate: crate::submission::admission::AdmissionCandidate,
     ) -> Result<dissect3d_api::AcceptanceReceipt, crate::submission::SubmissionError> {
-        self.request_job(|reply| Command::AcceptJob(auth, key, request, Box::new(candidate), reply))
+        self.prepare_submission(
+            auth,
+            key,
+            crate::submission::equivalence::SubmittedJobRequest::Legacy(request),
+            Some(candidate),
+        )?
+        .ok_or_else(|| dissect3d_api::ErrorCode::StoreUnavailable.into())
     }
 
+    #[cfg(unix)]
+    pub(crate) fn probe_execution_binding(
+        &self,
+        auth: AuthContext,
+        key: IdempotencyKey,
+        request: dissect3d_api::ExecutionJobRequest,
+    ) -> Result<Option<dissect3d_api::AcceptanceReceipt>, crate::submission::SubmissionError> {
+        dissect3d_api::encode_execution_request(&request).map_err(|_| {
+            crate::submission::SubmissionError::from(dissect3d_api::ErrorCode::InvalidRequest)
+        })?;
+        self.prepare_submission(
+            auth,
+            key,
+            crate::submission::equivalence::SubmittedJobRequest::Execution(request),
+            None,
+        )
+    }
+    #[cfg(unix)]
+    pub(crate) fn accept_execution_job(
+        &self,
+        auth: AuthContext,
+        key: IdempotencyKey,
+        request: dissect3d_api::ExecutionJobRequest,
+        candidate: crate::submission::admission::AdmissionCandidate,
+    ) -> Result<dissect3d_api::AcceptanceReceipt, crate::submission::SubmissionError> {
+        dissect3d_api::encode_execution_request(&request).map_err(|_| {
+            crate::submission::SubmissionError::from(dissect3d_api::ErrorCode::InvalidRequest)
+        })?;
+        self.prepare_submission(
+            auth,
+            key,
+            crate::submission::equivalence::SubmittedJobRequest::Execution(request),
+            Some(candidate),
+        )?
+        .ok_or_else(|| dissect3d_api::ErrorCode::StoreUnavailable.into())
+    }
     #[cfg(all(unix, test, feature = "test-support"))]
-    pub(crate) fn set_test_job_limits(&self, limits: submission::AcceptanceLimits) {
+    pub(crate) fn set_test_job_limits(&self, limits: admission::AcceptanceLimits) {
         self.request(|reply| Command::JobLimits(limits, reply))
             .unwrap();
     }
@@ -505,35 +664,135 @@ impl Store {
         request: dissect3d_api::JobRequest,
         candidate: crate::submission::admission::AdmissionCandidate,
     ) {
-        let (reply, receiver) = mpsc::sync_channel(1);
-        assert!(
-            self.sender
-                .send(Command::AcceptJob(
-                    auth,
-                    key,
-                    request,
-                    Box::new(candidate),
-                    reply
-                ))
-                .is_ok()
+        let request = crate::submission::equivalence::SubmittedJobRequest::Legacy(request);
+        let state = self
+            .request(|reply| {
+                Command::ReadSubmission(auth.clone(), key.clone(), request.clone(), reply)
+            })
+            .unwrap();
+        let prepared = submission::prepare(
+            &self.preparation_root,
+            &auth,
+            &key,
+            &request,
+            Some(&candidate),
+            state,
         );
+        let (reply, receiver) = mpsc::sync_channel(1);
+        self.sender
+            .send(Command::FinishSubmission(
+                auth,
+                key,
+                request,
+                Some(Arc::new(candidate)),
+                Box::new(prepared),
+                reply,
+            ))
+            .ok()
+            .unwrap();
         drop(receiver);
     }
 
     #[cfg(unix)]
-    fn request_job<T>(
+    fn prepare_submission(
         &self,
-        command: impl FnOnce(mpsc::SyncSender<Result<T, crate::submission::SubmissionError>>) -> Command,
+        auth: AuthContext,
+        key: IdempotencyKey,
+        request: crate::submission::equivalence::SubmittedJobRequest,
+        candidate: Option<crate::submission::admission::AdmissionCandidate>,
+    ) -> Result<Option<dissect3d_api::AcceptanceReceipt>, crate::submission::SubmissionError> {
+        // Candidate ownership must survive stale preparation. A finish command
+        // borrows it through an Arc, including after its reply is abandoned.
+        let candidate = candidate.map(Arc::new);
+        self.bounded_admission(
+            || {
+                self.request(|reply| {
+                    Command::ReadSubmission(auth.clone(), key.clone(), request.clone(), reply)
+                })
+            },
+            |state| {
+                submission::prepare(
+                    &self.preparation_root,
+                    &auth,
+                    &key,
+                    &request,
+                    candidate.as_deref(),
+                    state,
+                )
+            },
+            |prepared| {
+                self.request(|reply| {
+                    Command::FinishSubmission(
+                        auth.clone(),
+                        key.clone(),
+                        request.clone(),
+                        candidate.clone(),
+                        Box::new(prepared),
+                        reply,
+                    )
+                })
+            },
+        )
+    }
+
+    /// WE-003 exact linked retry of a terminal source this client created.
+    /// WE-P06 owns the public route; dispatch of the new job stays inactive.
+    #[cfg(unix)]
+    pub(crate) fn retry_job(
+        &self,
+        auth: AuthContext,
+        key: IdempotencyKey,
+        source: dissect3d_api::JobId,
+        prerequisites: retry::RetryPrerequisites,
+    ) -> Result<dissect3d_api::ExecutionAcceptance, crate::submission::SubmissionError> {
+        self.bounded_admission(
+            || {
+                self.request(|reply| {
+                    Command::ReadRetry(auth.clone(), key.clone(), source.clone(), reply)
+                })
+            },
+            |state| {
+                retry::prepare_retry(
+                    &self.preparation_root,
+                    &auth,
+                    &key,
+                    &source,
+                    &prerequisites,
+                    state,
+                )
+            },
+            |prepared| {
+                self.request(|reply| {
+                    Command::FinishRetry(
+                        auth.clone(),
+                        key.clone(),
+                        source.clone(),
+                        Box::new(prepared),
+                        reply,
+                    )
+                })
+            },
+        )
+    }
+
+    /// Bounded caller preparation: read a SQL snapshot on the actor, prepare on
+    /// this blocking caller, and let the actor make the final decision. Stale
+    /// work (`None`) is retried from SQL at most four times, then `Busy`; it
+    /// cannot authorize, reserve bytes, or overwrite a competing binding.
+    #[cfg(unix)]
+    fn bounded_admission<S, P, T>(
+        &self,
+        read: impl Fn() -> Result<S, crate::submission::SubmissionError>,
+        prepare: impl Fn(S) -> P,
+        finish: impl Fn(P) -> Result<Option<T>, crate::submission::SubmissionError>,
     ) -> Result<T, crate::submission::SubmissionError> {
-        let (tx, rx) = mpsc::sync_channel(1);
-        self.sender.try_send(command(tx)).map_err(|error| {
-            crate::submission::SubmissionError::from(match error {
-                mpsc::TrySendError::Full(_) => CoreError::Busy,
-                mpsc::TrySendError::Disconnected(_) => CoreError::StoreUnavailable,
-            })
-        })?;
-        rx.recv()
-            .map_err(|_| crate::submission::SubmissionError::from(CoreError::StoreUnavailable))?
+        let _permit = self.submission_preparation.acquire()?;
+        for _ in 0..4 {
+            if let Some(outcome) = finish(prepare(read()?))? {
+                return Ok(outcome);
+            }
+        }
+        Err(CoreError::Busy.into())
     }
 
     #[cfg(unix)]
@@ -542,7 +801,7 @@ impl Store {
         auth: AuthContext,
         id: dissect3d_api::JobId,
     ) -> Result<dissect3d_api::JobSnapshot, crate::submission::SubmissionError> {
-        self.request_job(|reply| Command::ShowJob(auth, id, reply))
+        self.request(|reply| Command::ShowJob(auth, id, reply))
     }
     #[cfg(unix)]
     pub(crate) fn list_jobs(
@@ -550,21 +809,21 @@ impl Store {
         auth: AuthContext,
         query: dissect3d_api::JobsQuery,
     ) -> Result<dissect3d_api::JobPage, crate::submission::SubmissionError> {
-        self.request_job(|reply| Command::ListJobs(auth, query, reply))
+        self.request(|reply| Command::ListJobs(auth, query, reply))
     }
     #[cfg(unix)]
     pub(crate) fn job_audit_batch(
         &self,
         after: String,
     ) -> Result<Vec<jobs::AuditEntry>, crate::submission::SubmissionError> {
-        self.request_job(|reply| Command::JobAuditBatch(after, reply))
+        self.request(|reply| Command::JobAuditBatch(after, reply))
     }
     #[cfg(unix)]
     pub(crate) fn mark_job_input_fault(
         &self,
         id: InputId,
     ) -> Result<(), crate::submission::SubmissionError> {
-        self.request_job(|reply| Command::MarkJobInputFault(id, reply))
+        self.request(|reply| Command::MarkJobInputFault(id, reply))
     }
     pub(crate) fn complete_shutdown(&self, instance_id: InstanceId) -> Result<(), CoreError> {
         self.request(|response| Command::CompleteShutdown(instance_id, response))
@@ -611,23 +870,24 @@ impl Store {
             .map_err(|_| CoreError::StoreUnavailable)?
     }
 
-    fn request<T>(
+    /// Send one typed command and wait for its reply, for any Store error type.
+    fn request<T, E: From<CoreError>>(
         &self,
-        command: impl FnOnce(mpsc::SyncSender<Result<T, CoreError>>) -> Command,
-    ) -> Result<T, CoreError> {
+        command: impl FnOnce(mpsc::SyncSender<Result<T, E>>) -> Command,
+    ) -> Result<T, E> {
         // Capacity-one replies make each request self-contained while try_send
         // keeps queue saturation observable instead of blocking producers.
         let (response_tx, response_rx) = mpsc::sync_channel(1);
         match self.sender.try_send(command(response_tx)) {
             Ok(()) => {}
-            Err(mpsc::TrySendError::Full(_)) => return Err(CoreError::Busy),
+            Err(mpsc::TrySendError::Full(_)) => return Err(CoreError::Busy.into()),
             Err(mpsc::TrySendError::Disconnected(_)) => {
-                return Err(CoreError::StoreUnavailable);
+                return Err(CoreError::StoreUnavailable.into());
             }
         }
         response_rx
             .recv()
-            .map_err(|_| CoreError::StoreUnavailable)?
+            .map_err(|_| E::from(CoreError::StoreUnavailable))?
     }
 }
 
@@ -643,7 +903,7 @@ impl Drop for Store {
 }
 
 fn actor(
-    root: OwnedRoot,
+    root: Arc<OwnedRoot>,
     // Keep the lease in this stack frame until after the SQLite connection has
     // closed; declaration/drop order alone is not used as the lifetime proof.
     _lease: AuthorityLease,
@@ -661,11 +921,12 @@ fn actor(
         }
     };
     #[cfg(all(test, unix, feature = "test-support"))]
-    let mut job_limits = submission::AcceptanceLimits::default();
+    let mut job_limits = admission::AcceptanceLimits::default();
     #[cfg(all(unix, not(all(test, feature = "test-support"))))]
-    let job_limits = submission::AcceptanceLimits::default();
+    let job_limits = admission::AcceptanceLimits::default();
     let _ = ready.send(Ok(()));
     let mut stopping = false;
+    let mut live_attempts = execution::LiveAttempts::default();
     let mut shutdown_deadline: Option<Instant> = None;
     #[cfg(unix)]
     let mut active_uploads = inputs::ActiveUploads::new();
@@ -679,8 +940,34 @@ fn actor(
     let mut fail_next_job_commit = false;
     #[cfg(test)]
     let mut pause_next_shutdown: Option<(mpsc::SyncSender<()>, Receiver<()>)> = None;
+    #[cfg(unix)]
+    let mut preparation_epoch = admission::AdmissionEpoch::default();
     while let Ok(command) = receiver.recv() {
+        // Fresh admission compares this epoch with its read snapshot. The
+        // generation moves after a handler whose command may have changed disk
+        // usage that the caller-side free-space observation cannot recheck in SQL.
+        #[cfg(unix)]
+        let mut invalidates_preparation =
+            command.preparation_effect() == PreparationEffect::Invalidates;
         match command {
+            #[cfg(unix)]
+            Command::ExecutionRead(command) => {
+                command.handle(&connection, policy.control_response_bytes)
+            }
+            #[cfg(all(test, unix, feature = "test-support"))]
+            Command::PauseExecutionQueue(entered, resume) => {
+                let _ = entered.send(());
+                let _ = resume.recv_timeout(Duration::from_secs(5));
+            }
+            Command::Execution(command) => live_attempts.handle(&mut connection, command, stopping),
+            Command::AuthorizeExecution(request, reply) => {
+                let result = if stopping || cfg!(windows) {
+                    Err(CoreError::Busy)
+                } else {
+                    reauthorization::authorize(&mut connection, request)
+                };
+                let _ = reply.send(result);
+            }
             Command::Identity(response) => {
                 let _ = response.send(read_identity(&connection));
             }
@@ -841,40 +1128,116 @@ fn actor(
             Command::InputFileKnown(input_id, response) => {
                 let _ = response.send(inputs::input_file_known(&connection, &input_id));
             }
-            #[cfg(unix)]
-            Command::ProbeJobBinding(auth, key, request, reply) => {
-                let _ = reply.send(submission::probe_committed(
-                    &mut connection,
-                    auth,
-                    key,
-                    request,
-                ));
-            }
             #[cfg(all(test, unix, feature = "test-support"))]
             Command::JobLimits(limits, reply) => {
                 job_limits = limits;
                 let _ = reply.send(Ok(()));
             }
             #[cfg(unix)]
-            Command::AcceptJob(auth, key, request, candidate, reply) => {
+            Command::ReadSubmission(auth, key, request, reply) => {
+                let _ = reply.send(submission::read_state(
+                    &mut connection,
+                    &auth,
+                    &key,
+                    &request,
+                    preparation_epoch,
+                ));
+            }
+            #[cfg(unix)]
+            Command::FinishSubmission(auth, key, request, candidate, prepared, reply) => {
                 #[cfg(all(test, feature = "test-support"))]
-                let fail_commit = std::mem::take(&mut fail_next_job_commit);
+                let fail_commit = fail_next_job_commit;
                 #[cfg(not(all(test, feature = "test-support")))]
                 let fail_commit = false;
-                let _ = reply.send(submission::accept(
+                let result = submission::finish(
                     &mut connection,
-                    &root,
-                    auth,
-                    key,
-                    request,
-                    *candidate,
-                    submission::AcceptancePolicy {
-                        stopping,
-                        fail_commit,
-                        response_limit: policy.control_response_bytes,
-                        limits: job_limits,
+                    submission::ActorTurn {
+                        root: &root,
+                        epoch: preparation_epoch,
+                        policy: admission::AcceptancePolicy {
+                            stopping,
+                            fail_commit,
+                            response_limit: policy.control_response_bytes,
+                            limits: job_limits,
+                        },
                     },
+                    submission::Finish {
+                        auth,
+                        key,
+                        submitted: request,
+                        candidate: candidate.as_deref(),
+                        prepared: *prepared,
+                    },
+                );
+                #[cfg(all(test, feature = "test-support"))]
+                if !matches!(result, Ok(None)) {
+                    fail_next_job_commit = false;
+                }
+                // Stale, probe-only, replay and rejected results roll back or
+                // change no admission fact. A committed fresh acceptance is charged
+                // to later finishes; a store failure may follow an unknown COMMIT.
+                match &result {
+                    Ok(Some(Some(receipt))) if !receipt.replayed => {
+                        preparation_epoch.admissions = preparation_epoch.admissions.wrapping_add(1);
+                    }
+                    Err(error) if error.code == dissect3d_api::ErrorCode::StoreUnavailable => {
+                        invalidates_preparation = true;
+                    }
+                    _ => {}
+                }
+                let _ = reply.send(result);
+            }
+            #[cfg(unix)]
+            Command::ReadRetry(auth, key, source, reply) => {
+                let _ = reply.send(retry::read_retry(
+                    &mut connection,
+                    &auth,
+                    &key,
+                    &source,
+                    preparation_epoch,
                 ));
+            }
+            #[cfg(unix)]
+            Command::FinishRetry(auth, key, source, prepared, reply) => {
+                #[cfg(all(test, feature = "test-support"))]
+                let fail_commit = fail_next_job_commit;
+                #[cfg(not(all(test, feature = "test-support")))]
+                let fail_commit = false;
+                let result = retry::finish_retry(
+                    &mut connection,
+                    submission::ActorTurn {
+                        root: &root,
+                        epoch: preparation_epoch,
+                        policy: admission::AcceptancePolicy {
+                            stopping,
+                            fail_commit,
+                            response_limit: policy.control_response_bytes,
+                            limits: job_limits,
+                        },
+                    },
+                    retry::RetryFinish {
+                        auth,
+                        key,
+                        source,
+                        prepared: *prepared,
+                    },
+                );
+                #[cfg(all(test, feature = "test-support"))]
+                if !matches!(result, Ok(None)) {
+                    fail_next_job_commit = false;
+                }
+                // As for submission: a committed fresh retry is charged to later
+                // finishes; a store failure may follow an unknown COMMIT.
+                match &result {
+                    Ok(Some(receipt)) if !receipt.replayed => {
+                        preparation_epoch.admissions = preparation_epoch.admissions.wrapping_add(1);
+                    }
+                    Err(error) if error.code == dissect3d_api::ErrorCode::StoreUnavailable => {
+                        invalidates_preparation = true;
+                    }
+                    _ => {}
+                }
+                let _ = reply.send(result);
             }
             #[cfg(unix)]
             Command::ShowJob(auth, id, reply) => {
@@ -976,9 +1339,18 @@ fn actor(
             }
             Command::Close => break,
         }
+        #[cfg(unix)]
+        if invalidates_preparation {
+            preparation_epoch.generation = preparation_epoch.generation.wrapping_add(1);
+        }
     }
     drop(connection);
     // The authority lease is dropped only after SQLite has closed.
+}
+
+/// SQLite failures map to the safe store category; `?` adapts it to callers' error types.
+fn sql<T>(value: rusqlite::Result<T>) -> Result<T, CoreError> {
+    value.map_err(|_| CoreError::StoreUnavailable)
 }
 
 fn open_database(root: &OwnedRoot, policy: &CorePolicy) -> Result<Connection, CoreError> {
@@ -1112,6 +1484,7 @@ fn initialize_schema_with_hook(
                 [now_ms()?],
             )
             .map_err(|_| CoreError::StoreUnavailable)?;
+        execution::interrupt_active(&transaction)?;
         let instance = new_instance_id()?;
         transaction
             .execute(
@@ -1216,6 +1589,7 @@ fn initialize_schema_with_hook(
         )
         .map_err(|_| CoreError::StoreUnavailable)?;
     add_job_tables(&transaction)?;
+    add_execution_tables(&transaction)?;
     transaction
         .execute(
             "INSERT INTO engine_clock(singleton,last_observed_ms) VALUES(1,?1)",
@@ -1296,7 +1670,7 @@ struct MigrationStep {
     apply: fn(&Transaction<'_>) -> Result<(), CoreError>,
 }
 
-const CORE_MIGRATIONS: [MigrationStep; 5] = [
+const CORE_MIGRATIONS: [MigrationStep; 6] = [
     MigrationStep {
         from: 1,
         to: 2,
@@ -1321,6 +1695,11 @@ const CORE_MIGRATIONS: [MigrationStep; 5] = [
         from: 5,
         to: 6,
         apply: add_job_tables,
+    },
+    MigrationStep {
+        from: 6,
+        to: 7,
+        apply: add_execution_tables,
     },
 ];
 
@@ -1640,64 +2019,63 @@ fn enroll(
     connection: &mut Connection,
     enrollment: VerifiedEnrollment,
 ) -> Result<EnrollmentReceipt, CoreError> {
-    // Recheck the native owner at the persistence boundary rather than relying
-    // solely on the transport's earlier peer-credential observation.
-    let actual_owner = current_owner_identity().map_err(CoreError::Platform)?;
-    if actual_owner != enrollment.owner {
+    if cfg!(windows) && enrollment.grant_policy == GrantPolicy::ExecutionV1 {
+        return Err(CoreError::Busy);
+    }
+    if current_owner_identity().map_err(CoreError::Platform)? != enrollment.owner {
         return Err(CoreError::Unauthorized);
     }
-    let transaction = connection
+    let tx = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|_| CoreError::StoreUnavailable)?;
-    let identity = read_identity(&transaction)?;
+    let identity = read_identity(&tx)?;
     if identity.installation_id != enrollment.installation_id
         || identity.instance_id != enrollment.instance_id
     {
         return Err(CoreError::Conflict);
     }
-    let existing: Option<ExistingCredential> = transaction
-        .query_row(
-            "SELECT client_id,enrollment_id,secret_digest,grant_policy,created_at_ms,revoked_at_ms
-             FROM credentials WHERE enrollment_id=?1 OR client_id=?2 LIMIT 1",
-            rusqlite::params![
-                enrollment.enrollment_id.as_str(),
-                enrollment.client_id.as_str()
-            ],
-            |row| {
-                Ok(ExistingCredential {
-                    client_id: row.get(0)?,
-                    enrollment_id: row.get(1)?,
-                    digest: row.get(2)?,
-                    grant_policy: row.get(3)?,
-                    created_at_ms: row.get(4)?,
-                    revoked_at_ms: row.get(5)?,
-                })
-            },
-        )
-        .optional()
-        .map_err(|_| CoreError::StoreUnavailable)?;
+    let existing:Option<ExistingCredential>=tx.query_row(
+        "SELECT client_id,enrollment_id,secret_digest,grant_policy,created_at_ms,revoked_at_ms FROM credentials WHERE enrollment_id=?1 OR client_id=?2 LIMIT 1",
+        rusqlite::params![enrollment.enrollment_id.as_str(),enrollment.client_id.as_str()],|row|Ok(ExistingCredential {client_id:row.get(0)?,enrollment_id:row.get(1)?,digest:row.get(2)?,grant_policy:row.get(3)?,created_at_ms:row.get(4)?,revoked_at_ms:row.get(5)?})).optional().map_err(|_|CoreError::StoreUnavailable)?;
+    // Execution enrollment uses the enrollment ID's disjoint namespace. A public
+    // aut_ reauthorization can never impersonate an original enrollment policy.
+    let enrollment_authority = enrollment.enrollment_id.as_str();
+    let base_policy = enrollment.grant_policy.storage_policy();
     if let Some(existing) = existing {
-        // Idempotency is exact: identity and digest must both match, and a
-        // revoked enrollment cannot be revived by replaying its old request.
         use subtle::ConstantTimeEq as _;
-        let exact_identity = existing.client_id == enrollment.client_id.as_str()
-            && existing.enrollment_id == enrollment.enrollment_id.as_str();
-        let existing_policy =
+        let stored_policy =
             GrantPolicy::parse(&existing.grant_policy).ok_or(CoreError::InvalidStore)?;
-        let exact_digest = existing.digest.len() == 32
-            && existing
+        if existing.client_id != enrollment.client_id.as_str()
+            || existing.enrollment_id != enrollment.enrollment_id.as_str()
+            || stored_policy != base_policy
+            || existing.digest.len() != 32
+            || existing
                 .digest
                 .as_slice()
                 .ct_eq(enrollment.token_digest.as_bytes().as_slice())
                 .unwrap_u8()
-                == 1;
-        if !exact_identity || !exact_digest || existing_policy != enrollment.grant_policy {
+                != 1
+        {
             return Err(CoreError::Conflict);
         }
         if existing.revoked_at_ms.is_some() {
             return Err(CoreError::Unauthorized);
         }
-        let grants = read_validated_grants(&transaction, &enrollment.client_id)?;
+        let original_execution:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM client_authorizations WHERE authorization_id=?1 AND client_id=?2 AND grant_policy='execution-v1')",rusqlite::params![enrollment_authority,enrollment.client_id.as_str()],|r|r.get(0)).map_err(|_|CoreError::StoreUnavailable)?;
+        if (enrollment.grant_policy == GrantPolicy::ExecutionV1) != original_execution {
+            return Err(CoreError::Conflict);
+        }
+        let grants = read_grants(&tx, &enrollment.client_id)?;
+        validate_grants_for_policy(base_policy, &grants)?;
+        // Old receipt replay retains its original policy facts. Auth status is
+        // the separate source for effective grants after explicit authorization.
+        let effective =
+            reauthorization::effective_grants(&tx, &enrollment.client_id, grants.clone())?;
+        let grants = if enrollment.grant_policy == GrantPolicy::ExecutionV1 {
+            effective
+        } else {
+            grants
+        };
         let receipt = enrollment_receipt(
             enrollment.installation_id,
             enrollment.client_id,
@@ -1706,38 +2084,31 @@ fn enroll(
             existing.created_at_ms,
             true,
         )?;
-        transaction
-            .commit()
-            .map_err(|_| CoreError::StoreUnavailable)?;
+        tx.commit().map_err(|_| CoreError::StoreUnavailable)?;
         return Ok(receipt);
     }
-    let credential_count: i64 = transaction
-        .query_row("SELECT count(*) FROM credentials", [], |row| row.get(0))
+    let count: i64 = tx
+        .query_row("SELECT count(*) FROM credentials", [], |r| r.get(0))
         .map_err(|_| CoreError::StoreUnavailable)?;
-    if credential_count >= MAX_CREDENTIAL_ROWS {
+    if count >= MAX_CREDENTIAL_ROWS {
         return Err(CoreError::LimitReached);
     }
-    let created_at_ms = now_ms()?;
-    transaction
-        .execute(
-            "INSERT INTO credentials(client_id,enrollment_id,secret_digest,client_kind,grant_policy,created_at_ms)
-             VALUES(?1,?2,?3,'cli',?4,?5)",
-            rusqlite::params![
-                enrollment.client_id.as_str(),
-                enrollment.enrollment_id.as_str(),
-                enrollment.token_digest.as_bytes().as_slice(),
-                enrollment.grant_policy.as_str(),
-                created_at_ms
-            ],
+    let now = now_ms()?;
+    tx.execute("INSERT INTO credentials(client_id,enrollment_id,secret_digest,client_kind,grant_policy,created_at_ms) VALUES(?1,?2,?3,'cli',?4,?5)",rusqlite::params![enrollment.client_id.as_str(),enrollment.enrollment_id.as_str(),enrollment.token_digest.as_bytes().as_slice(),base_policy.as_str(),now]).map_err(|_|CoreError::StoreUnavailable)?;
+    for grant in base_policy.grants() {
+        tx.execute(
+            "INSERT INTO credential_grants(client_id,operation) VALUES(?1,?2)",
+            rusqlite::params![enrollment.client_id.as_str(), grant],
         )
         .map_err(|_| CoreError::StoreUnavailable)?;
-    for grant in enrollment.grant_policy.grants() {
-        transaction
-            .execute(
-                "INSERT INTO credential_grants(client_id,operation) VALUES(?1,?2)",
-                rusqlite::params![enrollment.client_id.as_str(), grant],
-            )
-            .map_err(|_| CoreError::StoreUnavailable)?;
+    }
+    if enrollment.grant_policy == GrantPolicy::ExecutionV1 {
+        reauthorization::insert_authorization(
+            &tx,
+            enrollment_authority,
+            &enrollment.client_id,
+            now,
+        )?;
     }
     let receipt = enrollment_receipt(
         enrollment.installation_id,
@@ -1747,14 +2118,12 @@ fn enroll(
             .grant_policy
             .grants()
             .iter()
-            .map(|grant| (*grant).to_owned())
+            .map(|g| (*g).to_owned())
             .collect(),
-        created_at_ms,
+        now,
         false,
     )?;
-    transaction
-        .commit()
-        .map_err(|_| CoreError::StoreUnavailable)?;
+    tx.commit().map_err(|_| CoreError::StoreUnavailable)?;
     Ok(receipt)
 }
 
@@ -1794,6 +2163,7 @@ fn authenticate(
     }
     let grants = read_grants(&transaction, &client_id)?;
     validate_grants_for_policy(grant_policy, &grants)?;
+    let grants = reauthorization::effective_grants(&transaction, &client_id, grants)?;
     transaction
         .commit()
         .map_err(|_| CoreError::StoreUnavailable)?;
@@ -1804,7 +2174,6 @@ fn authenticate(
     })
 }
 
-#[cfg(unix)]
 fn require_active_grant(
     connection: &Connection,
     context: &AuthContext,
@@ -2279,7 +2648,7 @@ fn read_validated_grants(
     let policy = GrantPolicy::parse(&policy).ok_or(CoreError::InvalidStore)?;
     let grants = read_grants(connection, client_id)?;
     validate_grants_for_policy(policy, &grants)?;
-    Ok(grants)
+    reauthorization::effective_grants(connection, client_id, grants)
 }
 
 fn validate_grants_for_policy(policy: GrantPolicy, grants: &[String]) -> Result<(), CoreError> {
@@ -2386,7 +2755,7 @@ mod tests {
         let path = root.path_for_native_vfs(&RelativePath::parse(DATABASE_NAME).unwrap());
         let connection = Connection::open(path).unwrap();
         connection
-            .execute_batch("DROP TABLE job_inputs; DROP TABLE submission_bindings; DROP TABLE job_acceptance_events; DROP TABLE jobs; DROP TABLE job_sequence; DROP TABLE engine_clock; DROP TABLE captured_inputs; DROP TABLE input_upload_reservations; DROP TABLE internal_shutdowns; ALTER TABLE credentials DROP COLUMN grant_policy; PRAGMA user_version=1;")
+            .execute_batch("DROP TABLE job_events; DROP TABLE resource_reservations; DROP TABLE job_attempts; DROP TABLE retry_bindings; DROP TABLE job_execution; DROP TABLE client_authorizations; DROP TABLE job_inputs; DROP TABLE submission_bindings; DROP TABLE job_acceptance_events; DROP TABLE jobs; DROP TABLE job_sequence; DROP TABLE engine_clock; DROP TABLE captured_inputs; DROP TABLE input_upload_reservations; DROP TABLE internal_shutdowns; ALTER TABLE credentials DROP COLUMN grant_policy; PRAGMA user_version=1;")
             .unwrap();
         drop(connection);
         let _lease = AuthorityLease::acquire(&root).unwrap();
@@ -2415,6 +2784,11 @@ mod tests {
                 from: 5,
                 to: 6,
                 apply: add_job_tables,
+            },
+            MigrationStep {
+                from: 6,
+                to: 7,
+                apply: add_execution_tables,
             },
         ];
         assert!(open_database_with_migrations(&root, &CorePolicy::default(), &registry).is_ok());
@@ -2663,7 +3037,7 @@ mod tests {
         );
         connection
             .execute_batch(
-                "DROP TABLE job_inputs; DROP TABLE submission_bindings; DROP TABLE job_acceptance_events; DROP TABLE jobs; DROP TABLE job_sequence; DROP TABLE engine_clock; DROP TABLE captured_inputs;
+                "DROP TABLE job_events; DROP TABLE resource_reservations; DROP TABLE job_attempts; DROP TABLE retry_bindings; DROP TABLE job_execution; DROP TABLE client_authorizations; DROP TABLE job_inputs; DROP TABLE submission_bindings; DROP TABLE job_acceptance_events; DROP TABLE jobs; DROP TABLE job_sequence; DROP TABLE engine_clock; DROP TABLE captured_inputs;
                  DROP TABLE input_upload_reservations;
                  DROP TABLE internal_shutdowns;
                  ALTER TABLE credentials DROP COLUMN grant_policy;
@@ -3097,3 +3471,17 @@ mod submission_tests;
 
 #[cfg(all(test, unix))]
 mod job_tests;
+
+#[cfg(test)]
+#[path = "store/execution_tests.rs"]
+mod execution_regressions;
+
+#[cfg(test)]
+#[path = "store/commit_latency_probe.rs"]
+mod commit_latency_probe;
+#[cfg(test)]
+#[path = "store/native_authorization_tests.rs"]
+mod native_authorization_tests;
+
+#[cfg(all(test, unix, feature = "test-support"))]
+mod preparation_tests;

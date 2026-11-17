@@ -315,6 +315,24 @@ pub(super) fn confirm_input_cleanup(
         .map_err(|_| CoreError::StoreUnavailable)
 }
 
+/// Read-only form of `observe_wall_time_at`: never moves the persisted clock.
+pub(super) fn read_observed_wall_time_at(
+    connection: &Connection,
+    requested_time_ms: i64,
+) -> Result<i64, CoreError> {
+    if requested_time_ms < 0 {
+        return Err(CoreError::StoreUnavailable);
+    }
+    let last_observed: i64 = connection
+        .query_row(
+            "SELECT last_observed_ms FROM engine_clock WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|_| CoreError::StoreUnavailable)?;
+    Ok(requested_time_ms.max(last_observed))
+}
+
 pub(super) fn observe_wall_time_at(
     transaction: &Transaction<'_>,
     requested_time_ms: i64,

@@ -1,8 +1,8 @@
 //! Bounded fresh-request admission facts retained through atomic acceptance.
 
-use super::equivalence::{
-    CanonicalSubmission, CanonicalizationVersion, VerifiedInputMap, canonicalize,
-};
+#[cfg(all(test, feature = "test-support"))]
+use super::equivalence::CanonicalizationVersion;
+use super::equivalence::{CanonicalSubmission, VerifiedInputMap};
 use super::obj::{
     ObjError, ObjSummary, VALIDATION_WALL_BUDGET, ValidationPermit, check_deadline, validate_obj_in,
 };
@@ -78,6 +78,13 @@ impl PreparedAdmission {
             readiness: value.snapshot.clone(),
         }
     }
+
+    /// Whether a retained resolution is exactly the one currently prepared:
+    /// the same selection snapshot and readiness. Nothing is re-resolved.
+    pub(crate) fn covers(&self, resolved: &ResolvedJob) -> bool {
+        resolved.selection == selection_snapshot(&self.resolved)
+            && resolved.readiness == self.readiness
+    }
 }
 
 #[cfg(unix)]
@@ -87,7 +94,46 @@ pub(crate) fn build_candidate(
     request: &JobRequest,
     request_bytes: usize,
     pinned_inputs: PinnedInputSet,
+    input_readers: BTreeMap<String, Box<dyn Read + Send>>,
+) -> Result<AdmissionCandidate, AdmissionError> {
+    build_candidate_inner(
+        catalog,
+        prepared,
+        request,
+        request_bytes,
+        pinned_inputs,
+        input_readers,
+        None,
+    )
+}
+pub(crate) fn build_execution_candidate(
+    catalog: &Catalog,
+    prepared: &PreparedAdmission,
+    request: &dissect3d_api::ExecutionJobRequest,
+    request_bytes: usize,
+    pinned_inputs: PinnedInputSet,
+    input_readers: BTreeMap<String, Box<dyn Read + Send>>,
+) -> Result<AdmissionCandidate, AdmissionError> {
+    dissect3d_api::encode_execution_request(request).map_err(|_| AdmissionError::InvalidRequest)?;
+    build_candidate_inner(
+        catalog,
+        prepared,
+        &request.request,
+        request_bytes,
+        pinned_inputs,
+        input_readers,
+        Some(&request.execution),
+    )
+}
+#[allow(clippy::too_many_arguments)]
+fn build_candidate_inner(
+    catalog: &Catalog,
+    prepared: &PreparedAdmission,
+    request: &JobRequest,
+    request_bytes: usize,
+    pinned_inputs: PinnedInputSet,
     mut input_readers: BTreeMap<String, Box<dyn Read + Send>>,
+    execution: Option<&dissect3d_api::ExecutionPolicy>,
 ) -> Result<AdmissionCandidate, AdmissionError> {
     if request_bytes > REQUEST_BYTES_MAX
         || request.inputs.is_empty()
@@ -106,7 +152,9 @@ pub(crate) fn build_candidate(
     if occurrence_count == 0 || occurrence_count > INPUT_OCCURRENCES_MAX {
         return Err(AdmissionError::InvalidRequest);
     }
-    if !request.required_features.is_empty() {
+    if (execution.is_none() && !request.required_features.is_empty())
+        || (execution.is_some() && request.required_features != [dissect3d_api::EXECUTION_FEATURE])
+    {
         return Err(AdmissionError::RequiredFeatureUnsupported);
     }
 
@@ -236,12 +284,18 @@ pub(crate) fn build_candidate(
         obj_summaries.insert(key, summary);
     }
 
-    let canonical = canonicalize(request, &identities).map_err(|error| match error {
-        super::equivalence::CanonicalError::MissingInput => AdmissionError::InputUnavailable,
-        super::equivalence::CanonicalError::InvalidDecimal
-        | super::equivalence::CanonicalError::InvalidRequest => AdmissionError::InvalidRequest,
-        super::equivalence::CanonicalError::TooLarge => AdmissionError::CapacityExceeded,
-    })?;
+    let submitted = match execution {
+        Some(policy) => {
+            super::equivalence::SubmittedJobRequest::Execution(dissect3d_api::ExecutionJobRequest {
+                request: request.clone(),
+                execution: policy.clone(),
+            })
+        }
+        None => super::equivalence::SubmittedJobRequest::Legacy(request.clone()),
+    };
+    let canonical = submitted
+        .canonicalize(&identities)
+        .map_err(|_| AdmissionError::InvalidRequest)?;
     if canonical.bytes.len() > CANONICAL_BYTES_MAX {
         return Err(AdmissionError::CapacityExceeded);
     }
@@ -279,11 +333,19 @@ pub(crate) fn build_candidate(
         evidence_scope: "controlled-test-only".to_owned(),
     };
     let binding = BindingMetadata {
-        canonicalization_version: CanonicalizationVersion::V1.as_i64(),
+        canonicalization_version: canonical.version.as_i64(),
         fingerprint: digest_hex(&canonical.fingerprint),
         original_inputs: &original_inputs,
     };
-    let (binding_bytes, metadata_bytes) = metadata_size(&resolved, &binding)?;
+    let (binding_bytes, mut metadata_bytes) = metadata_size(&resolved, &binding)?;
+    if let Some(policy) = execution {
+        let n = serde_json::to_vec(policy)
+            .map_err(|_| AdmissionError::CapacityExceeded)?
+            .len();
+        metadata_bytes = metadata_bytes
+            .checked_add(n + 2048)
+            .ok_or(AdmissionError::CapacityExceeded)?;
+    }
     if binding_bytes > BINDING_BYTES_MAX {
         return Err(AdmissionError::CapacityExceeded);
     }
@@ -1612,7 +1674,7 @@ mod tests {
     }
     #[test]
     fn private_reduced_limits_exercise_each_authoritative_capacity_boundary() {
-        use crate::store::submission::AcceptanceLimits;
+        use crate::store::admission::AcceptanceLimits;
         use dissect3d_api::{ErrorCode, IdempotencyKey};
         for boundary in ["queue", "bindings", "captured", "metadata", "free"] {
             let fixture = Fixture::new();

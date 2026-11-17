@@ -168,6 +168,8 @@ pub(super) fn error(problem: SubmissionError) -> Response {
         ErrorCode::IdempotencyConflict
         | ErrorCode::JobNotTerminal
         | ErrorCode::RetryPrerequisiteUnavailable
+        // Uncertain cleanup blocks conflicting work (user-confirmed 2026-11-17).
+        | ErrorCode::CleanupUnconfirmed
         | ErrorCode::NotPrepared
         | ErrorCode::IncompatibleProfile
         | ErrorCode::IncompatibleContract
@@ -199,6 +201,25 @@ mod tests {
             assert!(
                 super::super::discovery::page_query(&params).is_err(),
                 "{value}"
+            );
+        }
+    }
+
+    /// WE-007: uncertain cleanup blocks conflicting work, so it is a 409 conflict
+    /// next to the other retry refusals (`cleanup_unconfirmed` user-confirmed 2026-11-17).
+    #[test]
+    fn retry_refusals_map_to_conflict() {
+        use dissect3d_api::ErrorCode;
+        for code in [
+            ErrorCode::JobNotTerminal,
+            ErrorCode::RetryPrerequisiteUnavailable,
+            ErrorCode::CleanupUnconfirmed,
+        ] {
+            let response = super::error(code.into());
+            assert_eq!(
+                response.status(),
+                axum::http::StatusCode::CONFLICT,
+                "{code:?}"
             );
         }
     }
