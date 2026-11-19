@@ -60,12 +60,13 @@ impl Drop for ValidationPermit<'_> {
     }
 }
 
-#[cfg(any(test, feature = "test-support"))]
+// Fixture support only; unit tests use per-call slots (see the tests module).
+#[cfg(feature = "test-support")]
 pub(crate) fn validate_obj<R: Read>(reader: R) -> Result<ObjSummary, ObjError> {
     validate_obj_until(reader, Instant::now() + VALIDATION_WALL_BUDGET)
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(feature = "test-support")]
 fn validate_obj_until<R: Read>(reader: R, deadline: Instant) -> Result<ObjSummary, ObjError> {
     let permit = ValidationPermit::acquire()?;
     validate_obj_in(reader, deadline, &permit)
@@ -213,6 +214,53 @@ mod tests {
 
     const TETRAHEDRON: &[u8] =
         b"v 0 0 0\nv 1 0 0\nv 0 1 0\nv 0 0 1\nf 1 3 2\nf 1 2 4\nf 1 4 3\nf 2 3 4\n";
+
+    // These shadow the glob-imported helpers. The production slot counter is
+    // process-wide with two slots, so parallel unit tests contended for it and
+    // got `Capacity` instead of the result under test (an `is_err()` assertion
+    // could even pass for that wrong reason). Each call owns its own slots;
+    // `validation_slots_reject_excess_work_without_waiting` covers the limit.
+    fn validate_obj<R: Read>(reader: R) -> Result<ObjSummary, ObjError> {
+        validate_obj_until(reader, Instant::now() + VALIDATION_WALL_BUDGET)
+    }
+
+    fn validate_obj_until<R: Read>(reader: R, deadline: Instant) -> Result<ObjSummary, ObjError> {
+        let slots = AtomicUsize::new(0);
+        let permit = ValidationPermit::acquire_from(&slots)?;
+        validate_obj_in(reader, deadline, &permit)
+    }
+
+    /// Regression: unit validations running at once never see `Capacity`.
+    #[test]
+    fn concurrent_unit_validations_do_not_share_process_slots() {
+        struct SlowReader(&'static [u8], bool);
+        impl Read for SlowReader {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                if !self.1 {
+                    // Hold the permit long enough that every thread overlaps.
+                    self.1 = true;
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                let n = self.0.len().min(buffer.len());
+                buffer[..n].copy_from_slice(&self.0[..n]);
+                self.0 = &self.0[n..];
+                Ok(n)
+            }
+        }
+        let start = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let threads = (0..8)
+            .map(|_| {
+                let start = start.clone();
+                std::thread::spawn(move || {
+                    start.wait();
+                    validate_obj(SlowReader(TETRAHEDRON, false))
+                })
+            })
+            .collect::<Vec<_>>();
+        for thread in threads {
+            assert_eq!(thread.join().unwrap().map(|s| s.faces), Ok(4));
+        }
+    }
 
     #[test]
     fn validates_tetrahedron_and_rejects_invalid_face_semantics() {

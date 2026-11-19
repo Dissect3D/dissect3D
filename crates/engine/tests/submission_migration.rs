@@ -13,7 +13,7 @@ const CORE_GRANTS: [&str; 5] = [
     "engine.shutdown",
     "operation.show_own",
 ];
-const UPGRADE_BACKUP: &str = "recovery/metadata-v7-upgrade.sqlite3";
+const UPGRADE_BACKUP: &str = "recovery/metadata-v8-upgrade.sqlite3";
 const LEGACY_BACKUP: &str = "recovery/metadata-upgrade.sqlite3";
 
 struct CredentialSeed {
@@ -96,7 +96,7 @@ fn downgrade_to(fixture: &Fixture, version: i64) {
         .execute_batch("ALTER TABLE credentials DROP COLUMN grant_policy;")
         .expect("remove v2-to-v3 schema difference");
     connection
-        .execute_batch("DROP TABLE job_events; DROP TABLE resource_reservations; DROP TABLE job_attempts; DROP TABLE retry_bindings; DROP TABLE job_execution; DROP TABLE client_authorizations; DROP TABLE job_inputs; DROP TABLE submission_bindings; DROP TABLE job_acceptance_events; DROP TABLE jobs; DROP TABLE job_sequence; DROP TABLE engine_clock; DROP TABLE captured_inputs; DROP TABLE input_upload_reservations;")
+        .execute_batch("DROP TABLE results; DROP TABLE result_files; DROP TABLE publication_allocations; DROP TABLE publication_sequence; DROP TABLE job_events; DROP TABLE resource_reservations; DROP TABLE job_attempts; DROP TABLE retry_bindings; DROP TABLE job_execution; DROP TABLE client_authorizations; DROP TABLE job_inputs; DROP TABLE submission_bindings; DROP TABLE job_acceptance_events; DROP TABLE jobs; DROP TABLE job_sequence; DROP TABLE engine_clock; DROP TABLE captured_inputs; DROP TABLE input_upload_reservations;")
         .expect("remove v3-to-v4 schema difference");
     connection
         .pragma_update(None, "user_version", version)

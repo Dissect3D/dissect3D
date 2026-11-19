@@ -4,6 +4,12 @@ use serde::{Deserialize, Serialize};
 
 pub const RESULT_FEATURE: &str = "result_publication.rp-0.1";
 pub const MANIFEST_BYTES_MAX: usize = 262_144;
+/// The controlled mesh-copy output validator: one identity for support
+/// declarations, admission, resolutions and manifests. Tests keep their own
+/// literal expectations so a changed constant cannot pass unnoticed.
+pub const TEST_OUTPUT_VALIDATOR_ID: &str = "dissect3d.test.validator";
+pub const TEST_OUTPUT_VALIDATOR_REVISION: &str = "1";
+pub const TEST_OUTPUT_POLICY: &str = "positive-index-triangular-obj-v1";
 pub fn copy_identity_transform() -> [crate::DeclarationValue; 16] {
     [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1].map(crate::DeclarationValue::from)
 }
@@ -246,9 +252,9 @@ impl ResultManifest {
             return Err(invalid());
         }
         let v = &self.validation;
-        if v.validator_id != "dissect3d.test.validator"
+        if v.validator_id != TEST_OUTPUT_VALIDATOR_ID
             || !bounded(&v.validator_revision, 128)
-            || v.policy != "positive-index-triangular-obj-v1"
+            || v.policy != TEST_OUTPUT_POLICY
             || !v.geometry_valid
             || !v.copy_fidelity
             || v.partial

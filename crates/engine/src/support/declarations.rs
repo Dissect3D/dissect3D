@@ -621,8 +621,9 @@ fn validate_support_inner(
         let input_schema = schema_for_binding(binding, "input_schema", schemas)?;
         let parameter_schema = schema_for_binding(binding, "parameter_schema", schemas)?;
         let output_schema = schema_for_binding(binding, "output_schema", schemas)?;
-        let known_validator =
-            test_only && validator_id == "dissect3d.test.validator" && validator["revision"] == "1";
+        let known_validator = test_only
+            && validator_id == dissect3d_api::TEST_OUTPUT_VALIDATOR_ID
+            && validator["revision"] == dissect3d_api::TEST_OUTPUT_VALIDATOR_REVISION;
         if !known_validator {
             unresolved.push(format!("tasks[{index}].validator"));
         }
@@ -1297,8 +1298,8 @@ fn validate_constraints(
         }
         if !known_kind
             || !known_validator
-            || validator_id != "dissect3d.test.validator"
-            || validator_revision != "1"
+            || validator_id != dissect3d_api::TEST_OUTPUT_VALIDATOR_ID
+            || validator_revision != dissect3d_api::TEST_OUTPUT_VALIDATOR_REVISION
         {
             unresolved.push(format!("{prefix}[{index}]"));
         }

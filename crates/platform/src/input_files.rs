@@ -339,7 +339,8 @@ impl OwnedRoot {
         Err(PlatformError::UnsupportedRoot)
     }
 
-    /// Move one direct child of a private input directory into quarantine.
+    /// Move one direct child of a private input or result directory into its
+    /// feature's quarantine.
     /// The source is renamed without following it, so links and malformed file
     /// types are preserved as evidence instead of being opened or deleted.
     #[cfg(unix)]
@@ -352,8 +353,13 @@ impl OwnedRoot {
         use rustix::fs::renameat;
         use std::os::unix::ffi::OsStrExt;
 
-        if !matches!(source_directory.as_str(), "inputs/staging" | "inputs/data")
-            || !destination.as_str().starts_with("inputs/quarantine/")
+        // Each private feature quarantines only into its own quarantine.
+        let quarantine = match source_directory.as_str() {
+            "inputs/staging" | "inputs/data" => "inputs/quarantine/",
+            "results/staging" | "results/objects" => "results/quarantine/",
+            _ => return Err(PlatformError::InvalidPath),
+        };
+        if !destination.as_str().starts_with(quarantine)
             || entry_name.is_empty()
             || entry_name.as_bytes().contains(&b'/')
             || entry_name == std::ffi::OsStr::new(".")

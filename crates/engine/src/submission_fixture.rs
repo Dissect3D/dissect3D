@@ -19,7 +19,9 @@ const PENDING_MANIFEST: &str = "submission-fixture/prepared.pending.json";
 const ACTIVE_MANIFEST: &str = "submission-fixture/prepared.json";
 const PROBE_BINARY: &str = "submission-fixture/realization/probe.bin";
 const REPORT_LIMIT: usize = 1_048_576;
-const FIXTURE_FILE_LIMIT: usize = 134_217_728;
+// Also bounds the copied debug probe binary (this tool itself): a Linux debug
+// build reached ~136 MB in RP-P02 (2026-11-20), so 128 MiB no longer fit.
+const FIXTURE_FILE_LIMIT: usize = 268_435_456;
 
 const SUPPORT_REF: &str = "test.mesh-copy@fixture-r1";
 const RUNTIME_REF: &str = "test.cpu@fixture-r1";
@@ -793,8 +795,8 @@ fn report_from_material(
             .find(|(path, _)| path.ends_with("probe-source.md"))
             .map(|(_, bytes)| digest(bytes))
             .ok_or(FixtureError::Package)?,
-        validator_id: "dissect3d.test.validator".to_owned(),
-        validator_revision: "1".to_owned(),
+        validator_id: dissect3d_api::TEST_OUTPUT_VALIDATOR_ID.to_owned(),
+        validator_revision: dissect3d_api::TEST_OUTPUT_VALIDATOR_REVISION.to_owned(),
         readiness_fingerprint: String::new(),
         integrity_sha256: String::new(),
     })
@@ -856,8 +858,8 @@ fn validate_report(
         || report.task_version != TASK_VERSION
         || report.runtime_ref != RUNTIME_REF
         || report.variant != VARIANT
-        || report.validator_id != "dissect3d.test.validator"
-        || report.validator_revision != "1"
+        || report.validator_id != dissect3d_api::TEST_OUTPUT_VALIDATOR_ID
+        || report.validator_revision != dissect3d_api::TEST_OUTPUT_VALIDATOR_REVISION
         || current_probe.is_empty()
         || current_probe.len() > FIXTURE_FILE_LIMIT
         || digest(current_probe) != report.probe_binary_sha256

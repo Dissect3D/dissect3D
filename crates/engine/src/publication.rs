@@ -1,6 +1,7 @@
 //! Independent bounded validation of immutable captured candidate content.
-//! `capture` is the only producer of its inputs (RP-P02); no dispatch, commit
-//! or public route uses any of this yet.
+//! `capture` is the only producer of its inputs and `storage` durably prepares
+//! validated content privately (RP-P02); no dispatch, commit or public route
+//! uses any of this yet.
 use crate::store::execution::DispatchRecord;
 use crate::submission::obj::{MAX_BYTES, ObjError, parse_obj_until};
 use dissect3d_api::*;
@@ -14,9 +15,9 @@ use std::time::{Duration, Instant};
 const VALIDATION_BUDGET: Duration = Duration::from_millis(5_000);
 /// The output validator this engine runs for controlled mesh-copy. The
 /// manifest records it, and a resolution naming another validator is refused.
-pub(crate) const OUTPUT_VALIDATOR_ID: &str = "dissect3d.test.validator";
-pub(crate) const OUTPUT_VALIDATOR_REVISION: &str = "1";
-const OUTPUT_POLICY: &str = "positive-index-triangular-obj-v1";
+pub(crate) const OUTPUT_VALIDATOR_ID: &str = TEST_OUTPUT_VALIDATOR_ID;
+pub(crate) const OUTPUT_VALIDATOR_REVISION: &str = TEST_OUTPUT_VALIDATOR_REVISION;
+const OUTPUT_POLICY: &str = TEST_OUTPUT_POLICY;
 const MANIFEST_VERSION: &str = "1.0";
 static OUTPUT_SLOT: AtomicBool = AtomicBool::new(false);
 struct ValidationSlot;
@@ -43,8 +44,14 @@ pub(crate) enum PublicationError {
     CopyFidelity,
     InvalidManifest,
     Limit,
-    /// A native read/listing failure: not evidence about the candidate.
+    /// A native read/write/listing/barrier failure, or metadata that could
+    /// not be read or written: not evidence about the candidate.
     Storage,
+    /// A finite publication storage limit, by its stable limit name.
+    Capacity(&'static str),
+    /// The attempt is not the job's running attempt, or the identity is no
+    /// longer preparable (cancel or another end committed first).
+    Stale,
 }
 
 // Constructors stay in this module and its `capture` child: neither a worker
@@ -273,6 +280,8 @@ impl ValidatedCandidate {
     }
 }
 pub(crate) mod capture;
+pub(crate) mod policy;
+pub(crate) mod storage;
 #[cfg(test)]
 #[path = "publication_tests.rs"]
 mod tests;

@@ -72,16 +72,25 @@ pub(crate) mod finalize;
 )]
 pub(crate) mod launch_identity;
 pub(crate) mod reauthorization;
+#[allow(
+    dead_code,
+    reason = "RP-P03/RP-P04/WE-P06 compose result metadata; publication stays inactive"
+)]
+pub(crate) mod results;
+mod results_schema;
 use execution_schema::add_execution_tables;
+use results_schema::add_result_tables;
 
 const APPLICATION_ID: i64 = 0x4433_4431;
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
 const DATABASE_NAME: &str = "metadata.sqlite3";
 // `recovery/metadata-upgrade.sqlite3` is a legacy artifact and is never opened
 // or replaced by this migration. Keep the v3 pre-upgrade image distinct.
 const RECOVERY_BACKUP: &str = "recovery/metadata-v3-upgrade.sqlite3";
 const RECOVERY_BACKUP_V4: &str = "recovery/metadata-v4-upgrade.sqlite3";
 const RECOVERY_BACKUP_V5: &str = "recovery/metadata-v5-upgrade.sqlite3";
+// Result publication (RP-P02/1). Earlier images are never replaced.
+const RECOVERY_BACKUP_V8: &str = "recovery/metadata-v8-upgrade.sqlite3";
 pub(crate) const RECOVERY_BACKUP_LIMIT_BYTES: i64 = 268_435_456;
 const RECOVERY_BACKUP_FREE_SPACE_FLOOR_BYTES: u64 = 1_073_741_824;
 pub(crate) const MAX_CORE_OPERATION_ROWS: i64 = 16_384;
@@ -176,6 +185,8 @@ enum Command {
     ExecutionRead(execution_reads::ReadCommand),
     #[allow(dead_code, reason = "private execution consumers follow in WE-P04/06")]
     Execution(execution::ExecutionCommand),
+    #[allow(dead_code, reason = "private result consumers follow in RP-P03/WE-P06")]
+    Results(results::ResultCommand),
     #[cfg(all(test, unix, feature = "test-support"))]
     JobLimits(
         admission::AcceptanceLimits,
@@ -965,6 +976,7 @@ fn actor(
                 let _ = resume.recv_timeout(Duration::from_secs(5));
             }
             Command::Execution(command) => live_attempts.handle(&mut connection, command, stopping),
+            Command::Results(command) => results::handle(&mut connection, command, stopping),
             Command::AuthorizeExecution(request, reply) => {
                 let result = if stopping || cfg!(windows) {
                     Err(CoreError::Busy)
@@ -1595,6 +1607,7 @@ fn initialize_schema_with_hook(
         .map_err(|_| CoreError::StoreUnavailable)?;
     add_job_tables(&transaction)?;
     add_execution_tables(&transaction)?;
+    add_result_tables(&transaction)?;
     transaction
         .execute(
             "INSERT INTO engine_clock(singleton,last_observed_ms) VALUES(1,?1)",
@@ -1675,7 +1688,7 @@ struct MigrationStep {
     apply: fn(&Transaction<'_>) -> Result<(), CoreError>,
 }
 
-const CORE_MIGRATIONS: [MigrationStep; 6] = [
+const CORE_MIGRATIONS: [MigrationStep; 7] = [
     MigrationStep {
         from: 1,
         to: 2,
@@ -1705,6 +1718,11 @@ const CORE_MIGRATIONS: [MigrationStep; 6] = [
         from: 6,
         to: 7,
         apply: add_execution_tables,
+    },
+    MigrationStep {
+        from: 7,
+        to: 8,
+        apply: add_result_tables,
     },
 ];
 
@@ -1893,6 +1911,7 @@ fn recovery_backup_for_version(version: i64) -> Result<RelativePath, CoreError> 
         3 => RECOVERY_BACKUP.to_owned(),
         4 => RECOVERY_BACKUP_V4.to_owned(),
         5 => RECOVERY_BACKUP_V5.to_owned(),
+        8 => RECOVERY_BACKUP_V8.to_owned(),
         _ => format!("recovery/metadata-v{version}-upgrade.sqlite3"),
     };
     RelativePath::parse(path).map_err(CoreError::Platform)
@@ -2760,7 +2779,7 @@ mod tests {
         let path = root.path_for_native_vfs(&RelativePath::parse(DATABASE_NAME).unwrap());
         let connection = Connection::open(path).unwrap();
         connection
-            .execute_batch("DROP TABLE job_events; DROP TABLE resource_reservations; DROP TABLE job_attempts; DROP TABLE retry_bindings; DROP TABLE job_execution; DROP TABLE client_authorizations; DROP TABLE job_inputs; DROP TABLE submission_bindings; DROP TABLE job_acceptance_events; DROP TABLE jobs; DROP TABLE job_sequence; DROP TABLE engine_clock; DROP TABLE captured_inputs; DROP TABLE input_upload_reservations; DROP TABLE internal_shutdowns; ALTER TABLE credentials DROP COLUMN grant_policy; PRAGMA user_version=1;")
+            .execute_batch("DROP TABLE results; DROP TABLE result_files; DROP TABLE publication_allocations; DROP TABLE publication_sequence; DROP TABLE job_events; DROP TABLE resource_reservations; DROP TABLE job_attempts; DROP TABLE retry_bindings; DROP TABLE job_execution; DROP TABLE client_authorizations; DROP TABLE job_inputs; DROP TABLE submission_bindings; DROP TABLE job_acceptance_events; DROP TABLE jobs; DROP TABLE job_sequence; DROP TABLE engine_clock; DROP TABLE captured_inputs; DROP TABLE input_upload_reservations; DROP TABLE internal_shutdowns; ALTER TABLE credentials DROP COLUMN grant_policy; PRAGMA user_version=1;")
             .unwrap();
         drop(connection);
         let _lease = AuthorityLease::acquire(&root).unwrap();
@@ -2794,6 +2813,11 @@ mod tests {
                 from: 6,
                 to: 7,
                 apply: add_execution_tables,
+            },
+            MigrationStep {
+                from: 7,
+                to: 8,
+                apply: add_result_tables,
             },
         ];
         assert!(open_database_with_migrations(&root, &CorePolicy::default(), &registry).is_ok());
@@ -3042,7 +3066,7 @@ mod tests {
         );
         connection
             .execute_batch(
-                "DROP TABLE job_events; DROP TABLE resource_reservations; DROP TABLE job_attempts; DROP TABLE retry_bindings; DROP TABLE job_execution; DROP TABLE client_authorizations; DROP TABLE job_inputs; DROP TABLE submission_bindings; DROP TABLE job_acceptance_events; DROP TABLE jobs; DROP TABLE job_sequence; DROP TABLE engine_clock; DROP TABLE captured_inputs;
+                "DROP TABLE results; DROP TABLE result_files; DROP TABLE publication_allocations; DROP TABLE publication_sequence; DROP TABLE job_events; DROP TABLE resource_reservations; DROP TABLE job_attempts; DROP TABLE retry_bindings; DROP TABLE job_execution; DROP TABLE client_authorizations; DROP TABLE job_inputs; DROP TABLE submission_bindings; DROP TABLE job_acceptance_events; DROP TABLE jobs; DROP TABLE job_sequence; DROP TABLE engine_clock; DROP TABLE captured_inputs;
                  DROP TABLE input_upload_reservations;
                  DROP TABLE internal_shutdowns;
                  ALTER TABLE credentials DROP COLUMN grant_policy;

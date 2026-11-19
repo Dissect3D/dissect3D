@@ -193,8 +193,9 @@ fn build_candidate_inner(
         || !task_binding.binding["preprocessing"]
             .as_array()
             .is_some_and(Vec::is_empty)
-        || task_binding.binding["validator"]["id"] != "dissect3d.test.validator"
-        || task_binding.binding["validator"]["revision"] != "1"
+        || task_binding.binding["validator"]["id"] != dissect3d_api::TEST_OUTPUT_VALIDATOR_ID
+        || task_binding.binding["validator"]["revision"]
+            != dissect3d_api::TEST_OUTPUT_VALIDATOR_REVISION
     {
         return Err(AdmissionError::UnsupportedSelection);
     }
@@ -326,8 +327,8 @@ fn build_candidate_inner(
         inputs: resolved_inputs,
         readiness: prepared.readiness.clone(),
         validation: vec![ValidationEvidence {
-            validator_id: "dissect3d.test.validator".to_owned(),
-            revision: "1".to_owned(),
+            validator_id: dissect3d_api::TEST_OUTPUT_VALIDATOR_ID.to_owned(),
+            revision: dissect3d_api::TEST_OUTPUT_VALIDATOR_REVISION.to_owned(),
             status: "passed".to_owned(),
         }],
         evidence_scope: "controlled-test-only".to_owned(),

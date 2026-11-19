@@ -80,7 +80,60 @@ impl PrivateArtifact {
     }
 }
 
+/// Evidence that one prepared artifact's bytes and final private name passed
+/// every native data/namespace/root-chain barrier. Only `prepare_artifact`
+/// constructs it; like `DurableFile` it is not proof against a lying device.
+pub struct DurableArtifact {
+    file: crate::DurableFile,
+}
+
+impl std::fmt::Debug for DurableArtifact {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DurableArtifact")
+            .field("length", &self.length())
+            .finish_non_exhaustive()
+    }
+}
+
+impl DurableArtifact {
+    pub fn relative_path(&self) -> &RelativePath {
+        self.file.relative_path()
+    }
+    pub fn length(&self) -> u64 {
+        self.file.length()
+    }
+}
+
+/// Write unit for preparation, the input writer's chunk bound.
+const PREPARE_CHUNK_BYTES: usize = 65_536;
+
 impl OwnedRoot {
+    /// Durably prepare `bytes` at the engine-generated private name
+    /// `published`, writing through `staging` with the same verified barriers
+    /// as input capture (exclusive create, data sync, exclusive link, namespace
+    /// and root-chain syncs). Refused before any write where the root's
+    /// durable mutation protocol is unproven (Windows today). A failure never
+    /// yields a witness and leaves the staged or final name for the engine's
+    /// reference-aware reclamation: nothing here deletes on error.
+    pub fn prepare_artifact(
+        &self,
+        staging: &RelativePath,
+        published: &RelativePath,
+        bytes: &[u8],
+    ) -> Result<DurableArtifact, PlatformError> {
+        self.check_durable_mutation_support()?;
+        if bytes.is_empty() || staging == published {
+            return Err(PlatformError::InvalidFile);
+        }
+        let mut writer = self.begin_input(staging)?;
+        for chunk in bytes.chunks(PREPARE_CHUNK_BYTES) {
+            writer.write_chunk(chunk)?;
+        }
+        Ok(DurableArtifact {
+            file: writer.finish(published)?,
+        })
+    }
+
     /// Create a new private staging folder at `relative` and retain it.
     /// An existing folder is refused (`Busy`), so staging is never reused.
     pub fn create_attempt_root(

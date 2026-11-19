@@ -1415,3 +1415,6 @@ mod finalize_tests;
 // 2026-11-19 WE-P04 launch identity and release-time identity check.
 #[path = "launch_identity_tests.rs"]
 mod launch_identity_tests;
+// 2026-11-20 RP-P02 result metadata through the Store actor.
+#[path = "results_actor_tests.rs"]
+mod results_actor_tests;

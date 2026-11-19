@@ -13,7 +13,7 @@ fn fresh_execution_metadata_is_present_without_widening_credentials() {
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        7
+        8
     );
     for name in [
         "job_execution",
@@ -85,7 +85,7 @@ fn seed_queued(db: &Connection, job: &str, sequence: i64) {
 #[test]
 fn v6_feature_ddl_preserves_captured_rows_and_rolls_back_as_one_transaction() {
     let mut db = memory_store();
-    db.execute_batch("DROP TABLE job_events; DROP TABLE resource_reservations; DROP TABLE job_attempts; DROP TABLE retry_bindings; DROP TABLE job_execution; DROP TABLE client_authorizations; PRAGMA user_version=6;").unwrap();
+    db.execute_batch("DROP TABLE results; DROP TABLE result_files; DROP TABLE publication_allocations; DROP TABLE publication_sequence; DROP TABLE job_events; DROP TABLE resource_reservations; DROP TABLE job_attempts; DROP TABLE retry_bindings; DROP TABLE job_execution; DROP TABLE client_authorizations; PRAGMA user_version=6;").unwrap();
     seed_queued(&db, "job_11111111111111111111111111111111", 7);
     let before: String = db
         .query_row("SELECT resolved_json FROM jobs", [], |r| r.get(0))
@@ -572,7 +572,7 @@ fn actual_v6_upgrade_keeps_old_backup_and_exact_rows_with_external_input_referen
     let root =
         OwnedRoot::create_private(&path, dissect3d_platform::RootPurpose::EngineData).unwrap();
     let mut db = open_database(&root, &CorePolicy::default()).unwrap();
-    db.execute_batch("DROP TABLE job_events; DROP TABLE resource_reservations; DROP TABLE job_attempts; DROP TABLE retry_bindings; DROP TABLE job_execution; DROP TABLE client_authorizations;
+    db.execute_batch("DROP TABLE results; DROP TABLE result_files; DROP TABLE publication_allocations; DROP TABLE publication_sequence; DROP TABLE job_events; DROP TABLE resource_reservations; DROP TABLE job_attempts; DROP TABLE retry_bindings; DROP TABLE job_execution; DROP TABLE client_authorizations;
       ALTER TABLE submission_bindings RENAME TO bindings_v7;
       CREATE TABLE submission_bindings(client_id TEXT NOT NULL REFERENCES credentials(client_id),operation TEXT NOT NULL CHECK(operation='jobs.submit'),idempotency_key TEXT NOT NULL,job_id TEXT NOT NULL REFERENCES jobs(job_id),canonicalization_version INTEGER NOT NULL CHECK(canonicalization_version=1),fingerprint BLOB NOT NULL CHECK(length(fingerprint)=32),original_inputs_json TEXT NOT NULL,PRIMARY KEY(client_id,operation,idempotency_key));
       DROP TABLE bindings_v7; PRAGMA user_version=6;").unwrap();
@@ -608,7 +608,7 @@ fn actual_v6_upgrade_keeps_old_backup_and_exact_rows_with_external_input_referen
         "{exact captured resolution}"
     );
     let backup = Connection::open_with_flags(
-        path.join("recovery/metadata-v7-upgrade.sqlite3"),
+        path.join("recovery/metadata-v8-upgrade.sqlite3"),
         OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .unwrap();

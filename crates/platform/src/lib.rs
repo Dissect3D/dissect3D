@@ -17,7 +17,9 @@ mod root;
 mod windows;
 mod worker;
 
-pub use artifact_files::{ATTEMPT_ENTRIES_MAX, AttemptRoot, ClosedEntries, PrivateArtifact};
+pub use artifact_files::{
+    ATTEMPT_ENTRIES_MAX, AttemptRoot, ClosedEntries, DurableArtifact, PrivateArtifact,
+};
 pub use files::{RelativePath, SafeFileMetadata, open_config_lock, open_regular_file};
 pub use identity::{OwnerIdentity, current_owner_identity};
 pub use input_files::{

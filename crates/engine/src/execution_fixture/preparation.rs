@@ -36,8 +36,8 @@ const TASK_VERSION: &str = "1.0";
 const VARIANT: &str = "fixture";
 const CHECK_ID: &str = "fixture.cpu.worker-probe@2";
 /// The output validator the task binding names (RP-P01 owns its behavior).
-const VALIDATOR_ID: &str = "dissect3d.test.validator";
-const VALIDATOR_REVISION: &str = "1";
+const VALIDATOR_ID: &str = dissect3d_api::TEST_OUTPUT_VALIDATOR_ID;
+const VALIDATOR_REVISION: &str = dissect3d_api::TEST_OUTPUT_VALIDATOR_REVISION;
 
 const BASE: &str = "execution-fixture";
 const PENDING: &str = "execution-fixture/prepared.pending.json";
