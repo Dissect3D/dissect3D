@@ -955,3 +955,183 @@ fn map_io(error: std::io::Error) -> PlatformError {
         _ => PlatformError::Io,
     }
 }
+
+/// Create a new private attempt folder and keep a listing handle on it.
+///
+/// The handle is opened without DELETE sharing, so the folder cannot be
+/// renamed or removed while the engine holds it; `ERROR_ALREADY_EXISTS`
+/// refuses reuse.
+pub(crate) fn create_attempt_directory(
+    root: &OwnedRoot,
+    relative: &RelativePath,
+) -> Result<File, PlatformError> {
+    use windows_sys::Win32::Storage::FileSystem::{FILE_LIST_DIRECTORY, READ_CONTROL, SYNCHRONIZE};
+    let components = relative.components().collect::<Vec<_>>();
+    if components.len() > 1 {
+        let parent = RelativePath::parse(components[..components.len() - 1].join("/"))?;
+        ensure_private_directory(root, &parent)?;
+    }
+    let path = root.path().join(relative.as_path());
+    let descriptor = private_descriptor()?;
+    let attributes = private_security_attributes(&descriptor);
+    let encoded = wide_path(&path);
+    // SAFETY: the encoded path and security descriptor remain alive for the call.
+    if unsafe { CreateDirectoryW(encoded.as_ptr(), &attributes) } == 0 {
+        let error = std::io::Error::last_os_error();
+        return Err(
+            if matches!(error.raw_os_error(), Some(code) if code == ERROR_ALREADY_EXISTS as i32 || code == ERROR_FILE_EXISTS as i32)
+            {
+                PlatformError::Busy
+            } else {
+                map_io(error)
+            },
+        );
+    }
+    sync_input_directory(path.parent().ok_or(PlatformError::InvalidPath)?)?;
+    // SAFETY: CreateFileW receives a valid NUL-terminated path; the returned
+    // handle is checked before ownership is transferred to `File`.
+    let handle = unsafe {
+        CreateFileW(
+            encoded.as_ptr(),
+            FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            std::ptr::null_mut(),
+        )
+    };
+    let directory = file_from_handle(handle)?;
+    validate_directory(&directory, true)?;
+    Ok(directory)
+}
+
+/// One entry of a retained attempt folder, as listed through its handle.
+pub(crate) struct ListedEntry {
+    /// The entry name when it is valid UTF-16 (else it can never be expected).
+    pub(crate) name: Option<String>,
+    /// Neither directory, reparse point nor device.
+    pub(crate) regular: bool,
+    pub(crate) volume_serial: u64,
+    pub(crate) file_index: u64,
+}
+
+/// List a retained folder by handle. More than `max` entries is refused.
+pub(crate) fn list_attempt_directory(
+    directory: &File,
+    max: usize,
+) -> Result<Vec<ListedEntry>, PlatformError> {
+    use windows_sys::Win32::Foundation::ERROR_NO_MORE_FILES;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_DEVICE, FILE_ID_BOTH_DIR_INFO, FileIdBothDirectoryInfo,
+        FileIdBothDirectoryRestartInfo,
+    };
+    let mut volume = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: the handle is live and `volume` is a writable output structure.
+    if unsafe { GetFileInformationByHandle(directory.as_raw_handle(), &mut volume) } == 0 {
+        return Err(PlatformError::Io);
+    }
+    let device = u64::from(volume.dwVolumeSerialNumber);
+    // u64 storage keeps every 8-byte-aligned entry aligned.
+    let mut buffer = vec![0_u64; 8_192];
+    let size = buffer.len() * 8;
+    let name_offset = std::mem::offset_of!(FILE_ID_BOTH_DIR_INFO, FileName);
+    let mut entries = Vec::new();
+    let mut class = FileIdBothDirectoryRestartInfo;
+    loop {
+        // SAFETY: the handle is live and the buffer is writable for `size` bytes.
+        if unsafe {
+            GetFileInformationByHandleEx(
+                directory.as_raw_handle(),
+                class,
+                buffer.as_mut_ptr().cast(),
+                size as u32,
+            )
+        } == 0
+        {
+            // SAFETY: reads the calling thread's last-error value.
+            if unsafe { GetLastError() } == ERROR_NO_MORE_FILES {
+                return Ok(entries);
+            }
+            return Err(PlatformError::Io);
+        }
+        class = FileIdBothDirectoryInfo;
+        let base = buffer.as_ptr().cast::<u8>();
+        let mut offset = 0_usize;
+        loop {
+            // The whole fixed struct is read below, not just up to FileName.
+            if offset + std::mem::size_of::<FILE_ID_BOTH_DIR_INFO>() > size {
+                return Err(PlatformError::Io);
+            }
+            // SAFETY: the fixed part lies inside the buffer (checked above).
+            let info = unsafe {
+                std::ptr::read_unaligned(base.add(offset).cast::<FILE_ID_BOTH_DIR_INFO>())
+            };
+            let length = info.FileNameLength as usize;
+            if !length.is_multiple_of(2) || offset + name_offset + length > size {
+                return Err(PlatformError::Io);
+            }
+            let units = (0..length / 2)
+                // SAFETY: each unit lies inside the buffer (checked above).
+                .map(|i| unsafe {
+                    std::ptr::read_unaligned(base.add(offset + name_offset + 2 * i).cast::<u16>())
+                })
+                .collect::<Vec<_>>();
+            let dot = units == [b'.' as u16] || units == [b'.' as u16, b'.' as u16];
+            if !dot {
+                if entries.len() == max {
+                    return Err(PlatformError::InvalidFile);
+                }
+                let regular = info.FileAttributes
+                    & (FILE_ATTRIBUTE_DIRECTORY
+                        | FILE_ATTRIBUTE_REPARSE_POINT
+                        | FILE_ATTRIBUTE_DEVICE)
+                    == 0;
+                entries.push(ListedEntry {
+                    name: String::from_utf16(&units).ok(),
+                    regular,
+                    volume_serial: device,
+                    file_index: info.FileId as u64,
+                });
+            }
+            if info.NextEntryOffset == 0 {
+                break;
+            }
+            offset += info.NextEntryOffset as usize;
+        }
+    }
+}
+
+/// Open one attempt file read-only without following reparse points, denying
+/// writers and deleters while held. Returns (file, volume serial, file index,
+/// length) after checking disk type, single link and private ownership.
+pub(crate) fn open_attempt_file(path: &Path) -> Result<(File, u64, u64, u64), PlatformError> {
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_TYPE_DISK, GetFileType, SECURITY_IDENTIFICATION,
+    };
+    // SECURITY_IDENTIFICATION and the disk-type check: a planted pipe cannot
+    // impersonate or stall (reference: codex exec-server regular_file.rs).
+    let file = OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .security_qos_flags(SECURITY_IDENTIFICATION)
+        .open(path)
+        .map_err(map_io)?;
+    // SAFETY: `file` owns this handle for the duration of the call.
+    if unsafe { GetFileType(file.as_raw_handle()) } != FILE_TYPE_DISK {
+        return Err(PlatformError::InvalidFile);
+    }
+    validate_file(&file)?;
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: the handle is live and `info` is a writable output structure.
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) } == 0 {
+        return Err(PlatformError::Io);
+    }
+    Ok((
+        file,
+        u64::from(info.dwVolumeSerialNumber),
+        (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+        (u64::from(info.nFileSizeHigh) << 32) | u64::from(info.nFileSizeLow),
+    ))
+}

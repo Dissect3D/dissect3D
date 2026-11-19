@@ -143,7 +143,7 @@ impl Attempt {
         }
     }
     fn staging(&self) -> std::path::PathBuf {
-        self.root.path_for_native_vfs(&self.handles.staging)
+        self.handles.staging.worker_path().to_path_buf()
     }
     fn staged_names(&self) -> Vec<String> {
         let mut names: Vec<_> = std::fs::read_dir(self.staging())

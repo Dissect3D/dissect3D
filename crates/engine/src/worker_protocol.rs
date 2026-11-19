@@ -11,6 +11,8 @@ mod message;
 
 pub(crate) use diagnostics::{DiagnosticCapture, DiagnosticCategory, DiagnosticSummary};
 pub(crate) use frame::FrameDecoder;
+#[cfg(test)]
+pub(crate) use message::CandidateFile;
 pub(crate) use message::{
     Assignment, CancelReason, CandidateReport, EngineCommand, ExecuteInput, InboundFrame,
     WorkerReport, decode_inbound, encode_command, random_id,

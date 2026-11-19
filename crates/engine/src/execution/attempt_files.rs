@@ -4,12 +4,13 @@
 //! reach the worker only as inherited read-only handles opened on verified
 //! private files; `execute` names them by native value. Output goes into one
 //! engine-created private folder per attempt, named by
-//! `output_staging_handle`, laid out so RP-P02's attempt root and capture can
-//! take it over. The worker reports names relative to that folder; nothing
-//! here (or later) trusts a worker path. Inactive until WE-P06 composes it.
+//! `output_staging_handle` and retained by handle as RP-P02's `AttemptRoot`
+//! from creation. The worker reports names relative to that folder; capture
+//! lists and opens through the retained handle and never trusts a worker
+//! path. Inactive until WE-P06 composes it.
 use crate::worker_protocol::ExecuteInput;
 use dissect3d_platform::{
-    OwnedRoot, PlatformError, PrivateInputReader, RelativePath, WorkerCommand,
+    AttemptRoot, OwnedRoot, PlatformError, PrivateInputReader, RelativePath, WorkerCommand,
 };
 
 /// Engine-private parent of every attempt folder.
@@ -35,8 +36,9 @@ pub(crate) struct AttemptHandles {
     pub(crate) effective_parameters_handle: String,
     /// The digest `loaded` must echo: the exact resolution bytes written here.
     pub(crate) resolution_sha256: String,
-    /// The staging folder, relative to the engine root, for later capture.
-    pub(crate) staging: RelativePath,
+    /// The retained staging folder (RP-P02 capture lists and opens through
+    /// it; the worker path is never trusted).
+    pub(crate) staging: AttemptRoot,
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -77,8 +79,7 @@ pub(crate) fn prepare_attempt_files(
         return Err(PlatformError::Busy);
     }
     root.ensure_private_directory(&folder_path)?;
-    let staging = relative(format!("{folder}/staging"))?;
-    root.ensure_private_directory(&staging)?;
+    let staging = root.create_attempt_root(&relative(format!("{folder}/staging"))?)?;
     let mut document = |name: &str, bytes: &[u8]| -> Result<String, PlatformError> {
         let path = relative(format!("{folder}/{name}"))?;
         root.write_atomic(&path, bytes)?;
@@ -99,8 +100,9 @@ pub(crate) fn prepare_attempt_files(
             byte_length: input.byte_length,
         });
     }
-    let output_staging_handle = root
-        .path_for_native_vfs(&staging)
+    let output_staging_handle = staging
+        .worker_path()
+        .to_path_buf()
         .into_os_string()
         .into_string()
         .map_err(|_| PlatformError::InvalidPath)?;

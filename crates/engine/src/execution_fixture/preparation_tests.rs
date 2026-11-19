@@ -203,7 +203,7 @@ async fn the_installed_worker_runs_a_supervised_copy_attempt() {
         panic!("expected a candidate, got {exit:?}");
     };
     assert_eq!(report.files[0].sha256, sha256_hex(MESH));
-    let staged = root.path_for_native_vfs(&handles.staging).join(OUTPUT_NAME);
+    let staged = handles.staging.worker_path().join(OUTPUT_NAME);
     assert_eq!(std::fs::read(staged).unwrap(), MESH);
 }
 

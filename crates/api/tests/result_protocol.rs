@@ -61,6 +61,32 @@ fn semantic_misbindings_external_names_and_non_copy_claims_are_rejected() {
     }
 }
 #[test]
+fn duplicate_file_and_component_identities_and_case_aliases_are_rejected() {
+    // Same artifact twice, a case alias of the filename, and a second component
+    // sharing the artifact: none may stand for the one mandatory mesh.
+    let mut same = example();
+    let file = same["files"][0].clone();
+    same["files"].as_array_mut().unwrap().push(file.clone());
+    let mut alias = example();
+    let mut upper = file.clone();
+    upper["filename"] = json!("MESH.OBJ");
+    upper["artifact_id"] = json!("art_66666666666666666666666666666666");
+    alias["files"].as_array_mut().unwrap().push(upper);
+    let mut component = example();
+    let mut second = component["components"][0].clone();
+    second["component_id"] = json!("mesh-2");
+    component["components"].as_array_mut().unwrap().push(second);
+    let mut duplicate_component = example();
+    let first = duplicate_component["components"][0].clone();
+    duplicate_component["components"]
+        .as_array_mut()
+        .unwrap()
+        .push(first);
+    for value in [same, alias, component, duplicate_component] {
+        assert!(decode_result_manifest(&serde_json::to_vec(&value).unwrap()).is_err());
+    }
+}
+#[test]
 fn missing_nullable_unknown_and_ambiguous_json_are_rejected() {
     {
         let field = "parent_id";

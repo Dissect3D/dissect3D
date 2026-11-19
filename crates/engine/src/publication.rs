@@ -1,5 +1,6 @@
 //! Independent bounded validation of immutable captured candidate content.
-//! RP-P02 supplies the native capture/cleanup producer; no public route uses this yet.
+//! `capture` is the only producer of its inputs (RP-P02); no dispatch, commit
+//! or public route uses any of this yet.
 use crate::store::execution::DispatchRecord;
 use crate::submission::obj::{MAX_BYTES, ObjError, parse_obj_until};
 use dissect3d_api::*;
@@ -11,6 +12,12 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 const VALIDATION_BUDGET: Duration = Duration::from_millis(5_000);
+/// The output validator this engine runs for controlled mesh-copy. The
+/// manifest records it, and a resolution naming another validator is refused.
+pub(crate) const OUTPUT_VALIDATOR_ID: &str = "dissect3d.test.validator";
+pub(crate) const OUTPUT_VALIDATOR_REVISION: &str = "1";
+const OUTPUT_POLICY: &str = "positive-index-triangular-obj-v1";
+const MANIFEST_VERSION: &str = "1.0";
 static OUTPUT_SLOT: AtomicBool = AtomicBool::new(false);
 struct ValidationSlot;
 impl ValidationSlot {
@@ -36,11 +43,12 @@ pub(crate) enum PublicationError {
     CopyFidelity,
     InvalidManifest,
     Limit,
+    /// A native read/listing failure: not evidence about the candidate.
+    Storage,
 }
 
-// Constructors stay in this module: neither a worker nor another caller can
-// supply a validated witness. RP-P02 must establish native confinement/closure
-// before adding the production immutable-capture constructor.
+// Constructors stay in this module and its `capture` child: neither a worker
+// nor another caller can supply a captured or validated witness.
 pub(crate) struct CandidateFileRef {
     filename: String,
     bytes: Arc<[u8]>,
@@ -63,7 +71,10 @@ pub(crate) struct ValidatedCandidate {
     resolved: ResolvedJob,
     input: InputIdentity,
 }
+/// The canonical manifest, serialized once. Later reads serve these exact
+/// bytes; nothing re-serializes a stored manifest.
 pub(crate) struct ManifestBytes {
+    pub(crate) version: &'static str,
     pub(crate) bytes: Vec<u8>,
     pub(crate) sha256: [u8; 32],
 }
@@ -85,6 +96,9 @@ fn digest(bytes: &[u8], deadline: Instant) -> Result<[u8; 32], PublicationError>
 }
 fn hex(bytes: [u8; 32]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+fn digest_hex(bytes: &[u8], deadline: Instant) -> Result<String, PublicationError> {
+    digest(bytes, deadline).map(hex)
 }
 
 pub(crate) fn validate_candidate(
@@ -139,6 +153,12 @@ fn validate_candidate_until(
         || resolved.selection.task.version != "1.0"
         || resolved.inputs.len() != 1
         || resolved.inputs.get("mesh") != Some(&inputs.identities)
+        || !resolved.validation.iter().any(|v| {
+            v.validator_id == OUTPUT_VALIDATOR_ID && v.revision == OUTPUT_VALIDATOR_REVISION
+        })
+        || resolved.validation.iter().any(|v| {
+            v.validator_id == OUTPUT_VALIDATOR_ID && v.revision != OUTPUT_VALIDATOR_REVISION
+        })
     {
         return Err(PublicationError::InvalidCandidate);
     }
@@ -182,7 +202,7 @@ impl ValidatedCandidate {
         published_at_ms: u64,
     ) -> Result<ManifestBytes, PublicationError> {
         let m = ResultManifest {
-            manifest_version: "1.0".into(),
+            manifest_version: MANIFEST_VERSION.into(),
             required_features: vec![RESULT_FEATURE.into()],
             result_id: result_id.into(),
             job_id: self.job_id.clone(),
@@ -228,9 +248,9 @@ impl ValidatedCandidate {
                 reproducibility_limits: vec!["Controlled byte-preserving copy only; no inference or determinism guarantee for future adapters.".into()],
             },
             validation: ResultValidation {
-                validator_id: "dissect3d.test.validator".into(),
-                validator_revision: "1".into(),
-                policy: "positive-index-triangular-obj-v1".into(),
+                validator_id: OUTPUT_VALIDATOR_ID.into(),
+                validator_revision: OUTPUT_VALIDATOR_REVISION.into(),
+                policy: OUTPUT_POLICY.into(),
                 geometry_valid: true,
                 copy_fidelity: true,
                 partial: false,
@@ -245,9 +265,14 @@ impl ValidatedCandidate {
             return Err(PublicationError::Limit);
         }
         let sha256 = Sha256::digest(&bytes).into();
-        Ok(ManifestBytes { bytes, sha256 })
+        Ok(ManifestBytes {
+            version: MANIFEST_VERSION,
+            bytes,
+            sha256,
+        })
     }
 }
+pub(crate) mod capture;
 #[cfg(test)]
 #[path = "publication_tests.rs"]
 mod tests;
