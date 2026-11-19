@@ -103,6 +103,14 @@ impl OwnedInputScan {
     }
 }
 
+impl PrivateInputReader {
+    /// The validated read-only snapshot file, for handing an inherited
+    /// read-only view to a worker (`WorkerCommand::inherit_read_only`).
+    pub fn snapshot_file(&self) -> &File {
+        self.file.get_ref()
+    }
+}
+
 impl Read for PrivateInputReader {
     fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
         self.file.read(buffer)

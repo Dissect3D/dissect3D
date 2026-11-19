@@ -96,31 +96,43 @@ pub(super) fn configure(
     Ok(())
 }
 
+/// Most descriptors one [`map_descriptor_list`] call places.
+pub(super) const MAX_MAPPED: usize = 32;
+
 /// Child-only hook: place `sources[i]` at descriptor `first + i`, without
-/// CLOEXEC. Sources are first copied above every target, so a source that
-/// already occupies another target cannot be clobbered. Only async-signal-safe
-/// fcntl/dup2 run after fork.
-pub(super) fn map_descriptors<const N: usize>(
+/// CLOEXEC, for at most [`MAX_MAPPED`] sources. Sources are first copied above
+/// every target, so a source that already occupies another target cannot be
+/// clobbered. The list is copied into a fixed array before fork; only
+/// async-signal-safe fcntl/dup2 run after fork.
+pub(super) fn map_descriptor_list(
     command: &mut Command,
-    sources: [std::os::fd::RawFd; N],
+    sources: &[std::os::fd::RawFd],
     first: std::os::fd::RawFd,
-) {
+) -> std::io::Result<()> {
+    if sources.len() > MAX_MAPPED {
+        return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
+    }
+    let count = sources.len();
+    let mut fixed = [0; MAX_MAPPED];
+    fixed[..count].copy_from_slice(sources);
     // SAFETY: the closure performs only fcntl/dup2 on captured integers.
     unsafe {
         command.pre_exec(move || {
-            let mut copies = [0; N];
-            for (copy, source) in copies.iter_mut().zip(sources) {
-                *copy = libc::fcntl(source, libc::F_DUPFD_CLOEXEC, first + N as i32);
-                if *copy < 0 {
+            let mut copies = [0; MAX_MAPPED];
+            for index in 0..count {
+                copies[index] =
+                    libc::fcntl(fixed[index], libc::F_DUPFD_CLOEXEC, first + count as i32);
+                if copies[index] < 0 {
                     return Err(std::io::Error::last_os_error());
                 }
             }
-            for (offset, copy) in copies.into_iter().enumerate() {
-                if libc::dup2(copy, first + offset as i32) < 0 {
+            for (offset, copy) in copies[..count].iter().enumerate() {
+                if libc::dup2(*copy, first + offset as i32) < 0 {
                     return Err(std::io::Error::last_os_error());
                 }
             }
             Ok(())
         });
     }
+    Ok(())
 }

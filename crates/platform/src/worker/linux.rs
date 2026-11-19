@@ -1,4 +1,4 @@
-use super::{CleanupFault, WORKER_CONTROL_ENV, WorkerChannels, WorkerCommand};
+use super::{CleanupFault, WORKER_CONTROL_ENV, WORKER_INPUTS_ENV, WorkerChannels, WorkerCommand};
 #[cfg(feature = "native-test-hooks")]
 use crate::native_test_hooks::{self as hooks, Action, Stage};
 use crate::{PlatformError, ProcessIdentity};
@@ -20,6 +20,27 @@ fn pipe() -> Result<(OwnedFd, OwnedFd), PlatformError> {
     }
     // SAFETY: successful pipe2 transfers both unique descriptors to us.
     Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
+}
+
+/// First worker-side descriptor for inherited inputs (3 and 4 are control).
+pub(super) const FIRST_INPUT_FD: u64 = 5;
+
+/// A read-only duplicate of `file` for input `index`, and the descriptor the
+/// worker will see. A writable or non-regular descriptor is refused.
+pub(super) fn read_only_view(file: &File, index: usize) -> Result<(File, u64), PlatformError> {
+    let fd = file.as_raw_fd();
+    // SAFETY: fcntl/fstat on a live descriptor borrowed from `file`.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    if flags < 0
+        || flags & libc::O_ACCMODE != libc::O_RDONLY
+        || unsafe { libc::fstat(fd, &mut stat) } != 0
+        || stat.st_mode & libc::S_IFMT != libc::S_IFREG
+    {
+        return Err(PlatformError::InvalidFile);
+    }
+    let view = file.try_clone().map_err(|_| PlatformError::Io)?;
+    Ok((view, FIRST_INPUT_FD + index as u64))
 }
 
 pub(super) struct Worker {
@@ -49,6 +70,13 @@ impl Worker {
         // The guardian receives the worker's pipe ends at 3, 4 and 5 and gives
         // the worker commands at 3, reports at 4 and diagnostics as stdout/stderr.
         environment.push((WORKER_CONTROL_ENV.into(), "3:4".into()));
+        // Inputs reach the guardian at 6.. and the worker at 5.. in order.
+        let inputs = command.inputs;
+        let names = (0..inputs.len() as u64)
+            .map(|index| (FIRST_INPUT_FD + index).to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        environment.push((WORKER_INPUTS_ENV.into(), names.into()));
         let (worker_commands, to_worker) = pipe()?;
         let (from_worker, worker_reports) = pipe()?;
         let (diagnostics, worker_diagnostics) = pipe()?;
@@ -60,23 +88,22 @@ impl Worker {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
-        exec_linux::map_descriptors(
-            &mut launch,
-            [
-                worker_commands.as_raw_fd(),
-                worker_reports.as_raw_fd(),
-                worker_diagnostics.as_raw_fd(),
-            ],
-            3,
-        );
-        exec_linux::configure(&mut launch, environment, 6)
+        let mut sources = vec![
+            worker_commands.as_raw_fd(),
+            worker_reports.as_raw_fd(),
+            worker_diagnostics.as_raw_fd(),
+        ];
+        sources.extend(inputs.iter().map(|input| input.as_raw_fd()));
+        exec_linux::map_descriptor_list(&mut launch, &sources, 3)
+            .map_err(|_| PlatformError::InvalidPath)?;
+        exec_linux::configure(&mut launch, environment, 3 + sources.len() as u32)
             .map_err(|_| PlatformError::InvalidPath)?;
         #[cfg(feature = "native-test-hooks")]
         hooks::hit(Stage::GuardianSpawn, None, None)?;
         let spawned = launch.spawn();
         // The guardian (if any) holds its copies; ours close now so worker exit
         // is observable as end-of-file on the engine ends.
-        drop((worker_commands, worker_reports, worker_diagnostics));
+        drop((worker_commands, worker_reports, worker_diagnostics, inputs));
         let mut guardian = spawned.map_err(|_| PlatformError::Io)?;
         let lifeline = guardian.stdin.take();
         let output = guardian.stdout.take().ok_or(PlatformError::Io)?;

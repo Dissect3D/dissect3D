@@ -1,14 +1,15 @@
 //! WE-P03 cleanup-witness transitions at the Store seam (2026-11-18). Dispatch
 //! stays inactive; confirmed evidence comes only from the test-only constructor.
-use super::cleanup::{AttemptRef, CleanupEvidence, CleanupOutcome, CleanupReceipt, CleanupReport};
+use super::cleanup::{AttemptRef, CleanupOutcome, CleanupReceipt, CleanupReport};
 use super::execution_page_tests::reopen;
-use super::retry_tests::{accept, authorize, db, dispatch, retry};
+use super::launch_identity_tests::{evidence, launched};
+use super::retry_tests::{accept, authorize, db, retry};
 use super::*;
 
 fn confirmed(attempt: &AttemptRef) -> CleanupReport {
     CleanupReport {
         attempt: attempt.clone(),
-        outcome: CleanupOutcome::Confirmed(CleanupEvidence::for_test()),
+        outcome: CleanupOutcome::Confirmed(evidence(attempt)),
     }
 }
 fn fault(attempt: &AttemptRef, reason: &str) -> CleanupReport {
@@ -99,7 +100,7 @@ fn fault_keeps_holds_then_confirmed_releases_them_and_completes_cancellation() {
     let f = Fixture::new();
     let auth = authorize(&f);
     let job = accept(&f, "source").job_id;
-    let record = dispatch(&f, &job);
+    let record = launched(&f, &job);
     let attempt = AttemptRef::from(&record);
     cancel(&f, &auth, &job);
     // Uncertain termination: cancellation stays requested and holds stay.
@@ -167,7 +168,7 @@ fn confirmed_is_final_and_repeats_change_nothing() {
     let f = Fixture::new();
     let auth = authorize(&f);
     let job = accept(&f, "source").job_id;
-    let attempt = AttemptRef::from(&dispatch(&f, &job));
+    let attempt = AttemptRef::from(&launched(&f, &job));
     cancel(&f, &auth, &job);
     f.store
         .record_attempt_cleanup(fault(&attempt, "cleanup_ownership_lost"))
@@ -207,7 +208,7 @@ fn stale_or_mismatched_identity_and_running_work_are_rejected_without_writing() 
     let f = Fixture::new();
     let auth = authorize(&f);
     let job = accept(&f, "source").job_id;
-    let attempt = AttemptRef::from(&dispatch(&f, &job));
+    let attempt = AttemptRef::from(&launched(&f, &job));
     // Running work is finalized with its outcome, not by a cleanup report.
     let running = facts(&f, &job);
     for report in [confirmed(&attempt), fault(&attempt, "cleanup_deadline")] {
@@ -268,7 +269,7 @@ fn restart_interrupted_attempt_stays_held_until_cleanup_then_retry_is_accepted()
     let f = Fixture::new();
     let auth = authorize(&f);
     let job = accept(&f, "source").job_id;
-    let attempt = AttemptRef::from(&dispatch(&f, &job));
+    let attempt = AttemptRef::from(&launched(&f, &job));
     let f = reopen(f);
     assert_eq!(
         facts(&f, &job),
@@ -313,7 +314,7 @@ fn restart_keeps_pending_cancellation_held_until_confirmed_cleanup_cancels_it() 
     let f = Fixture::new();
     let auth = authorize(&f);
     let canceling = accept(&f, "canceling").job_id;
-    let canceled_attempt = AttemptRef::from(&dispatch(&f, &canceling));
+    let canceled_attempt = AttemptRef::from(&launched(&f, &canceling));
     cancel(&f, &auth, &canceling);
     // A second, still running job on another resource.
     let running = accept(&f, "running").job_id;
@@ -381,7 +382,7 @@ fn each_cleanup_change_commits_one_revision_with_its_ordered_event() {
     let f = Fixture::new();
     let auth = authorize(&f);
     let job = accept(&f, "source").job_id;
-    let attempt = AttemptRef::from(&dispatch(&f, &job));
+    let attempt = AttemptRef::from(&launched(&f, &job));
     cancel(&f, &auth, &job);
     f.store
         .record_attempt_cleanup(fault(&attempt, "cleanup_deadline"))

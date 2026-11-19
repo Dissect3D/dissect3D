@@ -1,8 +1,9 @@
 //! WE-P04 Store finalization and observation writers (2026-11-18). Dispatch
 //! stays inactive; confirmed evidence comes only from the test constructor.
-use super::cleanup::{AttemptRef, CleanupEvidence, CleanupOutcome, CleanupReport};
+use super::cleanup::{AttemptRef, CleanupOutcome, CleanupReport};
 use super::execution_page_tests::reopen;
 use super::finalize::{AttemptFinalization, AttemptObservation, FinalizationPath};
+use super::launch_identity_tests::{evidence, launched};
 use super::retry_tests::{accept, authorize, db, dispatch};
 use super::*;
 use crate::execution::progress::{AttemptPhase, KnownProgress, ObservationUpdate};
@@ -68,12 +69,12 @@ fn finalization(
         cleanup,
     }
 }
-fn confirmed() -> AttemptCleanup {
-    AttemptCleanup::Confirmed(CleanupEvidence::for_test())
+fn confirmed(attempt: &AttemptRef) -> AttemptCleanup {
+    AttemptCleanup::Confirmed(evidence(attempt))
 }
 fn running(f: &Fixture, key: &str) -> (JobId, AttemptRef) {
     let job = accept(f, key).job_id;
-    let attempt = AttemptRef::from(&dispatch(f, &job));
+    let attempt = AttemptRef::from(&launched(f, &job));
     (job, attempt)
 }
 
@@ -107,7 +108,7 @@ fn each_typed_end_finalizes_running_work_with_its_safe_outcome_and_releases_on_c
         let before = event_count(&f, &job);
         let receipt = f
             .store
-            .finalize_attempt(finalization(&attempt, end, confirmed()))
+            .finalize_attempt(finalization(&attempt, end, confirmed(&attempt)))
             .unwrap();
         assert_eq!(receipt.path, FinalizationPath::Finalized);
         assert_eq!(
@@ -176,7 +177,7 @@ fn cleanup_fault_keeps_holds_until_the_cleanup_writer_confirms_and_repeats_are_i
         f.store.finalize_attempt(finalization(
             &attempt,
             AttemptEnd::DeadlineExceeded,
-            confirmed()
+            confirmed(&attempt)
         )),
         Err(CoreError::Conflict)
     ));
@@ -185,7 +186,7 @@ fn cleanup_fault_keeps_holds_until_the_cleanup_writer_confirms_and_repeats_are_i
     f.store
         .record_attempt_cleanup(CleanupReport {
             attempt: attempt.clone(),
-            outcome: CleanupOutcome::Confirmed(CleanupEvidence::for_test()),
+            outcome: CleanupOutcome::Confirmed(evidence(&attempt)),
         })
         .unwrap();
     let last = facts(&f, &job);
@@ -207,7 +208,7 @@ fn committed_user_cancellation_wins_over_a_later_failure_finalization() {
         .finalize_attempt(finalization(
             &attempt,
             AttemptEnd::DeadlineExceeded,
-            confirmed(),
+            confirmed(&attempt),
         ))
         .unwrap();
     assert_eq!(receipt.path, FinalizationPath::Cancellation);
@@ -222,7 +223,7 @@ fn committed_user_cancellation_wins_over_a_later_failure_finalization() {
         .finalize_attempt(finalization(
             &attempt,
             AttemptEnd::Stopped(StopIntent::UserCancel),
-            confirmed(),
+            confirmed(&attempt),
         ))
         .unwrap();
     assert_eq!(
@@ -239,11 +240,11 @@ fn stale_identity_user_stop_on_running_work_and_unsafe_codes_reject_without_writ
     let mut wrong = attempt.clone();
     wrong.session_id = "ses_0123456789abcdef0123456789abcdef".into();
     let rejected = [
-        finalization(&wrong, AttemptEnd::WorkerFailed, confirmed()),
+        finalization(&wrong, AttemptEnd::WorkerFailed, confirmed(&attempt)),
         finalization(
             &attempt,
             AttemptEnd::Stopped(StopIntent::UserCancel),
-            confirmed(),
+            confirmed(&attempt),
         ),
         finalization(
             &attempt,
@@ -362,7 +363,7 @@ fn ad05_restart_never_recreates_a_live_timer_or_accepts_a_late_outcome() {
         f.store.finalize_attempt(finalization(
             &attempt,
             AttemptEnd::WorkerFailed,
-            confirmed()
+            confirmed(&attempt)
         )),
         Err(CoreError::Conflict)
     ));

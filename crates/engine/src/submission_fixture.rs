@@ -1072,7 +1072,7 @@ fn readiness_snapshot(
     })
 }
 
-fn selection_snapshot_value(selection: &ResolvedSelection) -> Value {
+pub(crate) fn selection_snapshot_value(selection: &ResolvedSelection) -> Value {
     json!({
         "support_id": selection.support_id,
         "support_ref": selection.support_ref,

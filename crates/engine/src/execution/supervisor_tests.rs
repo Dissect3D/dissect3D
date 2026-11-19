@@ -1,10 +1,12 @@
 //! WE-P04 supervisor core with the in-memory fake worker. These establish
 //! codec/legality/timer behavior only: not a provider, a real process or
 //! process-tree cleanup (see `process_fixture_tests` for real processes).
-use super::fake_worker::{Behavior, FakeLauncher, LaunchMode, OnExecute, OnLoad, Record};
+use super::fake_worker::{
+    Behavior, FakeLauncher, LaunchMode, LedgerMode, OnExecute, OnLoad, Record, TestLedger,
+};
 use super::legality_tests::expectation;
 use super::progress::{AttemptPhase, ObservationUpdate};
-use super::supervisor::WorkerSupervisor;
+use super::supervisor::{IDENTITY_UNRECORDED, WorkerSupervisor};
 use super::types::*;
 use crate::store::execution::{AttemptTiming, DispatchRecord};
 use crate::worker_protocol::{ExecuteInput, random_id};
@@ -14,7 +16,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::watch;
 
-pub(super) fn limits() -> SupervisionLimits {
+pub(crate) fn limits() -> SupervisionLimits {
     SupervisionLimits {
         launch: Duration::from_secs(2),
         handshake: Duration::from_secs(2),
@@ -25,6 +27,17 @@ pub(super) fn limits() -> SupervisionLimits {
         ping_interval: Duration::from_millis(20),
         silence_warning: Duration::from_secs(5),
         progress_interval: Duration::from_millis(50),
+    }
+}
+/// Limits for tests that end real native process trees. Whole-tree cleanup
+/// gets the contract's termination bound, since a loaded host (the full suite
+/// in parallel) can take longer than the unit harness's 500 ms. Only headroom:
+/// the tests still require confirmed cleanup, and production bounds are
+/// unchanged.
+pub(crate) fn process_limits() -> SupervisionLimits {
+    SupervisionLimits {
+        termination: SupervisionLimits::CONTRACT.termination,
+        ..limits()
     }
 }
 pub(super) fn plan(limits: SupervisionLimits) -> AttemptPlan {
@@ -43,7 +56,7 @@ pub(super) fn plan(limits: SupervisionLimits) -> AttemptPlan {
         limits,
     }
 }
-pub(super) fn dispatch(timeout: Option<Duration>) -> DispatchRecord {
+pub(crate) fn dispatch(timeout: Option<Duration>) -> DispatchRecord {
     DispatchRecord {
         job_id: JobId::parse(random_id("job_")).unwrap(),
         attempt_id: random_id("att_"),
@@ -57,7 +70,7 @@ pub(super) fn dispatch(timeout: Option<Duration>) -> DispatchRecord {
 }
 
 /// Harness bound: a regression fails instead of hanging the suite.
-pub(super) async fn bounded(run: impl std::future::Future<Output = AttemptExit>) -> AttemptExit {
+pub(crate) async fn bounded(run: impl std::future::Future<Output = AttemptExit>) -> AttemptExit {
     tokio::time::timeout(Duration::from_secs(15), run)
         .await
         .expect("supervision ended within the harness bound")
@@ -66,12 +79,24 @@ pub(super) async fn bounded(run: impl std::future::Future<Output = AttemptExit>)
 struct Run {
     exit: AttemptExit,
     record: Arc<Record>,
+    ledger: Arc<TestLedger>,
     observations: Vec<ObservationUpdate>,
 }
 async fn run_with(
     dispatch: &DispatchRecord,
     launcher: FakeLauncher,
     record: Arc<Record>,
+    limits: SupervisionLimits,
+    stop_after: Option<(Duration, StopIntent)>,
+) -> Run {
+    let ledger = TestLedger::observing(LedgerMode::Accept, Some(Arc::clone(&record)));
+    run_with_ledger(dispatch, launcher, record, ledger, limits, stop_after).await
+}
+async fn run_with_ledger(
+    dispatch: &DispatchRecord,
+    launcher: FakeLauncher,
+    record: Arc<Record>,
+    ledger: Arc<TestLedger>,
     limits: SupervisionLimits,
     stop_after: Option<(Duration, StopIntent)>,
 ) -> Run {
@@ -100,6 +125,7 @@ async fn run_with(
         dispatch,
         plan(limits),
         launcher,
+        Arc::clone(&ledger),
         stop_rx,
         &obs_tx,
     ))
@@ -112,6 +138,7 @@ async fn run_with(
     Run {
         exit,
         record,
+        ledger,
         observations: collector.await.unwrap(),
     }
 }
@@ -386,6 +413,7 @@ async fn a_vanished_controller_stops_the_attempt_as_engine_shutdown() {
         &dispatch,
         plan(limits()),
         launcher,
+        TestLedger::new(LedgerMode::Accept),
         stop_rx,
         &obs_tx,
     ))
@@ -421,4 +449,77 @@ async fn diagnostics_are_drained_and_capped_and_progress_is_coalesced() {
             .filter_map(|o| o.progress.as_ref())
             .all(|p| p.stage == "copy")
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn launch_identity_is_recorded_once_before_any_command_and_matches_the_witness() {
+    let dispatch = dispatch(None);
+    let (launcher, record) = FakeLauncher::new(Behavior::default());
+    let r = run_with(&dispatch, launcher, record, limits(), None).await;
+    let AttemptExit::Candidate { cleanup, .. } = &r.exit else {
+        panic!("{:?}", r.exit);
+    };
+    let records = r.ledger.records.lock().unwrap().clone();
+    assert_eq!(records.len(), 1);
+    // The exact attempt, and the identity the witness later confirms.
+    assert_eq!(records[0].attempt.attempt_id, dispatch.attempt_id);
+    assert_eq!(records[0].attempt.session_id, dispatch.session_id);
+    assert_eq!(records[0].attempt.grant_id, dispatch.grant_id);
+    assert_eq!(&records[0].identity, cleanup.identity());
+    // Recorded before the worker could be given execute permission.
+    assert_eq!(*r.ledger.executes_before_record.lock().unwrap(), [0]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unrecorded_launch_identity_terminates_the_worker_without_any_command_and_holds() {
+    for mode in [LedgerMode::Reject, LedgerMode::Stall] {
+        let mut short = limits();
+        // The stalled ledger outlives the launch bound (it may still commit).
+        short.launch = Duration::from_millis(500);
+        let (launcher, record) = FakeLauncher::new(Behavior::default());
+        let ledger = TestLedger::observing(mode, Some(Arc::clone(&record)));
+        let r = run_with_ledger(&dispatch(None), launcher, record, ledger, short, None).await;
+        let (end, cleanup) = ended(&r.exit);
+        assert_eq!(end, AttemptEnd::LaunchFailed, "{mode:?}");
+        // Confirmed native termination still cannot release: the Store has no
+        // durable identity to bind it to, so holds stay.
+        assert!(
+            matches!(cleanup, AttemptCleanup::Fault(code) if *code == IDENTITY_UNRECORDED),
+            "{mode:?}: {cleanup:?}"
+        );
+        assert_eq!(Record::count(&r.record.terminations), 1, "{mode:?}");
+        assert_eq!(Record::count(&r.record.executes), 0, "{mode:?}");
+        assert_eq!(Record::count(&r.record.shutdowns), 0, "{mode:?}");
+        let categories = categories(&r.exit);
+        assert!(
+            categories.contains(&"worker_launch_failed"),
+            "{categories:?}"
+        );
+        assert!(categories.contains(&"cleanup_fault"), "{categories:?}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unrecorded_identity_keeps_a_native_cleanup_fault_code() {
+    let (mut launcher, record) = FakeLauncher::new(Behavior::default());
+    launcher.cleanup = Err(CleanupFault::OwnershipLost);
+    let ledger = TestLedger::observing(LedgerMode::Reject, Some(Arc::clone(&record)));
+    let r = run_with_ledger(&dispatch(None), launcher, record, ledger, limits(), None).await;
+    let (end, cleanup) = ended(&r.exit);
+    assert_eq!(end, AttemptEnd::LaunchFailed);
+    assert!(
+        matches!(cleanup, AttemptCleanup::Fault("cleanup_ownership_lost")),
+        "{cleanup:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn launch_failures_record_no_identity() {
+    for mode in [LaunchMode::NotStarted, LaunchMode::Uncertain] {
+        let (mut launcher, record) = FakeLauncher::new(Behavior::default());
+        launcher.mode = mode;
+        let r = run_with(&dispatch(None), launcher, record, limits(), None).await;
+        assert_eq!(ended(&r.exit).0, AttemptEnd::LaunchFailed);
+        assert!(r.ledger.identities().is_empty(), "{mode:?}");
+    }
 }

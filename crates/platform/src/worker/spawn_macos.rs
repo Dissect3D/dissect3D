@@ -140,11 +140,12 @@ pub(super) fn observe(pid: i32) -> Result<ProcessIdentity, PlatformError> {
     })
 }
 
-/// A CLOEXEC copy of `fd` at or above 10, clear of every mapped destination.
+/// A CLOEXEC copy of `fd` at or above 64, clear of every mapped destination
+/// (stdio, control and up to `MAX_WORKER_INPUTS` inputs).
 pub(super) fn relocate(fd: RawFd) -> Result<std::os::fd::OwnedFd, PlatformError> {
     use std::os::fd::FromRawFd;
     // SAFETY: F_DUPFD_CLOEXEC creates a new descriptor or fails.
-    let copy = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 10) };
+    let copy = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 64) };
     if copy < 0 {
         return Err(PlatformError::Io);
     }

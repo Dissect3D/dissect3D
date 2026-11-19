@@ -11,6 +11,7 @@ use super::cleanup::{
     AttemptRef, CleanupReceipt, cleanup_transition, read_attempt, write_cleanup_facts,
 };
 use super::execution::{ExecutionCommand, LiveAttempts, is_safe_code, record_event};
+use super::launch_identity::CleanupBasis;
 use super::*;
 use crate::execution::progress::ObservationUpdate;
 use crate::execution::types::{AttemptCleanup, AttemptEnd, StopIntent};
@@ -51,11 +52,12 @@ fn terminal_for(end: AttemptEnd) -> Option<(&'static str, &'static str)> {
         AttemptEnd::Stopped(StopIntent::UserCancel | StopIntent::Continue) => return None,
     })
 }
-fn cleanup_change(cleanup: &AttemptCleanup) -> (&'static str, Option<&'static str>) {
+fn cleanup_basis(cleanup: &AttemptCleanup) -> CleanupBasis<'_> {
     match cleanup {
+        AttemptCleanup::Confirmed(evidence) => CleanupBasis::Confirmed(evidence),
         // No process ever existed, so nothing can survive.
-        AttemptCleanup::Confirmed(_) | AttemptCleanup::NeverLaunched(_) => ("confirmed", None),
-        AttemptCleanup::Fault(code) => ("fault", Some(*code)),
+        AttemptCleanup::NeverLaunched(_) => CleanupBasis::NeverLaunched,
+        AttemptCleanup::Fault(code) => CleanupBasis::Fault(code),
     }
 }
 
@@ -121,13 +123,18 @@ pub(super) fn finalize(
 ) -> Result<FinalizationReceipt, CoreError> {
     finalization.validate()?;
     let attempt = &finalization.attempt;
-    let (next, reason) = cleanup_change(&finalization.cleanup);
+    let basis = cleanup_basis(&finalization.cleanup);
+    // Only a supervisor of this running instance can know no process was
+    // created; after restart that claim is never accepted (WE-P07 recovery).
+    if matches!(basis, CleanupBasis::NeverLaunched) && !live.contains(&attempt.attempt_id) {
+        return Err(CoreError::Conflict);
+    }
     let tx = sql(db.transaction_with_behavior(TransactionBehavior::Immediate))?;
     let facts = read_attempt(&tx, attempt)?;
     let result = match facts.state.as_str() {
         // A committed user cancellation encountered first wins (WE-003).
         "cancel_requested" | "canceled" => FinalizationReceipt {
-            receipt: cleanup_transition(&tx, attempt, &facts, next, reason)?,
+            receipt: cleanup_transition(&tx, attempt, &facts, basis)?,
             path: FinalizationPath::Cancellation,
         },
         "running" => {
@@ -135,7 +142,7 @@ pub(super) fn finalize(
             if facts.cleanup != "pending" {
                 return Err(CoreError::InvalidStore);
             }
-            write_cleanup_facts(&tx, attempt, next, reason)?;
+            write_cleanup_facts(&tx, attempt, basis)?;
             sql(tx.execute(
                 "UPDATE job_execution
                  SET state=?2,phase=?2,outcome_code=?3,snapshot_revision=snapshot_revision+1,
@@ -159,14 +166,14 @@ pub(super) fn finalize(
                 return Err(CoreError::Conflict);
             }
             FinalizationReceipt {
-                receipt: cleanup_transition(&tx, attempt, &facts, next, reason)?,
+                receipt: cleanup_transition(&tx, attempt, &facts, basis)?,
                 path: FinalizationPath::Finalized,
             }
         }
     };
     if result.receipt.changed {
         sql(tx.commit())?;
-        if next == "confirmed" {
+        if basis.status() == "confirmed" {
             // The attempt is over; its live timing record is no longer needed.
             live.forget(&attempt.attempt_id);
         }

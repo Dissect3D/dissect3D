@@ -6,10 +6,10 @@
 //! On Linux the platform guardian must already be built next to this binary
 //! (`cargo build -p dissect3d-platform --bins`); a missing guardian fails the
 //! test rather than skipping it.
-use super::fake_worker::line;
+use super::fake_worker::{LedgerMode, TestLedger, line};
 use super::launcher::{PlatformLauncher, WORKER_SESSION_ENV};
 use super::supervisor::WorkerSupervisor;
-use super::supervisor_tests::{bounded, dispatch, limits, plan};
+use super::supervisor_tests::{bounded, dispatch, limits, plan, process_limits};
 use super::types::*;
 use crate::store::execution::DispatchRecord;
 use dissect3d_platform::{ProcessIdentity, ProcessWatcher, WorkerCommand};
@@ -281,6 +281,17 @@ async fn run(
     limits: SupervisionLimits,
     stop: Option<StopIntent>,
 ) -> AttemptExit {
+    run_recorded(fixture, record, mode, limits, stop).await.0
+}
+/// As `run`, also returning the launch ledger the supervisor recorded into.
+async fn run_recorded(
+    fixture: &Fixture,
+    record: &DispatchRecord,
+    mode: &str,
+    limits: SupervisionLimits,
+    stop: Option<StopIntent>,
+) -> (AttemptExit, Arc<TestLedger>) {
+    let ledger = TestLedger::new(LedgerMode::Accept);
     let (stop_tx, stop_rx) = watch::channel(StopIntent::Continue);
     let (obs_tx, _obs_rx) = watch::channel(None);
     let stop_tx = Arc::new(stop_tx);
@@ -299,6 +310,7 @@ async fn run(
         record,
         plan(limits),
         launcher,
+        Arc::clone(&ledger),
         stop_rx,
         &obs_tx,
     ))
@@ -306,7 +318,7 @@ async fn run(
     if let Some(stopper) = stopper {
         stopper.abort();
     }
-    exit
+    (exit, ledger)
 }
 
 fn ended(exit: &AttemptExit) -> (AttemptEnd, &AttemptCleanup) {
@@ -329,7 +341,7 @@ fn categories(exit: &AttemptExit) -> Vec<&'static str> {
 async fn real_worker_candidate_only_after_confirmed_tree_cleanup() {
     let fixture = Fixture::new();
     let record = dispatch(None);
-    let exit = run(&fixture, &record, "candidate", limits(), None).await;
+    let (exit, ledger) = run_recorded(&fixture, &record, "candidate", process_limits(), None).await;
     let AttemptExit::Candidate {
         report,
         cleanup,
@@ -350,6 +362,9 @@ async fn real_worker_candidate_only_after_confirmed_tree_cleanup() {
             .concat(),
         record.session_id["ses_".len()..]
     );
+    // The identity durably recorded at launch is exactly the one the native
+    // witness confirms, so the Store's release check can bind them.
+    assert_eq!(ledger.identities(), [cleanup.identity().clone()]);
     // Harness/upstream output reached diagnostics, never the control parser.
     assert!(diagnostics.bytes_observed > 0);
     assert!(!categories(&exit).contains(&"worker_protocol_violation"));
@@ -359,7 +374,14 @@ async fn real_worker_candidate_only_after_confirmed_tree_cleanup() {
 #[tokio::test]
 async fn worker_environment_is_exactly_the_scoped_launch_list() {
     let fixture = Fixture::new();
-    let exit = run(&fixture, &dispatch(None), "environment", limits(), None).await;
+    let exit = run(
+        &fixture,
+        &dispatch(None),
+        "environment",
+        process_limits(),
+        None,
+    )
+    .await;
     assert!(matches!(exit, AttemptExit::Candidate { .. }), "{exit:?}");
     let names = std::fs::read_to_string(fixture.root.path().join("environment")).unwrap();
     let mut names: Vec<_> = names.lines().map(str::to_uppercase).collect();
@@ -371,6 +393,7 @@ async fn worker_environment_is_exactly_the_scoped_launch_list() {
             "D3D_FIXTURE_ROOT",
             "D3D_PROCESS_FIXTURE",
             "DISSECT3D_WORKER_CONTROL",
+            "DISSECT3D_WORKER_INPUTS",
             "DISSECT3D_WORKER_SESSION",
         ]
     );
@@ -385,7 +408,7 @@ async fn blocked_native_control_is_terminated_externally_on_cancel() {
         &fixture,
         &record,
         "blocked",
-        limits(),
+        process_limits(),
         Some(StopIntent::UserCancel),
     )
     .await;
@@ -405,7 +428,7 @@ async fn blocked_native_control_is_terminated_externally_on_cancel() {
 async fn blocked_worker_past_the_attempt_deadline_is_a_typed_failure() {
     let fixture = Fixture::new();
     let record = dispatch(Some(Duration::from_millis(1_500)));
-    let exit = run(&fixture, &record, "blocked", limits(), None).await;
+    let exit = run(&fixture, &record, "blocked", process_limits(), None).await;
     let (end, cleanup) = ended(&exit);
     assert_eq!(end, AttemptEnd::DeadlineExceeded);
     assert!(
@@ -419,7 +442,7 @@ async fn blocked_worker_past_the_attempt_deadline_is_a_typed_failure() {
 #[tokio::test]
 async fn crash_during_execution_is_failure_with_confirmed_cleanup() {
     let fixture = Fixture::new();
-    let exit = run(&fixture, &dispatch(None), "crash", limits(), None).await;
+    let exit = run(&fixture, &dispatch(None), "crash", process_limits(), None).await;
     let (end, cleanup) = ended(&exit);
     assert_eq!(end, AttemptEnd::WorkerFailed);
     assert!(
@@ -432,7 +455,14 @@ async fn crash_during_execution_is_failure_with_confirmed_cleanup() {
 #[tokio::test]
 async fn declared_out_of_memory_is_a_safe_typed_failure() {
     let fixture = Fixture::new();
-    let exit = run(&fixture, &dispatch(None), "declared_oom", limits(), None).await;
+    let exit = run(
+        &fixture,
+        &dispatch(None),
+        "declared_oom",
+        process_limits(),
+        None,
+    )
+    .await;
     let (end, cleanup) = ended(&exit);
     assert_eq!(end, AttemptEnd::WorkerFailed);
     assert!(
@@ -445,7 +475,7 @@ async fn declared_out_of_memory_is_a_safe_typed_failure() {
 #[tokio::test]
 async fn early_rejection_is_failure_without_candidate() {
     let fixture = Fixture::new();
-    let exit = run(&fixture, &dispatch(None), "reject", limits(), None).await;
+    let exit = run(&fixture, &dispatch(None), "reject", process_limits(), None).await;
     let (end, cleanup) = ended(&exit);
     assert_eq!(end, AttemptEnd::WorkerFailed);
     assert!(
@@ -457,7 +487,14 @@ async fn early_rejection_is_failure_without_candidate() {
 #[tokio::test]
 async fn incompatible_hello_is_contained_before_load() {
     let fixture = Fixture::new();
-    let exit = run(&fixture, &dispatch(None), "incompatible", limits(), None).await;
+    let exit = run(
+        &fixture,
+        &dispatch(None),
+        "incompatible",
+        process_limits(),
+        None,
+    )
+    .await;
     let (end, cleanup) = ended(&exit);
     assert_eq!(end, AttemptEnd::ProtocolError);
     assert!(
@@ -469,7 +506,7 @@ async fn incompatible_hello_is_contained_before_load() {
 #[tokio::test]
 async fn diagnostic_flood_is_capped_and_never_blocks_control() {
     let fixture = Fixture::new();
-    let exit = run(&fixture, &dispatch(None), "flood", limits(), None).await;
+    let exit = run(&fixture, &dispatch(None), "flood", process_limits(), None).await;
     let AttemptExit::Candidate { diagnostics, .. } = &exit else {
         panic!("expected a candidate, got {exit:?}");
     };
@@ -553,15 +590,18 @@ async fn rejected_launch_starts_no_process() {
     command.executable = command.executable.with_file_name("absent-worker.exe");
     let (stop_tx, stop_rx) = watch::channel(StopIntent::Continue);
     let (obs_tx, _obs_rx) = watch::channel(None);
+    let ledger = TestLedger::new(LedgerMode::Accept);
     let exit = bounded(WorkerSupervisor::run(
         &dispatch(None),
         plan(limits()),
         PlatformLauncher::new(command),
+        Arc::clone(&ledger),
         stop_rx,
         &obs_tx,
     ))
     .await;
     drop(stop_tx);
+    assert!(ledger.identities().is_empty());
     let (end, cleanup) = ended(&exit);
     assert_eq!(end, AttemptEnd::LaunchFailed);
     assert!(

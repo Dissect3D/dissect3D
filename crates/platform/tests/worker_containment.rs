@@ -32,6 +32,9 @@ fn worker_child() {
     if std::env::var_os("D3D_WORKER_ECHO").is_some() {
         echo_worker();
     }
+    if let Some(root) = std::env::var_os("D3D_WORKER_INPUT_ROOT") {
+        input_worker(std::path::PathBuf::from(root));
+    }
     if let Some(root) = std::env::var_os("D3D_WORKER_STORM") {
         let root = std::path::PathBuf::from(root);
         if std::env::var_os("D3D_STORM_CHILD").is_some() {
@@ -141,6 +144,50 @@ fn echo_worker() -> ! {
         }
         std::process::exit(0);
     }
+    loop {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Worker side of the inherited-input checks: adopt each listed input, read
+/// it from offset 0, try to write through it, then report.
+fn input_worker(root: std::path::PathBuf) -> ! {
+    use std::io::{Read, Seek, Write};
+    let listed = std::env::var(dissect3d_platform::WORKER_INPUTS_ENV).unwrap_or_default();
+    let mut report = vec![format!("listed={listed}")];
+    for value in listed.split(',').filter(|v| !v.is_empty()) {
+        let value: u64 = value.parse().unwrap();
+        match dissect3d_platform::worker_inherited_input(value) {
+            Ok(mut file) => {
+                let mut bytes = Vec::new();
+                file.seek(std::io::SeekFrom::Start(0)).unwrap();
+                file.read_to_end(&mut bytes).unwrap();
+                let wrote = file
+                    .write_all(b"tamper")
+                    .and_then(|()| file.flush())
+                    .is_ok();
+                report.push(format!(
+                    "{value}:{}:{}",
+                    String::from_utf8_lossy(&bytes),
+                    if wrote { "written" } else { "denied" }
+                ));
+                let again = dissect3d_platform::worker_inherited_input(value).err();
+                report.push(format!("again:{again:?}"));
+            }
+            Err(error) => report.push(format!("{value}:error:{error:?}")),
+        }
+    }
+    let unlisted = dissect3d_platform::worker_inherited_input(999_999).err();
+    report.push(format!("unlisted:{unlisted:?}"));
+    std::fs::write(
+        root.join("report.tmp"),
+        report.join(
+            "
+",
+        ),
+    )
+    .unwrap();
+    std::fs::rename(root.join("report.tmp"), root.join("report")).unwrap();
     loop {
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -714,4 +761,230 @@ fn inheritable_windows_engine_handle_is_not_in_the_worker_handle_set() {
         .terminate_tree(Instant::now() + Duration::from_secs(5))
         .unwrap();
     assert_eq!(result.as_deref(), Some(b"sealed".as_slice()));
+}
+
+#[test]
+fn inherited_inputs_are_read_only_exactly_listed_and_adopted_once() {
+    let temp = tempfile::tempdir().unwrap();
+    let alpha = temp.path().join("alpha.bin");
+    let beta = temp.path().join("beta.bin");
+    std::fs::write(&alpha, b"alpha").unwrap();
+    std::fs::write(&beta, b"beta").unwrap();
+    let mut command = command();
+    command.environment.push((
+        "D3D_WORKER_INPUT_ROOT".into(),
+        temp.path().as_os_str().into(),
+    ));
+    let a = command
+        .inherit_read_only(&std::fs::File::open(&alpha).unwrap())
+        .unwrap();
+    let b = command
+        .inherit_read_only(&std::fs::File::open(&beta).unwrap())
+        .unwrap();
+    assert_ne!(a, b);
+    let mut worker = WorkerProcess::launch(command, [21; 16]).unwrap();
+    let report = temp.path().join("report");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !report.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "worker reported within the bound"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    worker
+        .terminate_tree(Instant::now() + Duration::from_secs(5))
+        .unwrap();
+    let report = std::fs::read_to_string(report).unwrap();
+    assert_eq!(
+        report.lines().collect::<Vec<_>>(),
+        [
+            format!("listed={a},{b}"),
+            format!("{a}:alpha:denied"),
+            "again:Some(Busy)".to_owned(),
+            format!("{b}:beta:denied"),
+            "again:Some(Busy)".to_owned(),
+            "unlisted:Some(NotFound)".to_owned(),
+        ]
+    );
+    // The snapshots are unchanged.
+    assert_eq!(std::fs::read(&alpha).unwrap(), b"alpha");
+    assert_eq!(std::fs::read(&beta).unwrap(), b"beta");
+}
+
+#[test]
+fn a_worker_without_inputs_can_adopt_none() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut command = command();
+    command.environment.push((
+        "D3D_WORKER_INPUT_ROOT".into(),
+        temp.path().as_os_str().into(),
+    ));
+    let mut worker = WorkerProcess::launch(command, [22; 16]).unwrap();
+    let report = temp.path().join("report");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !report.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "worker reported within the bound"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    worker
+        .terminate_tree(Instant::now() + Duration::from_secs(5))
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(report).unwrap(),
+        "listed=
+unlisted:Some(NotFound)"
+    );
+}
+
+#[test]
+fn writable_or_excess_inputs_and_the_reserved_variable_are_refused() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("input.bin");
+    std::fs::write(&path, b"input").unwrap();
+    // A file still open for writing never becomes a worker input.
+    let writable = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .unwrap();
+    assert!(command().inherit_read_only(&writable).is_err());
+    drop(writable);
+    // Only regular files (a directory opens read-only on Unix).
+    #[cfg(unix)]
+    assert!(
+        command()
+            .inherit_read_only(&std::fs::File::open(temp.path()).unwrap())
+            .is_err()
+    );
+    let reader = std::fs::File::open(&path).unwrap();
+    let mut full = command();
+    for _ in 0..dissect3d_platform::MAX_WORKER_INPUTS {
+        full.inherit_read_only(&reader).unwrap();
+    }
+    assert!(full.inherit_read_only(&reader).is_err());
+    for key in ["DISSECT3D_WORKER_INPUTS", "dissect3d_worker_inputs"] {
+        let mut command = command();
+        command.environment.push((key.into(), "5".into()));
+        assert!(WorkerProcess::launch(command, [23; 16]).is_err());
+    }
+}
+
+/// With inputs present the worker's descriptors are exactly stdio, the two
+/// control ends and the listed inputs; an inheritable engine descriptor
+/// reaches neither the guardian nor the worker.
+#[cfg(target_os = "linux")]
+#[test]
+fn worker_descriptor_set_with_inputs_is_exactly_stdio_control_and_inputs() {
+    use std::os::fd::AsRawFd;
+    let temp = tempfile::tempdir().unwrap();
+    let sentinel = temp.path().join("private-engine-only");
+    let file = std::fs::File::create(&sentinel).unwrap();
+    assert_eq!(
+        unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETFD, 0) },
+        0
+    );
+    let inputs = ["first.bin", "second.bin"].map(|name| {
+        let path = temp.path().join(name);
+        std::fs::write(&path, name).unwrap();
+        path
+    });
+    let mut command = command();
+    for path in &inputs {
+        command
+            .inherit_read_only(&std::fs::File::open(path).unwrap())
+            .unwrap();
+    }
+    let mut worker = WorkerProcess::launch(command, [24; 16]).unwrap();
+    let identity = worker.identity();
+    let table = |pid: u32| -> Vec<(i32, std::path::PathBuf)> {
+        let mut entries: Vec<_> = std::fs::read_dir(format!("/proc/{pid}/fd"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let fd = entry.file_name().to_str()?.parse().ok()?;
+                Some((fd, std::fs::read_link(entry.path()).ok()?))
+            })
+            .collect();
+        entries.sort();
+        entries
+    };
+    let worker_table = table(identity.process.pid);
+    let guardian_table = table(identity.guardian.unwrap().pid);
+    worker
+        .terminate_tree(Instant::now() + Duration::from_secs(5))
+        .unwrap();
+    let numbers: Vec<i32> = worker_table.iter().map(|(fd, _)| *fd).collect();
+    assert_eq!(numbers, [0, 1, 2, 3, 4, 5, 6], "{worker_table:?}");
+    assert_eq!(worker_table[5].1, inputs[0]);
+    assert_eq!(worker_table[6].1, inputs[1]);
+    for (fd, path) in worker_table.iter().chain(&guardian_table) {
+        assert_ne!(path, &sentinel, "engine-only descriptor leaked at {fd}");
+    }
+}
+
+/// With inputs present an inheritable engine handle still never reaches the
+/// worker: the explicit handle list stays exact.
+#[cfg(windows)]
+#[test]
+fn inheritable_windows_engine_handle_is_absent_with_inputs_present() {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::{HANDLE_FLAG_INHERIT, SetHandleInformation};
+    let temp = tempfile::tempdir().unwrap();
+    let file = std::fs::File::create(temp.path().join("engine-only")).unwrap();
+    let handle = file.as_raw_handle();
+    assert_ne!(
+        unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) },
+        0
+    );
+    let expected = windows_file_identity(handle).unwrap();
+    let input = temp.path().join("input.bin");
+    std::fs::write(&input, b"input").unwrap();
+    let mut command = command();
+    command
+        .inherit_read_only(&std::fs::File::open(&input).unwrap())
+        .unwrap();
+    command.environment.extend([
+        (
+            "D3D_FORBIDDEN_HANDLE".into(),
+            (handle as usize).to_string().into(),
+        ),
+        ("D3D_FORBIDDEN_FILE_ID".into(), expected.into()),
+        (
+            "D3D_HANDLE_CHECK_ROOT".into(),
+            temp.path().as_os_str().into(),
+        ),
+    ]);
+    let mut worker = WorkerProcess::launch(command, [25; 16]).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let result = loop {
+        if let Ok(bytes) = std::fs::read(temp.path().join("handle-check")) {
+            break Some(bytes);
+        }
+        if Instant::now() >= deadline {
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    worker
+        .terminate_tree(Instant::now() + Duration::from_secs(5))
+        .unwrap();
+    assert_eq!(result.as_deref(), Some(b"sealed".as_slice()));
+}
+
+/// A directory handle is never a worker input on Windows either.
+#[cfg(windows)]
+#[test]
+fn a_windows_directory_handle_is_not_an_input() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let temp = tempfile::tempdir().unwrap();
+    let directory = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS)
+        .open(temp.path())
+        .unwrap();
+    assert!(command().inherit_read_only(&directory).is_err());
 }

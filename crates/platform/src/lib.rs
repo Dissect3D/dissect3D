@@ -30,6 +30,7 @@ pub use process::{
 };
 pub use root::{OwnedRoot, PlatformError, RootPurpose};
 pub use worker::{
-    CleanupConfirmed, CleanupFault, WORKER_CONTROL_ENV, WorkerChannels, WorkerCommand,
-    WorkerIdentity, WorkerProcess, worker_control_channels,
+    CleanupConfirmed, CleanupFault, MAX_WORKER_INPUTS, WORKER_CONTROL_ENV, WORKER_INPUTS_ENV,
+    WorkerChannels, WorkerCommand, WorkerIdentity, WorkerProcess, worker_control_channels,
+    worker_inherited_input,
 };

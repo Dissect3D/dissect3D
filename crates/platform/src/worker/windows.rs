@@ -1,4 +1,4 @@
-use super::{CleanupFault, WORKER_CONTROL_ENV, WorkerChannels, WorkerCommand};
+use super::{CleanupFault, WORKER_CONTROL_ENV, WORKER_INPUTS_ENV, WorkerChannels, WorkerCommand};
 #[cfg(feature = "native-test-hooks")]
 use crate::native_test_hooks::{self as hooks, Action, Stage};
 use crate::{PlatformError, ProcessIdentity};
@@ -38,6 +38,30 @@ fn pipe(child_reads: bool) -> Result<(OwnedHandle, OwnedHandle), PlatformError> 
     } else {
         (read, write)
     })
+}
+
+/// A new read-only handle to `file` (ReOpenFile with read access only), and
+/// its value, which the child sees unchanged after inheritance. The share
+/// mode admits other readers only: a file still open for writing is refused,
+/// and no writer can open it while the worker holds this handle.
+pub(super) fn read_only_view(file: &File, _index: usize) -> Result<(File, u64), PlatformError> {
+    use windows_sys::Win32::Foundation::{GENERIC_READ, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_SHARE_READ, FILE_TYPE_DISK, GetFileType, ReOpenFile,
+    };
+    let original: HANDLE = file.as_raw_handle().cast();
+    // SAFETY: queries a live handle borrowed from `file`.
+    if unsafe { GetFileType(original) } != FILE_TYPE_DISK || !super::is_regular_file(original) {
+        return Err(PlatformError::InvalidFile);
+    }
+    // SAFETY: ReOpenFile returns a new non-inheritable handle or INVALID_HANDLE_VALUE.
+    let reopened = unsafe { ReOpenFile(original, GENERIC_READ, FILE_SHARE_READ, 0) };
+    if reopened == INVALID_HANDLE_VALUE || reopened.is_null() {
+        return Err(PlatformError::InvalidFile);
+    }
+    // SAFETY: a successful ReOpenFile transfers a unique handle.
+    let view = File::from(unsafe { OwnedHandle::from_raw_handle(reopened.cast()) });
+    Ok((view, reopened as usize as u64))
 }
 
 pub(super) struct Worker {
@@ -86,11 +110,17 @@ impl Worker {
         let (to_worker, worker_commands) = pipe(true)?;
         let (from_worker, worker_reports) = pipe(false)?;
         let (diagnostics, worker_diagnostics) = pipe(false)?;
-        let inherited: [HANDLE; 3] = [
+        let inputs = command.inputs;
+        let mut inherited: Vec<HANDLE> = vec![
             worker_commands.as_raw_handle().cast(),
             worker_reports.as_raw_handle().cast(),
             worker_diagnostics.as_raw_handle().cast(),
         ];
+        inherited.extend(
+            inputs
+                .iter()
+                .map(|input| input.as_raw_handle().cast::<std::ffi::c_void>()),
+        );
 
         let mut size = 0usize;
         unsafe {
@@ -177,14 +207,15 @@ impl Worker {
         // the real private job stays owned throughout the native CreateProcess.
         #[cfg(feature = "native-test-hooks")]
         drop(assignment_copy);
-        // Exactly these three pipe ends are inherited (WC-001, WE-004).
+        // Exactly the three pipe ends and the listed read-only inputs are
+        // inherited (WC-001, WE-004).
         if unsafe {
             UpdateProcThreadAttribute(
                 attributes.0,
                 0,
                 PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
                 inherited.as_ptr().cast(),
-                std::mem::size_of_val(&inherited),
+                std::mem::size_of_val(inherited.as_slice()),
                 std::ptr::null_mut(),
                 std::ptr::null(),
             )
@@ -212,6 +243,12 @@ impl Worker {
             WORKER_CONTROL_ENV.into(),
             format!("{}:{}", inherited[0] as usize, inherited[1] as usize).into(),
         ));
+        let names = inherited[3..]
+            .iter()
+            .map(|handle| (*handle as usize).to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        entries.push((WORKER_INPUTS_ENV.into(), names.into()));
         entries.sort_by_key(|(key, _)| key.to_string_lossy().to_uppercase());
         for (key, value) in entries {
             environment.extend(key.encode_wide());
@@ -235,8 +272,8 @@ impl Worker {
         #[cfg(feature = "native-test-hooks")]
         hooks::hit(Stage::WindowsCreate, None, None)?;
         let window = INHERITABLE_WINDOW.lock().map_err(|_| PlatformError::Io)?;
-        for handle in inherited {
-            // SAFETY: each value is a live pipe end owned above.
+        for &handle in &inherited {
+            // SAFETY: each value is a live pipe end or input view owned above.
             if unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) }
                 == 0
             {
@@ -264,7 +301,7 @@ impl Worker {
             )
         };
         // The child (if any) holds its copies; ours close now, ending the window.
-        drop((worker_commands, worker_reports, worker_diagnostics));
+        drop((worker_commands, worker_reports, worker_diagnostics, inputs));
         drop(window);
         if created == 0 {
             #[cfg(feature = "native-test-hooks")]

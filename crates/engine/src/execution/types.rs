@@ -81,6 +81,12 @@ impl NeverLaunched {
     pub(super) fn new() -> Self {
         Self { _private: () }
     }
+    /// Store-seam tests only: what the supervisor reports for a launch that
+    /// created no process.
+    #[cfg(test)]
+    pub(crate) fn for_test() -> Self {
+        Self::new()
+    }
 }
 
 /// Established cleanup facts for a finished attempt.

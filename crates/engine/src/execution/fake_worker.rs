@@ -1,10 +1,12 @@
 //! Test-only scripted worker over in-memory streams. It exercises the codec,
 //! legality and supervisor; it is not a provider, a process or cleanup proof.
 use super::legality::SessionIdentity;
-use super::supervisor::{LaunchFailure, Launched, SupervisedProcess, WorkerLauncher};
-use crate::store::cleanup::CleanupEvidence;
+use super::supervisor::{LaunchFailure, LaunchLedger, Launched, SupervisedProcess, WorkerLauncher};
+use crate::store::CoreError;
+use crate::store::cleanup::{CleanupEvidence, test_identity};
+use crate::store::launch_identity::LaunchRecord;
 use crate::worker_protocol::random_id;
-use dissect3d_platform::CleanupFault;
+use dissect3d_platform::{CleanupFault, WorkerIdentity};
 use serde_json::{Value, json};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -106,12 +108,70 @@ pub(super) struct FakeProcess {
     record: Arc<Record>,
     worker: tokio::task::AbortHandle,
     cleanup: Result<(), CleanupFault>,
+    identity: WorkerIdentity,
 }
 impl SupervisedProcess for FakeProcess {
+    fn identity(&self) -> WorkerIdentity {
+        self.identity.clone()
+    }
     fn terminate_tree(&mut self, _deadline: Instant) -> Result<CleanupEvidence, CleanupFault> {
         self.record.terminations.fetch_add(1, Ordering::SeqCst);
         self.worker.abort();
-        self.cleanup.map(|()| CleanupEvidence::for_test())
+        let identity = self.identity.clone();
+        self.cleanup.map(|()| CleanupEvidence::for_test(identity))
+    }
+}
+
+/// How the test ledger answers a launch record.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LedgerMode {
+    Accept,
+    Reject,
+    /// Block past any launch bound before accepting.
+    Stall,
+}
+/// Test launch ledger: keeps every record and, with `record`, how many
+/// executes the fake worker had already received when the record arrived.
+pub(crate) struct TestLedger {
+    pub(super) mode: LedgerMode,
+    pub(super) records: Mutex<Vec<LaunchRecord>>,
+    pub(super) executes_before_record: Mutex<Vec<u32>>,
+    pub(super) worker: Option<Arc<Record>>,
+}
+impl TestLedger {
+    pub(crate) fn new(mode: LedgerMode) -> Arc<Self> {
+        Self::observing(mode, None)
+    }
+    pub(super) fn observing(mode: LedgerMode, worker: Option<Arc<Record>>) -> Arc<Self> {
+        Arc::new(Self {
+            mode,
+            records: Mutex::new(Vec::new()),
+            executes_before_record: Mutex::new(Vec::new()),
+            worker,
+        })
+    }
+    pub(super) fn identities(&self) -> Vec<WorkerIdentity> {
+        let records = self.records.lock().unwrap();
+        records.iter().map(|r| r.identity.clone()).collect()
+    }
+}
+impl LaunchLedger for TestLedger {
+    fn record_launch(&self, record: LaunchRecord) -> Result<(), CoreError> {
+        if let Some(worker) = &self.worker {
+            self.executes_before_record
+                .lock()
+                .unwrap()
+                .push(Record::count(&worker.executes));
+        }
+        self.records.lock().unwrap().push(record);
+        match self.mode {
+            LedgerMode::Accept => Ok(()),
+            LedgerMode::Reject => Err(CoreError::Conflict),
+            LedgerMode::Stall => {
+                std::thread::sleep(std::time::Duration::from_secs(3));
+                Ok(())
+            }
+        }
     }
 }
 
@@ -146,6 +206,7 @@ impl WorkerLauncher for FakeLauncher {
                 record: self.record,
                 worker: task.abort_handle(),
                 cleanup: self.cleanup,
+                identity: test_identity(&session.session_id, "fake"),
             },
             control_from_worker: engine_read,
             control_to_worker: engine_write,

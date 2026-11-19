@@ -103,6 +103,10 @@ pub(super) enum ExecutionCommand {
         super::finalize::AttemptObservation,
         SyncSender<Result<super::cleanup::CleanupReceipt, CoreError>>,
     ),
+    Launch(
+        super::launch_identity::LaunchRecord,
+        SyncSender<Result<(), CoreError>>,
+    ),
 }
 impl Store {
     // WE-P04/06 must supply fresh readiness, input-integrity and eligibility checks
@@ -135,6 +139,10 @@ impl LiveAttempts {
     /// Drop a finished attempt's live record; only confirmed cleanup calls this.
     pub(super) fn forget(&mut self, attempt_id: &str) {
         self.0.remove(attempt_id);
+    }
+    /// Whether this running instance dispatched the attempt and still owns it.
+    pub(super) fn contains(&self, attempt_id: &str) -> bool {
+        self.0.contains_key(attempt_id)
     }
     pub(super) fn handle(
         &mut self,
@@ -185,6 +193,16 @@ impl LiveAttempts {
                     Err(CoreError::Busy)
                 } else {
                     super::finalize::observe(connection, observation)
+                };
+                let _ = reply.send(result);
+            }
+            // A launch that completes during shutdown is still recorded, so
+            // restart recovery can identify the worker (WE-005).
+            ExecutionCommand::Launch(record, reply) => {
+                let result = if cfg!(windows) {
+                    Err(CoreError::Busy)
+                } else {
+                    super::launch_identity::record_launch(connection, self, record)
                 };
                 let _ = reply.send(result);
             }

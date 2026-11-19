@@ -6,19 +6,24 @@
 //! Phase bounds, the responsiveness probe, silence warnings and progress
 //! coalescing are separate timers. Every exit path requests external
 //! whole-tree termination; acknowledgement, EOF or a pong is never cleanup.
+//! The worker's native identity is durably recorded through the
+//! `LaunchLedger` right after a confirmed spawn and before any command; an
+//! unrecorded worker is terminated without receiving one.
 //! The result is a typed `AttemptExit`; nothing here commits an outcome.
 use super::legality::{Observation, Phase, Session, SessionIdentity};
 use super::progress::{AttemptPhase, ObservationUpdate, ProgressClass, ProgressCoalescer};
 use super::types::{
     AttemptCleanup, AttemptEnd, AttemptExit, AttemptPlan, NeverLaunched, StopIntent,
 };
-use crate::store::cleanup::{CleanupEvidence, fault_code};
+use crate::store::cleanup::{AttemptRef, CleanupEvidence, fault_code};
 use crate::store::execution::DispatchRecord;
+use crate::store::launch_identity::LaunchRecord;
+use crate::store::{CoreError, Store};
 use crate::worker_protocol::{
     Assignment, CancelReason, CandidateReport, DiagnosticCapture, DiagnosticCategory, FrameDecoder,
     ProtocolViolation, decode_inbound,
 };
-use dissect3d_platform::CleanupFault;
+use dissect3d_platform::{CleanupFault, WorkerIdentity};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -27,6 +32,8 @@ use tokio::sync::watch;
 /// External termination of the whole worker tree. Only native closure
 /// evidence (`CleanupEvidence`) confirms it.
 pub(crate) trait SupervisedProcess: Send + 'static {
+    /// The native identity established at spawn (creation evidence, not PID alone).
+    fn identity(&self) -> WorkerIdentity;
     fn terminate_tree(&mut self, deadline: Instant) -> Result<CleanupEvidence, CleanupFault>;
 }
 
@@ -60,6 +67,22 @@ pub(crate) trait WorkerLauncher: Send + 'static {
         session: &SessionIdentity,
     ) -> Result<Launched<Self::Process, Self::Reader, Self::Writer, Self::Diagnostics>, LaunchFailure>;
 }
+
+/// Durable record of a launched worker's identity (blocking; Store-backed in
+/// production). It must succeed before the worker receives any command, so
+/// restart recovery and the release check can bind cleanup to this worker.
+pub(crate) trait LaunchLedger: Send + Sync + 'static {
+    fn record_launch(&self, record: LaunchRecord) -> Result<(), CoreError>;
+}
+impl LaunchLedger for Store {
+    fn record_launch(&self, record: LaunchRecord) -> Result<(), CoreError> {
+        self.record_launch_identity(record)
+    }
+}
+
+/// Safe cleanup code when the launch identity could not be durably recorded:
+/// the Store would refuse a release, so holds stay until recovery (WE-P07).
+pub(crate) const IDENTITY_UNRECORDED: &str = "cleanup_identity_unrecorded";
 
 /// Control-channel reader/writer around the pure frame codec.
 struct Control<R, W> {
@@ -383,12 +406,14 @@ async fn terminate<P: SupervisedProcess>(mut process: P, bound: Duration) -> Att
 pub(crate) struct WorkerSupervisor;
 
 impl WorkerSupervisor {
-    /// Supervise one attempt end to end. `observations` receives coalesced
-    /// phase/progress snapshots for the Store (latest only).
-    pub(crate) async fn run<L: WorkerLauncher>(
+    /// Supervise one attempt end to end. `ledger` durably records the launch
+    /// identity; `observations` receives coalesced phase/progress snapshots
+    /// for the Store (latest only).
+    pub(crate) async fn run<L: WorkerLauncher, K: LaunchLedger>(
         dispatch: &DispatchRecord,
         plan: AttemptPlan,
         launcher: L,
+        ledger: Arc<K>,
         stop: watch::Receiver<StopIntent>,
         observations: &watch::Sender<Option<ObservationUpdate>>,
     ) -> AttemptExit {
@@ -444,8 +469,9 @@ impl WorkerSupervisor {
             },
         };
         let launch_identity = identity.clone();
+        let launch_deadline = tokio::time::Instant::now() + limits.launch;
         let launch = tokio::task::spawn_blocking(move || launcher.launch(&launch_identity));
-        let launched = match tokio::time::timeout(limits.launch, launch).await {
+        let launched = match tokio::time::timeout_at(launch_deadline, launch).await {
             Ok(Ok(Ok(launched))) => launched,
             Ok(Ok(Err(LaunchFailure::NotStarted))) => {
                 note(DiagnosticCategory::LaunchFailed);
@@ -466,6 +492,28 @@ impl WorkerSupervisor {
                 );
             }
         };
+        // Record the native identity within the launch bound, before any
+        // command. Failure, rejection or timeout (the write may still land)
+        // leaves ownership undurable: no command is sent, the tree is
+        // terminated, and holds stay because the Store would refuse release.
+        let record = LaunchRecord {
+            attempt: AttemptRef::from(dispatch),
+            identity: launched.process.identity(),
+        };
+        let write = tokio::task::spawn_blocking(move || ledger.record_launch(record));
+        if !matches!(
+            tokio::time::timeout_at(launch_deadline, write).await,
+            Ok(Ok(Ok(())))
+        ) {
+            note(DiagnosticCategory::LaunchFailed);
+            note(DiagnosticCategory::CleanupFault);
+            let Launched { process, .. } = launched;
+            let cleanup = match terminate(process, limits.termination).await {
+                AttemptCleanup::Confirmed(_) => AttemptCleanup::Fault(IDENTITY_UNRECORDED),
+                other => other,
+            };
+            return ended(AttemptEnd::LaunchFailed, cleanup, &capture);
+        }
         let Launched {
             process,
             control_from_worker,

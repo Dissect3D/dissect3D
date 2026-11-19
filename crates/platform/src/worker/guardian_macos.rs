@@ -83,15 +83,35 @@ fn run() -> Result<bool, ()> {
     if unsafe { libc::sigaction(libc::SIGCHLD, &action, std::ptr::null_mut()) } != 0 {
         return Err(());
     }
-    // The worker's private ends arrive at 3, 4 and 5: move them clear of
+    // The worker's private ends arrive at 3, 4 and 5 and its read-only inputs
+    // at 6.. (listed for the worker as 5.., contiguous): move them clear of
     // every destination before opening anything else.
-    let mut channels = Vec::with_capacity(3);
-    for fd in 3..6 {
+    // Absent means none, as on Linux.
+    let listed = match std::env::var_os(dissect3d_platform::WORKER_INPUTS_ENV) {
+        Some(listed) => listed.into_string().map_err(|_| ())?,
+        None => String::new(),
+    };
+    let names: Vec<&str> = if listed.is_empty() {
+        Vec::new()
+    } else {
+        listed.split(',').collect()
+    };
+    if names.len() > dissect3d_platform::MAX_WORKER_INPUTS
+        || names
+            .iter()
+            .enumerate()
+            .any(|(index, value)| *value != (5 + index).to_string())
+    {
+        return Err(());
+    }
+    let mut channels = Vec::with_capacity(3 + names.len());
+    for fd in 3..6 + names.len() as i32 {
         channels.push(spawn_macos::relocate(fd).map_err(|_| ())?);
         if unsafe { libc::close(fd) } != 0 {
             return Err(());
         }
     }
+    let inputs = channels.split_off(3);
     let mut args = std::env::args_os().skip(1);
     let binary = std::path::PathBuf::from(args.next().ok_or(())?);
     if !binary.is_absolute() {
@@ -103,23 +123,31 @@ fn run() -> Result<bool, ()> {
         .open("/dev/null")
         .map_err(|_| ())?;
     let null = spawn_macos::relocate(null.as_raw_fd()).map_err(|_| ())?;
-    // Commands at 3, reports at 4, diagnostics as stdout and stderr.
+    // Commands at 3, reports at 4, diagnostics as stdout and stderr, inputs
+    // at 5.. in order.
+    let mut mapping = vec![
+        (null.as_raw_fd(), 0),
+        (channels[2].as_raw_fd(), 1),
+        (channels[2].as_raw_fd(), 2),
+        (channels[0].as_raw_fd(), 3),
+        (channels[1].as_raw_fd(), 4),
+    ];
+    mapping.extend(
+        inputs
+            .iter()
+            .enumerate()
+            .map(|(index, input)| (input.as_raw_fd(), 5 + index as i32)),
+    );
     let pid = spawn_macos::spawn(
         &binary,
         &args.collect::<Vec<_>>(),
         &std::env::vars_os().collect::<Vec<_>>(),
-        &[
-            (null.as_raw_fd(), 0),
-            (channels[2].as_raw_fd(), 1),
-            (channels[2].as_raw_fd(), 2),
-            (channels[0].as_raw_fd(), 3),
-            (channels[1].as_raw_fd(), 4),
-        ],
+        &mapping,
         true,
     )
     .map_err(|_| ())?;
-    // Only the worker keeps the channel open; worker exit becomes engine EOF.
-    drop(channels);
+    // Only the worker keeps the channel and inputs open; worker exit becomes engine EOF.
+    drop((channels, inputs));
     let mut group = Group {
         pid,
         unreaped: true,

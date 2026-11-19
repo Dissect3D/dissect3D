@@ -66,6 +66,11 @@ mod execution_schema;
     reason = "WE-P04/06 compose supervised finalization; dispatch stays inactive"
 )]
 pub(crate) mod finalize;
+#[allow(
+    dead_code,
+    reason = "WE-P06 composes the supervisor's launch ledger; dispatch stays inactive"
+)]
+pub(crate) mod launch_identity;
 pub(crate) mod reauthorization;
 use execution_schema::add_execution_tables;
 

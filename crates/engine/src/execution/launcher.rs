@@ -9,7 +9,10 @@
 use super::legality::SessionIdentity;
 use super::supervisor::{LaunchFailure, Launched, SupervisedProcess, WorkerLauncher};
 use crate::store::cleanup::CleanupEvidence;
-use dissect3d_platform::{CleanupFault, PlatformError, WorkerCommand, WorkerProcess};
+use crate::store::launch_identity::session_nonce;
+use dissect3d_platform::{
+    CleanupFault, PlatformError, WorkerCommand, WorkerIdentity, WorkerProcess,
+};
 use std::time::Instant;
 
 /// Carries the supervisor-created session ID for the worker's `hello`. It is
@@ -32,31 +35,14 @@ impl PlatformLauncher {
 /// lifeline fallback, never evidence.
 pub(crate) struct PlatformProcess(WorkerProcess);
 impl SupervisedProcess for PlatformProcess {
+    fn identity(&self) -> WorkerIdentity {
+        self.0.identity()
+    }
     fn terminate_tree(&mut self, deadline: Instant) -> Result<CleanupEvidence, CleanupFault> {
         self.0
             .terminate_tree(deadline)
             .map(CleanupEvidence::from_witness)
     }
-}
-
-/// The platform nonce binds the native identity and witness to this session:
-/// the 32 hex digits of `ses_<hex>` as 16 bytes.
-fn session_nonce(session_id: &str) -> Option<[u8; 16]> {
-    let hex = session_id.strip_prefix("ses_")?.as_bytes();
-    if hex.len() != 32 {
-        return None;
-    }
-    let digit = |b: u8| match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        _ => None,
-    };
-    let mut nonce = [0u8; 16];
-    let (pairs, _) = hex.as_chunks::<2>();
-    for (byte, [high, low]) in nonce.iter_mut().zip(pairs) {
-        *byte = (digit(*high)? << 4) | digit(*low)?;
-    }
-    Some(nonce)
 }
 
 impl WorkerLauncher for PlatformLauncher {
@@ -72,6 +58,8 @@ impl WorkerLauncher for PlatformLauncher {
         Launched<PlatformProcess, tokio::fs::File, tokio::fs::File, tokio::fs::File>,
         LaunchFailure,
     > {
+        // The platform nonce binds the native identity and witness to this
+        // session: the 32 hex digits of `ses_<hex>` as 16 bytes.
         let nonce = session_nonce(&session.session_id).ok_or(LaunchFailure::NotStarted)?;
         if self
             .command

@@ -34,9 +34,13 @@ fn main() {
     if unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) } != 0 {
         std::process::exit(1);
     }
-    // The worker's private pipe ends arrive at 3, 4 and 5. Move them above
-    // the stdio/control targets as CLOEXEC copies before anything else opens.
-    let Some(channels) = relocate_channels() else {
+    // The worker's private pipe ends arrive at 3, 4 and 5 and its read-only
+    // inputs at 6.. (listed for the worker as 5..). Move them above every
+    // target as CLOEXEC copies before anything else opens.
+    let Some(input_count) = input_count() else {
+        std::process::exit(1);
+    };
+    let Some((channels, inputs)) = relocate_channels(input_count) else {
         std::process::exit(1);
     };
     let mut args = std::env::args_os().skip(1);
@@ -82,19 +86,28 @@ fn main() {
         // After the checkpoint hook (its bridge may occupy 3 or 4): commands
         // at 3, reports at 4, then diagnostics over stdout and stderr.
         let [commands, reports, diagnostics] = &channels;
-        exec_linux::map_descriptors(&mut command, [commands.as_raw_fd(), reports.as_raw_fd()], 3);
-        exec_linux::map_descriptors(
-            &mut command,
-            [diagnostics.as_raw_fd(), diagnostics.as_raw_fd()],
-            1,
-        );
+        let mapped = [
+            ([commands.as_raw_fd(), reports.as_raw_fd()], 3),
+            ([diagnostics.as_raw_fd(), diagnostics.as_raw_fd()], 1),
+        ];
+        for (sources, first) in mapped {
+            if exec_linux::map_descriptor_list(&mut command, &sources, first).is_err() {
+                std::process::exit(1);
+            }
+        }
+        // Last, so no earlier target can clobber a relocated input.
+        let sources: Vec<_> = inputs.iter().map(|input| input.as_raw_fd()).collect();
+        if exec_linux::map_descriptor_list(&mut command, &sources, 5).is_err() {
+            std::process::exit(1);
+        }
     }
-    if exec_linux::configure(&mut command, std::env::vars_os().collect(), 5).is_err() {
+    let sealed = 5 + input_count as u32;
+    if exec_linux::configure(&mut command, std::env::vars_os().collect(), sealed).is_err() {
         std::process::exit(1);
     }
     let spawned = command.spawn();
-    // Only the worker keeps the channel open; worker exit becomes engine EOF.
-    drop(channels);
+    // Only the worker keeps the channel and inputs open; worker exit becomes engine EOF.
+    drop((channels, inputs));
     let Ok(child) = spawned else {
         std::process::exit(1);
     };
@@ -149,21 +162,49 @@ fn main() {
     }
 }
 
+/// The number of inherited inputs, from the platform-set list, which must be
+/// exactly the contiguous worker descriptors 5.. in order. Absent means none:
+/// nothing past descriptor 5 is then relocated, and the seal closes the rest.
 #[cfg(target_os = "linux")]
-fn relocate_channels() -> Option<[std::os::fd::OwnedFd; 3]> {
+fn input_count() -> Option<usize> {
+    let Some(listed) = std::env::var_os(dissect3d_platform::WORKER_INPUTS_ENV) else {
+        return Some(0);
+    };
+    let listed = listed.into_string().ok()?;
+    if listed.is_empty() {
+        return Some(0);
+    }
+    let values: Vec<&str> = listed.split(',').collect();
+    if values.len() > dissect3d_platform::MAX_WORKER_INPUTS {
+        return None;
+    }
+    let contiguous = values
+        .iter()
+        .enumerate()
+        .all(|(index, value)| *value == (5 + index).to_string());
+    contiguous.then_some(values.len())
+}
+
+/// Move the three channel ends (3, 4, 5) and `inputs` input descriptors
+/// (6..) clear of every worker target.
+#[cfg(target_os = "linux")]
+fn relocate_channels(
+    inputs: usize,
+) -> Option<([std::os::fd::OwnedFd; 3], Vec<std::os::fd::OwnedFd>)> {
     use std::os::fd::FromRawFd;
-    let mut moved = Vec::with_capacity(3);
-    for fd in 3..6 {
+    let mut moved = Vec::with_capacity(3 + inputs);
+    for fd in 3..6 + inputs as i32 {
         // SAFETY: fcntl/close on fixed descriptor numbers this process was
         // launched with; an absent descriptor fails F_DUPFD_CLOEXEC.
-        let copy = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 10) };
+        let copy = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 64) };
         if copy < 0 || unsafe { libc::close(fd) } != 0 {
             return None;
         }
         // SAFETY: F_DUPFD_CLOEXEC returned a new descriptor owned here.
         moved.push(unsafe { std::os::fd::OwnedFd::from_raw_fd(copy) });
     }
-    moved.try_into().ok()
+    let inputs = moved.split_off(3);
+    Some((moved.try_into().ok()?, inputs))
 }
 
 #[cfg(target_os = "linux")]

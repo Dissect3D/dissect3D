@@ -8,6 +8,7 @@
 use super::execution::{
     DispatchRecord, ExecutionCommand, LiveAttempts, is_safe_code, record_event,
 };
+use super::launch_identity::{CleanupBasis, verify_release};
 use super::*;
 use dissect3d_api::JobId;
 
@@ -35,8 +36,8 @@ impl From<&DispatchRecord> for AttemptRef {
 /// Only a native `CleanupConfirmed` witness mints it in production; nothing
 /// public, no worker message and no enum tag can. Acknowledgement, EOF, a pong
 /// or one PID disappearing is not cleanup. It keeps the witness's native
-/// identity so the release point can bind it to the attempt; WE-P07 adds
-/// restart-recovery evidence.
+/// identity; release requires it to equal the identity recorded at launch
+/// (`launch_identity`). WE-P07 adds restart-recovery evidence.
 #[derive(Debug)]
 pub(crate) struct CleanupEvidence {
     identity: dissect3d_platform::WorkerIdentity,
@@ -51,18 +52,24 @@ impl CleanupEvidence {
     pub(crate) fn identity(&self) -> &dissect3d_platform::WorkerIdentity {
         &self.identity
     }
+    /// Test-only evidence for a given identity (see `test_identity`).
     #[cfg(test)]
-    pub(crate) fn for_test() -> Self {
-        Self {
-            identity: dissect3d_platform::WorkerIdentity {
-                process: dissect3d_platform::ProcessIdentity {
-                    pid: 0,
-                    start_marker: "test".into(),
-                },
-                guardian: None,
-                session_nonce: [0; 16],
-            },
-        }
+    pub(crate) fn for_test(identity: dissect3d_platform::WorkerIdentity) -> Self {
+        Self { identity }
+    }
+}
+
+/// A well-formed test identity bound to `session_id`, as a launch would
+/// report it. `marker` distinguishes otherwise identical identities.
+#[cfg(test)]
+pub(crate) fn test_identity(session_id: &str, marker: &str) -> dissect3d_platform::WorkerIdentity {
+    dissect3d_platform::WorkerIdentity {
+        process: dissect3d_platform::ProcessIdentity {
+            pid: 4242,
+            start_marker: format!("test-start-{marker}"),
+        },
+        guardian: None,
+        session_nonce: super::launch_identity::session_nonce(session_id).unwrap_or([0; 16]),
     }
 }
 
@@ -194,18 +201,16 @@ pub(super) fn read_attempt(
 
 /// The only writer of cleanup facts: reservations, attempt and job cleanup
 /// columns. Callers add their state change, revision and event in the same
-/// transaction. `next` is `confirmed` or `fault`.
+/// transaction. A release whose basis disagrees with the recorded launch
+/// identity rejects before the first write.
 pub(super) fn write_cleanup_facts(
     tx: &Transaction<'_>,
     attempt: &AttemptRef,
-    next: &str,
-    reason: Option<&str>,
+    basis: CleanupBasis<'_>,
 ) -> Result<(), CoreError> {
+    verify_release(tx, attempt, basis)?;
+    let (next, reason) = (basis.status(), basis.reason());
     if next == "confirmed" {
-        // OPEN (WE-P04 real-process checkpoint): nothing records the attempt's
-        // native identity at launch yet (`job_attempts.native_identity_json` is
-        // unwritten). Before release goes live, compare `CleanupEvidence::identity`
-        // with that recorded identity and reject a mismatch without writing.
         sql(tx.execute(
             "UPDATE resource_reservations SET released=1 WHERE attempt_id=?1 AND released=0",
             [attempt.attempt_id.as_str()],
@@ -228,13 +233,15 @@ pub(super) fn cleanup_transition(
     tx: &Transaction<'_>,
     attempt: &AttemptRef,
     facts: &AttemptFacts,
-    next: &str,
-    reason: Option<&str>,
+    basis: CleanupBasis<'_>,
 ) -> Result<CleanupReceipt, CoreError> {
     // Running work is finalized with its outcome (`store::finalize`), never here.
     if facts.state != "cancel_requested" && !TERMINAL.contains(&facts.state.as_str()) {
         return Err(CoreError::Conflict);
     }
+    // Even a repeat must agree with the launch record.
+    verify_release(tx, attempt, basis)?;
+    let (next, reason) = (basis.status(), basis.reason());
     let unchanged = CleanupReceipt {
         snapshot_revision: facts.revision,
         changed: false,
@@ -247,7 +254,7 @@ pub(super) fn cleanup_transition(
         ("pending" | "fault", _) => {}
         _ => return Err(CoreError::InvalidStore),
     }
-    write_cleanup_facts(tx, attempt, next, reason)?;
+    write_cleanup_facts(tx, attempt, basis)?;
     // Only an active cancellation completes here, and only with confirmed
     // termination. Terminal outcomes never change.
     let completes_cancel = next == "confirmed" && facts.state == "cancel_requested";
@@ -275,14 +282,14 @@ pub(super) fn record_cleanup(
     let attempt = &report.attempt;
     let tx = sql(db.transaction_with_behavior(TransactionBehavior::Immediate))?;
     let facts = read_attempt(&tx, attempt)?;
-    let (next, reason) = match &report.outcome {
-        CleanupOutcome::Confirmed(_) => ("confirmed", None),
-        CleanupOutcome::Fault { reason } => ("fault", Some(reason.as_str())),
+    let basis = match &report.outcome {
+        CleanupOutcome::Confirmed(evidence) => CleanupBasis::Confirmed(evidence),
+        CleanupOutcome::Fault { reason } => CleanupBasis::Fault(reason),
     };
-    let receipt = cleanup_transition(&tx, attempt, &facts, next, reason)?;
+    let receipt = cleanup_transition(&tx, attempt, &facts, basis)?;
     if receipt.changed {
         sql(tx.commit())?;
-        if next == "confirmed" {
+        if basis.status() == "confirmed" {
             // The attempt is over and no publication follows a terminal job.
             live.forget(&attempt.attempt_id);
         }
