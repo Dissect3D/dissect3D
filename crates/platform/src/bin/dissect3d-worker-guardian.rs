@@ -34,6 +34,11 @@ fn main() {
     if unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) } != 0 {
         std::process::exit(1);
     }
+    // The worker's private pipe ends arrive at 3, 4 and 5. Move them above
+    // the stdio/control targets as CLOEXEC copies before anything else opens.
+    let Some(channels) = relocate_channels() else {
+        std::process::exit(1);
+    };
     let mut args = std::env::args_os().skip(1);
     let Some(binary) = args.next() else {
         std::process::exit(1);
@@ -72,10 +77,25 @@ fn main() {
     if !install_preexec_checkpoint(&mut command) {
         std::process::exit(1);
     }
-    if exec_linux::configure(&mut command, std::env::vars_os().collect()).is_err() {
+    {
+        use std::os::fd::AsRawFd;
+        // After the checkpoint hook (its bridge may occupy 3 or 4): commands
+        // at 3, reports at 4, then diagnostics over stdout and stderr.
+        let [commands, reports, diagnostics] = &channels;
+        exec_linux::map_descriptors(&mut command, [commands.as_raw_fd(), reports.as_raw_fd()], 3);
+        exec_linux::map_descriptors(
+            &mut command,
+            [diagnostics.as_raw_fd(), diagnostics.as_raw_fd()],
+            1,
+        );
+    }
+    if exec_linux::configure(&mut command, std::env::vars_os().collect(), 5).is_err() {
         std::process::exit(1);
     }
-    let Ok(child) = command.spawn() else {
+    let spawned = command.spawn();
+    // Only the worker keeps the channel open; worker exit becomes engine EOF.
+    drop(channels);
+    let Ok(child) = spawned else {
         std::process::exit(1);
     };
     let pid = child.id() as i32;
@@ -127,6 +147,23 @@ fn main() {
         }
         std::thread::sleep(Duration::from_millis(5));
     }
+}
+
+#[cfg(target_os = "linux")]
+fn relocate_channels() -> Option<[std::os::fd::OwnedFd; 3]> {
+    use std::os::fd::FromRawFd;
+    let mut moved = Vec::with_capacity(3);
+    for fd in 3..6 {
+        // SAFETY: fcntl/close on fixed descriptor numbers this process was
+        // launched with; an absent descriptor fails F_DUPFD_CLOEXEC.
+        let copy = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 10) };
+        if copy < 0 || unsafe { libc::close(fd) } != 0 {
+            return None;
+        }
+        // SAFETY: F_DUPFD_CLOEXEC returned a new descriptor owned here.
+        moved.push(unsafe { std::os::fd::OwnedFd::from_raw_fd(copy) });
+    }
+    moved.try_into().ok()
 }
 
 #[cfg(target_os = "linux")]

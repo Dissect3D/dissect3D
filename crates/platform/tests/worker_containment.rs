@@ -29,6 +29,37 @@ fn worker_child() {
     if std::env::var_os("D3D_WORKER_EARLY_EXIT").is_some() {
         std::process::exit(0);
     }
+    if std::env::var_os("D3D_WORKER_ECHO").is_some() {
+        echo_worker();
+    }
+    if let Some(root) = std::env::var_os("D3D_WORKER_STORM") {
+        let root = std::path::PathBuf::from(root);
+        if std::env::var_os("D3D_STORM_CHILD").is_some() {
+            let id = current_process_identity().unwrap();
+            let name = format!("{}-{}", id.pid, id.start_marker);
+            let _ = std::fs::write(root.join(format!("{name}.tmp")), &name);
+            let _ = std::fs::rename(
+                root.join(format!("{name}.tmp")),
+                root.join(format!("{name}.id")),
+            );
+            loop {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+        // Keep creating members, before and during termination.
+        loop {
+            if let Ok(mut child) = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "worker_child", "--nocapture"])
+                .env("D3D_STORM_CHILD", "1")
+                .spawn()
+            {
+                std::thread::spawn(move || {
+                    let _ = child.wait();
+                });
+            }
+            let _ = std::fs::write(root.join("storming"), b"1");
+        }
+    }
     #[cfg(windows)]
     if let Ok(handle) = std::env::var("D3D_FORBIDDEN_HANDLE") {
         let handle = handle.parse::<usize>().unwrap() as *mut std::ffi::c_void;
@@ -69,6 +100,163 @@ fn worker_child() {
     }
     loop {
         std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Worker side of the private channel checks: upstream-style noise goes to
+/// stdout/stderr, one command is echoed on the report pipe.
+fn echo_worker() -> ! {
+    use std::io::{BufRead, Write};
+    let (commands, mut reports) = dissect3d_platform::worker_control_channels().unwrap();
+    // A second take in one process is refused (no double ownership).
+    assert!(dissect3d_platform::worker_control_channels().is_err());
+    println!("noise-out");
+    eprintln!("noise-err");
+    let mut line = String::new();
+    std::io::BufReader::new(commands)
+        .read_line(&mut line)
+        .unwrap();
+    reports
+        .write_all(format!("echo {line}").as_bytes())
+        .unwrap();
+    if let Some(root) = std::env::var_os("D3D_ECHO_DESCENDANT") {
+        // A live descendant must not hold the control channel open.
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "worker_child", "--nocapture"])
+            .env_remove("D3D_WORKER_ECHO")
+            .env("D3D_WORKER_TREE", root)
+            .env("D3D_WORKER_DEPTH", "2")
+            .spawn()
+            .unwrap();
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !std::path::Path::new(&std::env::var_os("D3D_ECHO_DESCENDANT").unwrap())
+            .join("2.id")
+            .exists()
+        {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::process::exit(0);
+    }
+    loop {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Read until end of file on a helper thread, bounded by `timeout`.
+fn read_to_end_within(mut file: std::fs::File, timeout: Duration) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let (send, receive) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = file.read_to_end(&mut bytes);
+        let _ = send.send(bytes);
+    });
+    receive.recv_timeout(timeout).ok()
+}
+
+fn echo_command() -> WorkerCommand {
+    let mut command = command();
+    command
+        .environment
+        .push(("D3D_WORKER_ECHO".into(), "1".into()));
+    command
+}
+
+#[test]
+fn private_control_channel_is_separate_from_diagnostics() {
+    use std::io::{BufRead, Write};
+    let mut worker = WorkerProcess::launch(echo_command(), [14; 16]).unwrap();
+    let channels = worker.take_channels().unwrap();
+    assert!(worker.take_channels().is_none());
+    let mut to_worker = channels.to_worker;
+    to_worker
+        .write_all(
+            b"hello
+",
+        )
+        .unwrap();
+    let (send, receive) = std::sync::mpsc::channel();
+    let from_worker = channels.from_worker;
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        let _ = std::io::BufReader::new(from_worker).read_line(&mut line);
+        let _ = send.send(line);
+    });
+    let echoed = receive.recv_timeout(Duration::from_secs(10)).unwrap();
+    worker
+        .terminate_tree(Instant::now() + Duration::from_secs(5))
+        .unwrap();
+    // Only the protocol line crosses the control pipe; harness and upstream
+    // output reach diagnostics only.
+    assert_eq!(
+        echoed,
+        "echo hello
+"
+    );
+    let diagnostics = String::from_utf8(
+        read_to_end_within(channels.diagnostics, Duration::from_secs(5)).unwrap(),
+    )
+    .unwrap();
+    assert!(diagnostics.contains("noise-out"), "{diagnostics}");
+    assert!(diagnostics.contains("noise-err"), "{diagnostics}");
+    assert!(!diagnostics.contains("echo hello"));
+}
+
+#[test]
+fn worker_descendant_never_holds_the_control_channel() {
+    use std::io::Write;
+    let temp = tempfile::tempdir().unwrap();
+    let mut command = echo_command();
+    command
+        .environment
+        .push(("D3D_ECHO_DESCENDANT".into(), temp.path().as_os_str().into()));
+    let mut worker = WorkerProcess::launch(command, [15; 16]).unwrap();
+    let channels = worker.take_channels().unwrap();
+    let mut to_worker = channels.to_worker;
+    to_worker
+        .write_all(
+            b"go
+",
+        )
+        .unwrap();
+    // The worker exits while its descendant lives: reports reach end of file.
+    let reports = read_to_end_within(channels.from_worker, Duration::from_secs(10));
+    let descendant = std::fs::read_to_string(temp.path().join("2.id")).unwrap();
+    let (pid, marker) = descendant.split_once(' ').unwrap();
+    let descendant = ProcessIdentity {
+        pid: pid.parse().unwrap(),
+        start_marker: marker.into(),
+    };
+    let alive = dissect3d_platform::process_matches(&descendant).unwrap();
+    let watcher = ProcessWatcher::new(&descendant).ok();
+    let cleanup = worker.terminate_tree(Instant::now() + Duration::from_secs(5));
+    assert_eq!(
+        reports.as_deref(),
+        Some(
+            &b"echo go
+"[..]
+        )
+    );
+    assert!(
+        alive,
+        "descendant must still be running when EOF is observed"
+    );
+    assert!(cleanup.is_ok());
+    if let Some(watcher) = watcher {
+        assert!(watcher.wait(Duration::from_secs(2)).unwrap());
+    }
+}
+
+#[test]
+fn caller_cannot_supply_the_reserved_control_variable() {
+    for key in ["DISSECT3D_WORKER_CONTROL", "dissect3d_worker_control"] {
+        let mut command = command();
+        command.environment.push((key.into(), "3:4".into()));
+        assert!(WorkerProcess::launch(command, [16; 16]).is_err());
     }
 }
 
@@ -118,6 +306,68 @@ fn cleanup_covers_real_child_and_grandchild_with_blocked_worker() {
         .unwrap();
     for watcher in watchers {
         assert!(watcher.wait(Duration::from_secs(2)).unwrap());
+    }
+}
+
+#[test]
+fn confirmation_means_every_tree_member_has_already_exited() {
+    // Regression (2026-11-19): Windows confirmed on a zero active-process
+    // count while a member's process object was still exiting.
+    for nonce in 30..35u8 {
+        let temp = tempfile::tempdir().unwrap();
+        let mut worker = WorkerProcess::launch(tree_command(temp.path()), [nonce; 16]).unwrap();
+        let watchers: Vec<_> = tree_ready(temp.path())
+            .iter()
+            .map(|id| ProcessWatcher::new(id).unwrap())
+            .collect();
+        worker
+            .terminate_tree(Instant::now() + Duration::from_secs(5))
+            .unwrap();
+        for watcher in watchers {
+            assert!(
+                watcher.wait(Duration::ZERO).unwrap(),
+                "member still running"
+            );
+        }
+    }
+}
+
+#[test]
+fn members_created_during_termination_are_covered_by_confirmation() {
+    // Regression (2026-11-19 QA): a member created after the membership
+    // snapshot could be missed. Every recorded member must already be gone.
+    for nonce in 40..43u8 {
+        let temp = tempfile::tempdir().unwrap();
+        let mut command = command();
+        command
+            .environment
+            .push(("D3D_WORKER_STORM".into(), temp.path().as_os_str().into()));
+        let mut worker = WorkerProcess::launch(command, [nonce; 16]).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while std::fs::read_dir(temp.path()).unwrap().count() < 4 {
+            assert!(Instant::now() < deadline, "storm did not start");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        worker
+            .terminate_tree(Instant::now() + Duration::from_secs(5))
+            .unwrap();
+        for entry in std::fs::read_dir(temp.path()).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|e| e.to_str()) != Some("id") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).unwrap();
+            let (pid, marker) = text.split_once('-').unwrap();
+            let id = ProcessIdentity {
+                pid: pid.parse().unwrap(),
+                start_marker: marker.into(),
+            };
+            match ProcessWatcher::new(&id) {
+                Ok(watcher) => assert!(watcher.wait(Duration::ZERO).unwrap(), "member running"),
+                Err(dissect3d_platform::PlatformError::NotFound) => {}
+                Err(error) => panic!("watcher failed: {error:?}"),
+            }
+        }
     }
 }
 
@@ -343,7 +593,10 @@ fn guardian_report_failure_cleans_worker_instead_of_panicking() {
         .write(true)
         .open("/dev/full")
         .unwrap();
-    let mut guardian = Command::new(env!("CARGO_BIN_EXE_dissect3d-worker-guardian"))
+    // The guardian's launch contract: the worker's pipe ends at 3, 4 and 5.
+    let channels = std::fs::File::open("/dev/null").unwrap();
+    let mut launch = Command::new(env!("CARGO_BIN_EXE_dissect3d-worker-guardian"));
+    launch
         .arg(std::env::current_exe().unwrap())
         .args(["--exact", "worker_child", "--nocapture"])
         .env("D3D_WORKER_CHILD", "1")
@@ -351,9 +604,29 @@ fn guardian_report_failure_cleans_worker_instead_of_panicking() {
         .env("D3D_WORKER_DEPTH", "2")
         .stdin(Stdio::piped())
         .stdout(output)
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+        .stderr(Stdio::null());
+    {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::process::CommandExt;
+        let source = channels.as_raw_fd();
+        // SAFETY: only fcntl/dup2 run in the forked child.
+        unsafe {
+            launch.pre_exec(move || {
+                let copy = libc::fcntl(source, libc::F_DUPFD_CLOEXEC, 10);
+                if copy < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                for target in 3..6 {
+                    if libc::dup2(copy, target) < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                }
+                Ok(())
+            });
+        }
+    }
+    let mut guardian = launch.spawn().unwrap();
+    drop(channels);
     let status = guardian.wait().unwrap();
     std::thread::sleep(Duration::from_millis(100));
     let mut exited = true;

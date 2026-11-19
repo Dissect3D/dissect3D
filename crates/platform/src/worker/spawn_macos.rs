@@ -17,7 +17,7 @@ pub(super) fn spawn(
     program: &Path,
     args: &[OsString],
     environment: &[(OsString, OsString)],
-    stdio: [RawFd; 3],
+    descriptors: &[(RawFd, i32)],
     suspended: bool,
 ) -> Result<i32, PlatformError> {
     let string = |value: &std::ffi::OsStr| {
@@ -90,9 +90,14 @@ pub(super) fn spawn(
         };
     check(unsafe { libc::posix_spawnattr_setflags(&mut attributes.0, flags as i16) })?;
     check(unsafe { libc::posix_spawnattr_setpgroup(&mut attributes.0, 0) })?;
-    for (destination, source) in stdio.into_iter().enumerate() {
+    // Actions run in order: a source must not be an earlier destination.
+    // Callers pass sources relocated above every destination.
+    for &(source, destination) in descriptors {
+        if descriptors.iter().any(|&(_, target)| target == source) {
+            return Err(PlatformError::InvalidPath);
+        }
         check(unsafe {
-            libc::posix_spawn_file_actions_adddup2(&mut files.0, source, destination as i32)
+            libc::posix_spawn_file_actions_adddup2(&mut files.0, source, destination)
         })?;
     }
     let mut pid = 0;
@@ -133,4 +138,16 @@ pub(super) fn observe(pid: i32) -> Result<ProcessIdentity, PlatformError> {
             info.pbi_start_tvsec, info.pbi_start_tvusec
         ),
     })
+}
+
+/// A CLOEXEC copy of `fd` at or above 10, clear of every mapped destination.
+pub(super) fn relocate(fd: RawFd) -> Result<std::os::fd::OwnedFd, PlatformError> {
+    use std::os::fd::FromRawFd;
+    // SAFETY: F_DUPFD_CLOEXEC creates a new descriptor or fails.
+    let copy = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 10) };
+    if copy < 0 {
+        return Err(PlatformError::Io);
+    }
+    // SAFETY: the new descriptor is owned only here.
+    Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(copy) })
 }

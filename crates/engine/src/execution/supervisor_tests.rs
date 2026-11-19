@@ -1,6 +1,6 @@
 //! WE-P04 supervisor core with the in-memory fake worker. These establish
 //! codec/legality/timer behavior only: not a provider, a real process or
-//! process-tree cleanup (those are the next checkpoint's process fixtures).
+//! process-tree cleanup (see `process_fixture_tests` for real processes).
 use super::fake_worker::{Behavior, FakeLauncher, LaunchMode, OnExecute, OnLoad, Record};
 use super::legality_tests::expectation;
 use super::progress::{AttemptPhase, ObservationUpdate};
@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::watch;
 
-fn limits() -> SupervisionLimits {
+pub(super) fn limits() -> SupervisionLimits {
     SupervisionLimits {
         launch: Duration::from_secs(2),
         handshake: Duration::from_secs(2),
@@ -27,7 +27,7 @@ fn limits() -> SupervisionLimits {
         progress_interval: Duration::from_millis(50),
     }
 }
-fn plan(limits: SupervisionLimits) -> AttemptPlan {
+pub(super) fn plan(limits: SupervisionLimits) -> AttemptPlan {
     AttemptPlan {
         expectation: expectation(),
         resolution_handle: "res:1".into(),
@@ -43,7 +43,7 @@ fn plan(limits: SupervisionLimits) -> AttemptPlan {
         limits,
     }
 }
-fn dispatch(timeout: Option<Duration>) -> DispatchRecord {
+pub(super) fn dispatch(timeout: Option<Duration>) -> DispatchRecord {
     DispatchRecord {
         job_id: JobId::parse(random_id("job_")).unwrap(),
         attempt_id: random_id("att_"),
@@ -57,7 +57,7 @@ fn dispatch(timeout: Option<Duration>) -> DispatchRecord {
 }
 
 /// Harness bound: a regression fails instead of hanging the suite.
-async fn bounded(run: impl std::future::Future<Output = AttemptExit>) -> AttemptExit {
+pub(super) async fn bounded(run: impl std::future::Future<Output = AttemptExit>) -> AttemptExit {
     tokio::time::timeout(Duration::from_secs(15), run)
         .await
         .expect("supervision ended within the harness bound")

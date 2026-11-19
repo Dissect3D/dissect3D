@@ -1,5 +1,5 @@
 //! Darwin guardian client. Forked-descendant closure remains fail-closed.
-use super::{CleanupFault, WorkerCommand};
+use super::{CleanupFault, WORKER_CONTROL_ENV, WorkerChannels, WorkerCommand};
 use crate::{PlatformError, ProcessIdentity};
 use std::io::{BufRead, BufReader};
 use std::os::fd::AsRawFd;
@@ -18,7 +18,15 @@ pub(super) struct Worker {
 impl Worker {
     pub(super) fn launch(
         command: WorkerCommand,
-    ) -> Result<(Self, ProcessIdentity, Option<ProcessIdentity>), PlatformError> {
+    ) -> Result<
+        (
+            Self,
+            ProcessIdentity,
+            Option<ProcessIdentity>,
+            WorkerChannels,
+        ),
+        PlatformError,
+    > {
         // This client owns raw waitpid state. A competing SIGCHLD reaper could
         // consume the guardian and allow PID reuse before our reaper runs.
         let mut disposition: libc::sigaction = unsafe { std::mem::zeroed() };
@@ -42,15 +50,38 @@ impl Worker {
         let args = std::iter::once(command.executable.into_os_string())
             .chain(command.args)
             .collect::<Vec<_>>();
-        let pid = spawn_macos::spawn(
-            &helper,
-            &args,
-            &command.environment,
-            [input.as_raw_fd(), report.as_raw_fd(), null.as_raw_fd()],
-            false,
-        )?;
-        drop(input);
-        drop(report);
+        // Worker pipe ends reach the guardian at 3, 4 and 5 (see the guardian).
+        let (to_worker, worker_commands) = UnixStream::pair().map_err(|_| PlatformError::Io)?;
+        let (from_worker, worker_reports) = UnixStream::pair().map_err(|_| PlatformError::Io)?;
+        let (diagnostics, worker_diagnostics) =
+            UnixStream::pair().map_err(|_| PlatformError::Io)?;
+        let mut environment = command.environment;
+        environment.push((WORKER_CONTROL_ENV.into(), "3:4".into()));
+        let sources = [
+            input.as_raw_fd(),
+            report.as_raw_fd(),
+            null.as_raw_fd(),
+            worker_commands.as_raw_fd(),
+            worker_reports.as_raw_fd(),
+            worker_diagnostics.as_raw_fd(),
+        ]
+        .map(spawn_macos::relocate)
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+        let mapping: Vec<_> = sources
+            .iter()
+            .enumerate()
+            .map(|(target, fd)| (fd.as_raw_fd(), target as i32))
+            .collect();
+        let pid = spawn_macos::spawn(&helper, &args, &environment, &mapping, false)?;
+        drop(sources);
+        drop((
+            input,
+            report,
+            worker_commands,
+            worker_reports,
+            worker_diagnostics,
+        ));
         let (send, reports) = mpsc::sync_channel(2);
         // Construct the ownership guard before any fallible identity/readiness work.
         let worker = Self {
@@ -96,7 +127,12 @@ impl Worker {
         if !crate::process_matches(&guardian)? || !crate::process_matches(&process)? {
             return Err(PlatformError::Io);
         }
-        Ok((worker, process, Some(guardian)))
+        let channels = WorkerChannels {
+            to_worker: std::fs::File::from(std::os::fd::OwnedFd::from(to_worker)),
+            from_worker: std::fs::File::from(std::os::fd::OwnedFd::from(from_worker)),
+            diagnostics: std::fs::File::from(std::os::fd::OwnedFd::from(diagnostics)),
+        };
+        Ok((worker, process, Some(guardian), channels))
     }
 
     pub(super) fn terminate(&mut self, deadline: Instant) -> Result<(), CleanupFault> {

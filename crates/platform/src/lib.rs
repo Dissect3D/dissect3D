@@ -29,4 +29,7 @@ pub use process::{
     launch_engine, process_matches, wait_for_process_exit,
 };
 pub use root::{OwnedRoot, PlatformError, RootPurpose};
-pub use worker::{CleanupConfirmed, CleanupFault, WorkerCommand, WorkerIdentity, WorkerProcess};
+pub use worker::{
+    CleanupConfirmed, CleanupFault, WORKER_CONTROL_ENV, WorkerChannels, WorkerCommand,
+    WorkerIdentity, WorkerProcess, worker_control_channels,
+};

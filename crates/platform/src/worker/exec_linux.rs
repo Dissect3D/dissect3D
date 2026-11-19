@@ -4,6 +4,7 @@ use std::os::unix::{ffi::OsStrExt, process::CommandExt};
 use std::process::Command;
 
 struct Image {
+    first_sealed: u32,
     binary: CString,
     _arguments: Vec<CString>,
     _environment: Vec<CString>,
@@ -20,8 +21,16 @@ unsafe impl Sync for Image {}
 impl Image {
     fn execute(&self) -> std::io::Result<()> {
         // CLOEXEC retains Command's exec-error pipe until successful exec, while
-        // sealing all engine/helper descriptors outside the explicit stdio set.
-        if unsafe { libc::close_range(3, u32::MAX, libc::CLOSE_RANGE_CLOEXEC as i32) } != 0 {
+        // sealing all engine/helper descriptors outside the explicit set below
+        // `first_sealed` (stdio plus any private channels mapped by the caller).
+        if unsafe {
+            libc::close_range(
+                self.first_sealed,
+                u32::MAX,
+                libc::CLOSE_RANGE_CLOEXEC as i32,
+            )
+        } != 0
+        {
             return Err(std::io::Error::last_os_error());
         }
         // SAFETY: all arrays are terminated and their owned CString storage is
@@ -33,10 +42,16 @@ impl Image {
     }
 }
 
+/// Register the exact-exec hook. Register any descriptor-mapping hook first:
+/// this one seals every descriptor from `first_sealed` (minimum 3) and execs.
 pub(super) fn configure(
     command: &mut Command,
     environment: Vec<(OsString, OsString)>,
+    first_sealed: u32,
 ) -> std::io::Result<()> {
+    if first_sealed < 3 {
+        return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
+    }
     let string = |value: &std::ffi::OsStr| {
         CString::new(value.as_bytes())
             .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))
@@ -66,6 +81,7 @@ pub(super) fn configure(
         .chain(Some(std::ptr::null()))
         .collect();
     let image = Image {
+        first_sealed,
         binary,
         _arguments: arguments,
         _environment: environment,
@@ -78,4 +94,33 @@ pub(super) fn configure(
         command.pre_exec(move || image.execute());
     }
     Ok(())
+}
+
+/// Child-only hook: place `sources[i]` at descriptor `first + i`, without
+/// CLOEXEC. Sources are first copied above every target, so a source that
+/// already occupies another target cannot be clobbered. Only async-signal-safe
+/// fcntl/dup2 run after fork.
+pub(super) fn map_descriptors<const N: usize>(
+    command: &mut Command,
+    sources: [std::os::fd::RawFd; N],
+    first: std::os::fd::RawFd,
+) {
+    // SAFETY: the closure performs only fcntl/dup2 on captured integers.
+    unsafe {
+        command.pre_exec(move || {
+            let mut copies = [0; N];
+            for (copy, source) in copies.iter_mut().zip(sources) {
+                *copy = libc::fcntl(source, libc::F_DUPFD_CLOEXEC, first + N as i32);
+                if *copy < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            for (offset, copy) in copies.into_iter().enumerate() {
+                if libc::dup2(copy, first + offset as i32) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            Ok(())
+        });
+    }
 }

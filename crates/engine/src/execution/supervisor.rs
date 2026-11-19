@@ -47,8 +47,8 @@ pub(crate) struct Launched<P, R, W, D> {
 }
 
 /// Blocking native launch of exactly one worker; runs off the runtime under
-/// the launch bound. The real platform launcher arrives with the WE-P04
-/// process-fixture checkpoint.
+/// the launch bound. `launcher::PlatformLauncher` is the native implementation;
+/// the in-memory fake exists only for codec/legality/timer tests.
 pub(crate) trait WorkerLauncher: Send + 'static {
     type Process: SupervisedProcess;
     type Reader: AsyncRead + Unpin + Send + 'static;

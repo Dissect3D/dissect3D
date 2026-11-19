@@ -154,7 +154,7 @@ impl WorkerLauncher for FakeLauncher {
     }
 }
 
-fn line(session: &str, kind: &str, payload: Value, extra: &[(&str, Value)]) -> Vec<u8> {
+pub(super) fn line(session: &str, kind: &str, payload: Value, extra: &[(&str, Value)]) -> Vec<u8> {
     let mut object = serde_json::Map::new();
     object.insert("protocol_version".into(), "d3d-worker/1".into());
     object.insert("kind".into(), kind.into());
