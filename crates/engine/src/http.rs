@@ -80,7 +80,7 @@ type PreparedReadinessOption = ();
 
 /// Authenticated data placed on a request after the access gate succeeds.
 #[derive(Clone)]
-pub(crate) struct AuthorizedRequest {
+struct AuthorizedRequest {
     pub(crate) identity: StoreIdentity,
     pub(crate) context: AuthContext,
 }
@@ -353,7 +353,7 @@ pub enum HttpError {
 /// short core request deadline.
 #[derive(Clone)]
 #[cfg(unix)]
-pub(super) struct UploadDeadlineSignal(Arc<Mutex<Option<oneshot::Sender<()>>>>);
+struct UploadDeadlineSignal(Arc<Mutex<Option<oneshot::Sender<()>>>>);
 
 #[cfg(unix)]
 impl UploadDeadlineSignal {
@@ -391,7 +391,7 @@ async fn serve_connection(stream: TcpStream, acceptor: TlsAcceptor, router: Rout
         .await;
 }
 
-pub(crate) async fn engine_info(
+async fn engine_info(
     identity: StoreIdentity,
     context: AuthContext,
     policy: &CorePolicy,

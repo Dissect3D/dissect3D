@@ -280,11 +280,11 @@ pub(super) fn validate_schema_tree(
     Ok(())
 }
 
-pub(super) fn has_unknown_schema_keyword(root: &Value, value: &Value, edges: usize) -> bool {
+fn has_unknown_schema_keyword(root: &Value, value: &Value, edges: usize) -> bool {
     unknown_schema_keyword(root, value, edges, &mut BTreeMap::new())
 }
 
-pub(super) fn unknown_schema_keyword(
+fn unknown_schema_keyword(
     root: &Value,
     value: &Value,
     edges: usize,
@@ -429,7 +429,7 @@ pub(super) fn validate_schema_refs(root: &Value) -> Result<(), ()> {
     Ok(())
 }
 
-pub(super) fn value_matches(
+fn value_matches(
     root: &Value,
     schema: &Value,
     value: &Value,
@@ -540,7 +540,7 @@ pub(super) fn value_matches(
     if unknown { None } else { Some(true) }
 }
 
-pub(super) fn matches_type(name: &str, value: &Value) -> bool {
+fn matches_type(name: &str, value: &Value) -> bool {
     match name {
         "object" => value.is_object(),
         "array" => value.is_array(),

@@ -203,10 +203,7 @@ impl Client {
 }
 
 impl Client {
-    pub(super) async fn check_discovery_operation(
-        &self,
-        operation: &str,
-    ) -> Result<(), ClientError> {
+    async fn check_discovery_operation(&self, operation: &str) -> Result<(), ClientError> {
         let info = self.info().await?;
         validate_discovery_capability(&info.granted_operations, info.discovery.as_ref(), operation)
     }
@@ -256,7 +253,7 @@ pub(super) fn validate_discovery_capability(
     Ok(())
 }
 
-pub(super) fn validate_page_query(query: &PageQuery) -> Result<(), ClientError> {
+fn validate_page_query(query: &PageQuery) -> Result<(), ClientError> {
     if query.limit.is_some_and(|limit| !(1..=100).contains(&limit))
         || query
             .cursor
@@ -268,7 +265,7 @@ pub(super) fn validate_page_query(query: &PageQuery) -> Result<(), ClientError> 
     Ok(())
 }
 
-pub(super) fn validate_page<T, F>(
+fn validate_page<T, F>(
     page: &InventoryPage<T>,
     requested_limit: Option<u8>,
     valid_id: F,
@@ -284,14 +281,14 @@ where
     Ok(())
 }
 
-pub(super) fn validate_detail<T>(detail: &InventoryDetail<T>) -> Result<(), ClientError> {
+fn validate_detail<T>(detail: &InventoryDetail<T>) -> Result<(), ClientError> {
     if detail.api_version != API_VERSION || !valid_digest(&detail.catalog_revision) {
         return Err(ClientError::InvalidResponse);
     }
     Ok(())
 }
 
-pub(super) fn push_page_query(path: &mut String, first: &mut bool, page: &PageQuery) {
+fn push_page_query(path: &mut String, first: &mut bool, page: &PageQuery) {
     if let Some(limit) = page.limit {
         push_query(path, first, "limit", &limit.to_string());
     }
@@ -310,32 +307,32 @@ pub(super) fn valid_name(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
 }
 
-pub(super) fn valid_task_id(value: &str) -> bool {
+fn valid_task_id(value: &str) -> bool {
     valid_name(value)
         && !["mdl_", "rtp_", "tsk_"]
             .iter()
             .any(|prefix| value.starts_with(prefix))
 }
 
-pub(super) fn valid_reference(value: &str) -> bool {
+fn valid_reference(value: &str) -> bool {
     let Some((name, revision)) = value.split_once('@') else {
         return false;
     };
     valid_name(name) && valid_name(revision)
 }
 
-pub(super) fn valid_model_selector(value: &str) -> bool {
+fn valid_model_selector(value: &str) -> bool {
     valid_public_id(value, "mdl_")
         || valid_reference(value)
         || (valid_name(value) && !value.starts_with("mdl_"))
 }
 
-pub(super) fn valid_runtime_selector(value: &str) -> bool {
+fn valid_runtime_selector(value: &str) -> bool {
     valid_public_id(value, "rtp_")
         || valid_reference(value)
         || (valid_name(value) && !value.starts_with("rtp_"))
 }
 
-pub(super) fn valid_task_selector(value: &str) -> bool {
+fn valid_task_selector(value: &str) -> bool {
     valid_public_id(value, "tsk_") || valid_task_id(value)
 }

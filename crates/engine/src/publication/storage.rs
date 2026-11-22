@@ -44,7 +44,7 @@ const MANIFEST_FILENAME: &str = "manifest.json";
 
 /// The Store operations publication storage relies on. `Store` is the
 /// production ledger; tests drive the same SQL through a seeded connection.
-pub(crate) trait ResultLedger {
+pub(super) trait ResultLedger {
     fn reserve(&self, request: PublicationReservation) -> Result<(), CoreError>;
     fn mark_prepared(&self, result_id: &str) -> Result<(), CoreError>;
     fn abandon(&self, result_id: &str) -> Result<(), CoreError>;
@@ -169,7 +169,7 @@ fn new_id(prefix: &str) -> Result<String, PublicationError> {
 }
 
 /// Durably prepare one validated candidate and its canonical manifest.
-pub(crate) fn prepare_publication(
+pub(super) fn prepare_publication(
     ledger: &impl ResultLedger,
     root: &OwnedRoot,
     candidate: &ValidatedCandidate,
@@ -298,7 +298,7 @@ fn prepare_file(
 
 /// What one reclamation turn achieved.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct ReclaimReport {
+pub(super) struct ReclaimReport {
     pub(crate) deleted: usize,
     pub(crate) released_bytes: u64,
     /// The Store handed out files this turn, so another turn may find more.
@@ -308,7 +308,7 @@ pub(crate) struct ReclaimReport {
 /// Durably delete one bounded batch of reclaimable files, then release the
 /// charge of allocations left with none. A failed deletion stops the turn;
 /// only names already durably removed are confirmed.
-pub(crate) fn reclaim_turn(
+pub(super) fn reclaim_turn(
     ledger: &impl ResultLedger,
     root: &OwnedRoot,
 ) -> Result<ReclaimReport, PublicationError> {
@@ -356,7 +356,7 @@ fn remove_everywhere(root: &OwnedRoot, name: &str) -> Result<(), PublicationErro
 
 /// Position of a bounded sweep over the result directories.
 #[derive(Default)]
-pub(crate) struct AuditCursor {
+pub(super) struct AuditCursor {
     directory: usize,
     scan: Option<OwnedInputScan>,
 }
@@ -374,7 +374,7 @@ pub(crate) struct AuditReport {
 /// entry (including links, folders and undecodable names) is moved to
 /// `results/quarantine` without being opened or deleted. A failed lookup is
 /// unknown, not absence: the turn stops and keeps everything.
-pub(crate) fn audit_turn(
+pub(super) fn audit_turn(
     ledger: &impl ResultLedger,
     root: &OwnedRoot,
     cursor: &mut AuditCursor,

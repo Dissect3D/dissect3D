@@ -345,7 +345,7 @@ pub(super) const EVENT_RETENTION: EventRetention = EventRetention {
 };
 /// Write-side bounds, equal to what the execution reader enforces.
 pub(super) const PROGRESS_JSON_BYTES_MAX: usize = 16_384;
-pub(super) const SAFE_CODE_BYTES_MAX: usize = 128;
+const SAFE_CODE_BYTES_MAX: usize = 128;
 
 /// A safe engine-owned code (cleanup reason, outcome): 1..=128 bytes of
 /// `[a-z0-9_.]`, never a raw path, upstream string or input text.

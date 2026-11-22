@@ -168,7 +168,7 @@ pub(super) enum Command {
 /// How a handled command affects in-flight caller-side admission preparations.
 #[cfg(unix)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum PreparationEffect {
+enum PreparationEffect {
     /// Changes no fact behind a preparation, or only facts `finish` rechecks
     /// in SQL or that can only make the free-space observation conservative.
     Keeps,

@@ -18,7 +18,7 @@ pub(crate) struct InputCleanupClaim {
 
 /// Temporary actor-issued leases prevent file cleanup while validation reads.
 /// Their count is process-local; a restart has no surviving validation work.
-pub(crate) struct InputPins {
+struct InputPins {
     counters: Vec<(InputId, Arc<AtomicUsize>)>,
 }
 

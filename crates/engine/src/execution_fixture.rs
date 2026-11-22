@@ -39,7 +39,7 @@ pub(crate) const STAGES: &[&str] = &["copy"];
 pub(crate) const OUTPUT_NAME: &str = "mesh.obj";
 pub(crate) const DESCRIPTION_NAME: &str = "output.json";
 /// One 1-MiB OBJ per attempt (RP-P02/5 proposed policy).
-pub(crate) const MESH_BYTES_MAX: u64 = 1_048_576;
+const MESH_BYTES_MAX: u64 = 1_048_576;
 /// Bounds on the engine-written documents the worker reads.
 const RESOLUTION_BYTES_MAX: u64 = 262_144;
 const PARAMETERS_BYTES_MAX: u64 = 16_384;
@@ -54,7 +54,7 @@ const OUTPUT_FAILED: &str = "output_write_failed";
 /// The worker's own sources, installed into the package by preparation as
 /// `(package name, workspace path, bytes)`. They are part of the build
 /// closure below, and preparation checks each against its closure entry.
-pub(crate) const SOURCE_FILES: [(&str, &str, &[u8]); 3] = [
+const SOURCE_FILES: [(&str, &str, &[u8]); 3] = [
     (
         "execution_fixture.rs",
         "crates/engine/src/execution_fixture.rs",
@@ -75,10 +75,9 @@ pub(crate) const SOURCE_FILES: [(&str, &str, &[u8]); 3] = [
 /// The build closure this binary was compiled from (see `build.rs`): every
 /// file of the engine and its workspace path dependencies, the workspace
 /// manifest, `Cargo.lock`, toolchain configuration, rustc release and target.
-pub(crate) const CLOSURE_MANIFEST: &str =
-    include_str!(concat!(env!("OUT_DIR"), "/worker_closure.txt"));
+const CLOSURE_MANIFEST: &str = include_str!(concat!(env!("OUT_DIR"), "/worker_closure.txt"));
 /// SHA-256 of `CLOSURE_MANIFEST`, computed by the build script.
-pub(crate) const CLOSURE_SHA256: &str = env!("D3D_R2_WORKER_CLOSURE_SHA256");
+const CLOSURE_SHA256: &str = env!("D3D_R2_WORKER_CLOSURE_SHA256");
 const MARKER: &str = concat!(
     "D3D-R2-WORKER-CLOSURE:v2:",
     env!("D3D_R2_WORKER_CLOSURE_SHA256"),
@@ -101,10 +100,10 @@ const fn marker_bytes() -> [u8; MARKER.len()] {
 /// closure it records, so a worker built from any other sources, dependency
 /// lock or toolchain is refused (WE-P05/1 and /3: no recorded identity that is
 /// never executed).
-pub(crate) static SOURCE_MARKER: [u8; MARKER.len()] = marker_bytes();
+static SOURCE_MARKER: [u8; MARKER.len()] = marker_bytes();
 
 /// The marker expected for a recorded closure digest (runtime, preparation).
-pub(crate) fn expected_marker(closure_sha256: &str) -> Vec<u8> {
+fn expected_marker(closure_sha256: &str) -> Vec<u8> {
     format!("D3D-R2-WORKER-CLOSURE:v2:{closure_sha256};").into_bytes()
 }
 

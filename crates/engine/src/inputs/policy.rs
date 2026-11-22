@@ -13,7 +13,7 @@ pub(super) const UPLOAD_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 pub(super) const UPLOAD_TOTAL_TIMEOUT: Duration = Duration::from_secs(600);
 // Error cleanup may use the existing outer request slack. This never extends
 // the deadline for producing an input receipt.
-pub(crate) const UPLOAD_CLEANUP_GRACE: Duration = Duration::from_secs(2);
+pub(super) const UPLOAD_CLEANUP_GRACE: Duration = Duration::from_secs(2);
 pub(crate) const UPLOAD_REQUEST_TIMEOUT: Duration =
     UPLOAD_TOTAL_TIMEOUT.saturating_add(UPLOAD_CLEANUP_GRACE);
 

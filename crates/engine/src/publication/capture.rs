@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 /// Bound on the worker's output description, which is captured to close the
 /// folder but never trusted for mesh-copy semantics.
-pub(crate) const DESCRIPTION_BYTES_MAX: u64 = 65_536;
+pub(super) const DESCRIPTION_BYTES_MAX: u64 = 65_536;
 /// Candidate files one report may name (worker schema maxItems).
 const CANDIDATE_FILES_MAX: usize = 16;
 /// Capture shares validation's per-candidate time bound.
@@ -43,7 +43,7 @@ fn portable(name: &str) -> Result<RelativePath, PublicationError> {
 
 /// Capture the candidate `report` names from `staging`, after `cleanup`
 /// confirmed the attempt's whole worker tree terminated.
-pub(crate) fn capture_candidate(
+pub(super) fn capture_candidate(
     dispatch: &DispatchRecord,
     report: &CandidateReport,
     cleanup: &CleanupEvidence,
@@ -106,7 +106,7 @@ pub(crate) fn capture_candidate(
 /// open freshly with `OwnedRoot::open_immutable_input` (a reader handed to a
 /// worker shares its file offset on Unix). Length and digest must equal the
 /// stored identity.
-pub(crate) fn verified_input(
+pub(super) fn verified_input(
     identity: InputIdentity,
     reader: PrivateInputReader,
 ) -> Result<VerifiedInputSet, PublicationError> {

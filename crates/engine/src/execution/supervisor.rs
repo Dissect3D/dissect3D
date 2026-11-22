@@ -82,7 +82,7 @@ impl LaunchLedger for Store {
 
 /// Safe cleanup code when the launch identity could not be durably recorded:
 /// the Store would refuse a release, so holds stay until recovery (WE-P07).
-pub(crate) const IDENTITY_UNRECORDED: &str = "cleanup_identity_unrecorded";
+pub(super) const IDENTITY_UNRECORDED: &str = "cleanup_identity_unrecorded";
 
 /// Control-channel reader/writer around the pure frame codec.
 struct Control<R, W> {

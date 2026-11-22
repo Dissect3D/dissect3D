@@ -66,7 +66,7 @@ impl FixtureError {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct PreparedFixtureReport {
+struct PreparedFixtureReport {
     schema_version: String,
     status: String,
     evidence_scope: String,

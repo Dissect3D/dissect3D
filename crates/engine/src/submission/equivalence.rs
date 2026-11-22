@@ -53,7 +53,7 @@ pub(crate) fn canonicalize(
 }
 
 // V2 binds execution policy without changing any v1 preimage.
-pub(crate) fn canonicalize_execution(
+pub(super) fn canonicalize_execution(
     request: &dissect3d_api::ExecutionJobRequest,
     verified_inputs: &VerifiedInputMap,
 ) -> Result<CanonicalSubmission, CanonicalError> {
@@ -165,7 +165,7 @@ fn canonicalize_inner(
 }
 
 #[cfg(test)]
-pub(crate) fn canonical_value(value: &SubmissionValue) -> Result<Vec<u8>, CanonicalError> {
+pub(super) fn canonical_value(value: &SubmissionValue) -> Result<Vec<u8>, CanonicalError> {
     let mut bytes = Vec::new();
     encode_value(&value_tree(value)?, &mut bytes)?;
     Ok(bytes)

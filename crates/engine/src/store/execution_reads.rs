@@ -34,7 +34,7 @@ pub(super) enum ReadCommand {
 /// One captured `jobs` + `job_execution` row. The single read and the page both
 /// capture it with [`SUMMARY_COLUMNS`] and decode it with [`decode_summary`], so
 /// they cannot disagree about any summary field.
-pub(super) struct RawSummary {
+struct RawSummary {
     id: String,
     sequence: i64,
     created: i64,
@@ -52,16 +52,16 @@ pub(super) struct RawSummary {
     pub(super) storage: String,
 }
 /// Columns read by [`RawSummary::from_row`], in order, over [`SUMMARY_FROM`].
-pub(super) const SUMMARY_COLUMNS: &str =
+const SUMMARY_COLUMNS: &str =
     "j.job_id,j.acceptance_sequence,j.created_at_ms,e.snapshot_revision,e.state,e.phase,
      e.progress_json,e.timeout_ms,e.cancel_requested_at_ms,e.cleanup_status,e.cleanup_reason,
      e.outcome_code,e.retry_of,a.attempt_id,j.storage_status";
 /// One row per job: `job_execution` is 1:1 and one attempt per job is unique.
-pub(super) const SUMMARY_FROM: &str = "FROM jobs j
+const SUMMARY_FROM: &str = "FROM jobs j
      JOIN job_execution e USING(job_id)
      LEFT JOIN job_attempts a USING(job_id)";
 impl RawSummary {
-    pub(super) fn from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+    fn from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
         Ok(Self {
             id: r.get(0)?,
             sequence: r.get(1)?,
@@ -152,7 +152,7 @@ fn timestamp(value: i64) -> Result<TimestampMs, CoreError> {
         .map_err(|_| CoreError::InvalidStore)
 }
 /// Decode and validate one stored row; a corrupt row fails closed, never skipped.
-pub(super) fn decode_summary(row: &RawSummary) -> Result<ExecutionJobSummary, CoreError> {
+fn decode_summary(row: &RawSummary) -> Result<ExecutionJobSummary, CoreError> {
     let state = match row.state.as_str() {
         "queued" => ExecutionJobState::Queued,
         "running" => ExecutionJobState::Running,

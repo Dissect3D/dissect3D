@@ -41,7 +41,7 @@ pub(crate) struct ObservationUpdate {
 }
 
 #[derive(Debug)]
-pub(crate) struct ProgressCoalescer {
+pub(super) struct ProgressCoalescer {
     min_interval: Duration,
     stages: &'static [&'static str],
     current: ObservationUpdate,
@@ -51,7 +51,7 @@ pub(crate) struct ProgressCoalescer {
 
 /// How a worker progress report was classified.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ProgressClass {
+pub(super) enum ProgressClass {
     Known,
     UnknownFraction,
     UnlistedStage,

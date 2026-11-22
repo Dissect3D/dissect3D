@@ -3,7 +3,7 @@
 
 use super::*;
 
-pub(super) fn protected_sqlite_open_flags() -> OpenFlags {
+fn protected_sqlite_open_flags() -> OpenFlags {
     OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW
 }
 
@@ -562,7 +562,7 @@ pub(super) fn recovery_backup_for_version(version: i64) -> Result<RelativePath, 
     RelativePath::parse(path).map_err(CoreError::Platform)
 }
 
-pub(super) fn retain_verified_backup_at(
+fn retain_verified_backup_at(
     connection: &Connection,
     root: &OwnedRoot,
     backup_relative: &RelativePath,

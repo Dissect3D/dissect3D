@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// `<prefix>` + 32 lowercase hex digits, the schema's identifier shape.
-pub(crate) fn is_id(value: &str, prefix: &str) -> bool {
+fn is_id(value: &str, prefix: &str) -> bool {
     value.len() == prefix.len() + 32
         && value.starts_with(prefix)
         && value[prefix.len()..]

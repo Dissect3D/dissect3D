@@ -39,7 +39,7 @@ impl Default for AcceptanceLimits {
 }
 
 /// Engine growth allowed per fresh admission, including metadata and WAL needs.
-pub(super) const GROWTH_ALLOWANCE_BYTES: u64 = 4_194_304;
+const GROWTH_ALLOWANCE_BYTES: u64 = 4_194_304;
 /// Maximum age of a caller-side free-space observation at finish and COMMIT.
 const OBSERVATION_WINDOW: Duration = Duration::from_millis(100);
 

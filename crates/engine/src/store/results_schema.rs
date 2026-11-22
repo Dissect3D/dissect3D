@@ -75,5 +75,5 @@ pub(super) fn add_result_tables(tx: &Transaction<'_>) -> Result<(), CoreError> {
 
 /// Returns a v8 store to its v7 shape, for tests that seed older versions.
 #[cfg(test)]
-pub(crate) const DROP_V8_TABLES: &str = "DROP TABLE results; DROP TABLE result_files; \
+pub(super) const DROP_V8_TABLES: &str = "DROP TABLE results; DROP TABLE result_files; \
      DROP TABLE publication_allocations; DROP TABLE publication_sequence;";

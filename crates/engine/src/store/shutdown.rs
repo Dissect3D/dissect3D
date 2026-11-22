@@ -3,7 +3,7 @@
 
 use super::*;
 
-pub(super) type OperationRecord = (
+type OperationRecord = (
     String,
     String,
     String,
@@ -354,7 +354,7 @@ pub(super) fn complete_shutdown(
         .map_err(|_| CoreError::StoreUnavailable)
 }
 
-pub(super) fn state_from_db(value: &str) -> Result<OperationState, CoreError> {
+fn state_from_db(value: &str) -> Result<OperationState, CoreError> {
     match value {
         "queued" => Ok(OperationState::Queued),
         "running" => Ok(OperationState::Running),
@@ -365,7 +365,7 @@ pub(super) fn state_from_db(value: &str) -> Result<OperationState, CoreError> {
     }
 }
 
-pub(super) fn shutdown_receipt(
+fn shutdown_receipt(
     operation: String,
     instance_id: InstanceId,
     state: OperationState,

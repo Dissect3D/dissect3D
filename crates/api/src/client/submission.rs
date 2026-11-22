@@ -264,7 +264,7 @@ impl Client {
 }
 
 impl Client {
-    pub(super) async fn require_submission_capability(
+    async fn require_submission_capability(
         &self,
         operation: &str,
     ) -> Result<SubmissionCapability, ClientError> {
@@ -297,7 +297,7 @@ impl Client {
         .await
     }
 
-    pub(super) async fn decode_submission_read_response<T: DeserializeOwned>(
+    async fn decode_submission_read_response<T: DeserializeOwned>(
         &self,
         response: reqwest::Response,
     ) -> Result<T, ClientError> {
@@ -314,7 +314,7 @@ impl Client {
             .map_err(|_| ClientError::InvalidResponse)
     }
 
-    pub(super) async fn decode_submission_response<T: DeserializeOwned>(
+    async fn decode_submission_response<T: DeserializeOwned>(
         &self,
         response: reqwest::Response,
     ) -> Result<T, Option<crate::CorrelationId>> {
@@ -328,7 +328,7 @@ impl Client {
 pub(super) const SUBMISSION_OPERATIONS: &[&str] =
     &["inputs.create", "jobs.submit", "jobs.list", "jobs.show"];
 
-pub(super) struct AbortOnDrop(tokio::task::AbortHandle);
+struct AbortOnDrop(tokio::task::AbortHandle);
 
 impl Drop for AbortOnDrop {
     fn drop(&mut self) {
@@ -514,7 +514,7 @@ where
     Ok(())
 }
 
-pub(super) async fn send_input_stream_error(
+async fn send_input_stream_error(
     sender: &mpsc::Sender<Result<Vec<u8>, io::Error>>,
     kind: io::ErrorKind,
     message: &'static str,
@@ -522,7 +522,7 @@ pub(super) async fn send_input_stream_error(
     let _ = sender.send(Err(io::Error::new(kind, message))).await;
 }
 
-pub(super) fn valid_job_summary(summary: &crate::JobSummary) -> bool {
+fn valid_job_summary(summary: &crate::JobSummary) -> bool {
     summary.acceptance_sequence >= 1
         && summary.snapshot_revision >= 1
         && summary.state == crate::JobState::Queued

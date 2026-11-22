@@ -3,7 +3,7 @@
 
 use super::*;
 
-pub(super) struct ExistingCredential {
+struct ExistingCredential {
     client_id: String,
     enrollment_id: String,
     digest: Vec<u8>,
@@ -283,10 +283,7 @@ pub(super) fn read_validated_grants(
     reauthorization::effective_grants(connection, client_id, grants)
 }
 
-pub(super) fn validate_grants_for_policy(
-    policy: GrantPolicy,
-    grants: &[String],
-) -> Result<(), CoreError> {
+fn validate_grants_for_policy(policy: GrantPolicy, grants: &[String]) -> Result<(), CoreError> {
     let mut expected = policy
         .grants()
         .iter()
@@ -300,7 +297,7 @@ pub(super) fn validate_grants_for_policy(
     }
 }
 
-pub(super) fn enrollment_receipt(
+fn enrollment_receipt(
     installation_id: InstallationId,
     client_id: ClientId,
     enrollment_id: dissect3d_api::EnrollmentId,

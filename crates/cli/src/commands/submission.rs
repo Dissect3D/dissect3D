@@ -23,17 +23,17 @@ pub(crate) struct SubmissionSuccess {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct DefinitionError;
+struct DefinitionError;
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct LocalInput {
+struct LocalInput {
     path: PathBuf,
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct LocalDefinition {
+struct LocalDefinition {
     cli_request_version: String,
     model: String,
     #[serde(default)]
@@ -48,7 +48,7 @@ pub(crate) struct LocalDefinition {
     evaluation_consent: bool,
 }
 
-pub(crate) struct OpenInput {
+struct OpenInput {
     role: String,
     file: std::fs::File,
     length: u64,

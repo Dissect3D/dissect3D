@@ -11,7 +11,7 @@ pub(super) fn validate_support(
     validate_support_inner(reference, raw, schemas, runtimes)
 }
 
-pub(super) fn validate_support_inner(
+fn validate_support_inner(
     reference: &str,
     raw: &RawDocument,
     schemas: &BTreeMap<(String, String), SchemaRecord>,

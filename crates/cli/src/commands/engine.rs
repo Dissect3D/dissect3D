@@ -274,10 +274,7 @@ pub(super) fn stop(
     Ok(pending_stop_data(&pending, true))
 }
 
-pub(super) fn pending_stop_data(
-    pending: &PendingStop,
-    process_exit_confirmed: bool,
-) -> serde_json::Value {
+fn pending_stop_data(pending: &PendingStop, process_exit_confirmed: bool) -> serde_json::Value {
     serde_json::json!({
         "instance_id": pending.instance_id,
         "accepted": pending.receipt.as_ref().map(|_| true),
@@ -309,10 +306,7 @@ pub(super) fn shutdown_transport_result(
         }))
 }
 
-pub(super) fn pending_stop_storage_error(
-    pending: &PendingStop,
-    process_exit_confirmed: bool,
-) -> CommandError {
+fn pending_stop_storage_error(pending: &PendingStop, process_exit_confirmed: bool) -> CommandError {
     match (&pending.operation_id, &pending.receipt) {
         (Some(operation_id), Some(receipt)) => shutdown_receipt_storage_error(
             operation_id.as_str().to_owned(),
@@ -323,10 +317,7 @@ pub(super) fn pending_stop_storage_error(
     }
 }
 
-pub(super) fn pending_stop_connection_error(
-    pending: &PendingStop,
-    error: ConnectionError,
-) -> CommandError {
+fn pending_stop_connection_error(pending: &PendingStop, error: ConnectionError) -> CommandError {
     preserve_pending_receipt(CommandError::connection(error), Some(pending))
 }
 
@@ -344,7 +335,7 @@ pub(super) fn preserve_pending_receipt(
     )
 }
 
-pub(super) fn with_known_shutdown_receipt(
+fn with_known_shutdown_receipt(
     mut error: CommandError,
     operation_id: String,
     operation: serde_json::Value,
@@ -384,7 +375,7 @@ pub(super) fn shutdown_receipt_storage_error(
     }
 }
 
-pub(super) fn new_stop_key() -> Result<IdempotencyKey, CommandError> {
+fn new_stop_key() -> Result<IdempotencyKey, CommandError> {
     let mut bytes = [0_u8; 16];
     getrandom::fill(&mut bytes).map_err(|_| CommandError {
         category: "entropy_unavailable",

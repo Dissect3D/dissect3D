@@ -62,7 +62,7 @@ pub(super) fn setup(
     serde_json::to_value(receipt).map_err(|_| invalid_error())
 }
 
-pub(super) fn new_credential(
+fn new_credential(
     engine: &crate::connection::DiscoveredEngine,
     submission_access: bool,
 ) -> Result<ProfileCredential, CommandError> {
@@ -80,7 +80,7 @@ pub(super) fn new_credential(
     })
 }
 
-pub(super) fn random_material() -> Result<(ClientId, EnrollmentId, String), CommandError> {
+fn random_material() -> Result<(ClientId, EnrollmentId, String), CommandError> {
     let mut ids = [0_u8; 32];
     let mut secret = [0_u8; 32];
     getrandom::fill(&mut ids)

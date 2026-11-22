@@ -121,7 +121,7 @@ pub(crate) struct RuntimeRecord {
 
 #[cfg(any(test, feature = "test-support"))]
 #[derive(Clone, Debug)]
-pub(crate) struct SchemaRecord {
+struct SchemaRecord {
     pub(crate) sha256: String,
     pub(crate) document: dissect3d_api::DeclarationValue,
     pub(crate) unresolved_paths: Vec<String>,
@@ -345,7 +345,7 @@ impl Catalog {
 
 /// Exercise the real catalog integrity check from the original index regression.
 #[cfg(test)]
-pub(crate) fn index_revision(index_bytes: &[u8], documents: &[Vec<u8>]) -> Result<String, ()> {
+fn index_revision(index_bytes: &[u8], documents: &[Vec<u8>]) -> Result<String, ()> {
     Catalog::from_packages(
         vec![ControlledPackage {
             index_bytes: index_bytes.to_vec(),
@@ -358,7 +358,7 @@ pub(crate) fn index_revision(index_bytes: &[u8], documents: &[Vec<u8>]) -> Resul
 }
 
 /// The revision of an empty catalog is the hash of the catalog header.
-pub(crate) fn empty_revision() -> String {
+fn empty_revision() -> String {
     digest(b"dissect3d-catalog-v1\n")
 }
 
