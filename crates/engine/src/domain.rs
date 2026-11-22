@@ -2,9 +2,9 @@
 //!
 //! Items here are used by both the store and the services above it, so neither
 //! owns them. This module depends only on `dissect3d-api` and the standard
-//! library; it must not import the store or any service module. The original
-//! paths (`submission::SubmissionError`, `inputs::policy`, `publication::policy`)
-//! re-export these items.
+//! library; it must not import the store or any service module.
+//! `submission::SubmissionError` and `inputs::policy` re-export their items;
+//! publication callers import `domain::publication_policy` directly.
 
 #[cfg(unix)]
 pub(crate) mod input_policy;
