@@ -88,8 +88,9 @@ its children live in `foo/`. Several modules are compiled on Unix only today
 | `execution` | Worker supervision: attempt files, launcher, session legality, progress and the supervisor. Dispatch is inactive. |
 | `worker_protocol` | The private engine–worker frame and message codec. |
 | `publication` | Validation of captured result candidates, private durable storage and publication policy limits. No route or dispatch uses it yet. |
-| `store` | The `Store` handle, the SQL actor thread, schema and migrations, and all durable records. `store.rs` is the handle and actor; `store/` holds one file per record family (`submission`, `jobs`, `retry`, `execution`, `finalize`, `cleanup`, `results`, `inputs`, ...). |
+| `store` | The `Store` handle, the SQL actor thread, schema and migrations, and all durable records. `store.rs` holds the handle, its records and `CoreError`. `store/actor.rs` has the command enum and actor loop, `store/schema.rs` database open, migrations and recovery backups, `store/credentials.rs` and `store/shutdown.rs` those operations, and `store/ids.rs` id and time helpers. The other files in `store/` hold one record family each (`submission`, `jobs`, `retry`, `execution`, `finalize`, `cleanup`, `results`, `inputs`, ...). |
 | `diagnostics` | Bounded startup diagnostics with fixed codes. No paths, request data or secrets. |
+| `domain` | Shared vocabulary below the store: `SubmissionError` and the enforced input-capture and publication storage limits. Depends only on `dissect3d-api`. The old paths (`submission::SubmissionError`, `inputs::policy`) re-export these items. |
 | `policy` | `CorePolicy`, the engine-wide bounds. |
 | `submission_fixture`, `execution_fixture` | `test-support` only. Explicit prepared test support and a fixture worker, used by the `examples/` test hosts. |
 
@@ -113,7 +114,7 @@ http ──▶ services (submission, inputs, jobs, execution, publication, suppo
                             store
                               │
                               ▼
-     shared engine types (credentials, policy, policy constants, record types)
+         shared engine types (domain, credentials, policy)
                               │
                               ▼
               dissect3d-api, dissect3d-platform, SQLite
@@ -122,6 +123,9 @@ http ──▶ services (submission, inputs, jobs, execution, publication, suppo
 - `http` may use services and `store`. Services must not use `http`.
 - Services may use `store`. `store` must not use services; it depends only on
   shared engine types, `dissect3d-api`, `dissect3d-platform` and `rusqlite`.
+- `domain` must not use `store` or any service. Put a type there only when both
+  the store and a service need it and moving it changes no behaviour or
+  construction rule.
 - `worker_protocol` is a leaf codec. `execution` may use it.
 - `submission_fixture` and `execution_fixture` may use anything. Production
   modules may refer to them only behind `#[cfg(feature = "test-support")]`.
@@ -131,20 +135,40 @@ http ──▶ services (submission, inputs, jobs, execution, publication, suppo
 
 ### Known violations (TODO)
 
-Measured from production code (tests excluded) by grepping `crate::<module>`:
+Measured from production code (test files and inline test modules excluded)
+by grepping `crate::<module>`:
 
-- TODO: `store` imports service types. These are `SubmissionError`,
-  `AdmissionCandidate`, `PreparedAdmission`, `SubmittedJobRequest` and
-  `VerifiedInputMap` from `submission`; `AttemptEnd`, `StopIntent`,
-  `AttemptCleanup` and `ObservationUpdate` from `execution`; the limit constants
-  in `inputs::policy` and `publication::policy`; and test hooks from
-  `submission::test_support`. These should move into a layer below `store`.
-- TODO: module cycles through `store`: `store ↔ submission`, `store ↔ execution`,
-  `store ↔ inputs` and `store ↔ publication`.
-- TODO: service-to-service cycles: `submission ↔ inputs`, `submission ↔ jobs`
-  and `submission ↔ submission_fixture`.
-- `submission → http` appears only in tests, which start a real `HttpServer`.
-  That is allowed.
+| From | To | Production edges |
+| --- | --- | --- |
+| bootstrap | credentials, store | |
+| execution | store, worker_protocol | |
+| execution_fixture | execution, store, submission_fixture, support, worker_protocol | test-support only |
+| http | bootstrap, diagnostics, inputs, jobs, store, submission, submission_fixture, support, tls | |
+| inputs | diagnostics, domain, store, submission | `submission` only for `#[cfg(test)]` hooks |
+| jobs | diagnostics, domain, store, submission | `submission` only for `#[cfg(test)]` hooks |
+| publication | domain, inputs, store, submission, worker_protocol | `inputs` only in a test; `submission::obj` OBJ parser |
+| startup | bootstrap, diagnostics, submission_fixture, support | |
+| store | credentials, domain, execution, submission | see below |
+| submission | domain, inputs, jobs, store, submission_fixture, support | |
+| submission_fixture | submission, support | test-support only |
+
+- TODO: `store → submission`. The store names `AdmissionCandidate`,
+  `PreparedAdmission`, `SubmittedJobRequest` and `VerifiedInputMap`, and it calls
+  `SubmittedJobRequest::canonicalize` in the actor to verify replays.
+  `store/admission.rs` also uses `submission::test_support` hooks under
+  `#[cfg(test)]`. `AdmissionCandidate` keeps a private field so that only
+  admission can build one, and `PreparedAdmission::covers` uses admission's
+  selection snapshot, so these types cannot move without changing those rules.
+- TODO: `store → execution`. `store/finalize.rs` names `AttemptCleanup`,
+  `AttemptEnd`, `StopIntent` and `ObservationUpdate`. `AttemptCleanup` holds
+  `NeverLaunched`, which only the execution module may create, and the store's
+  own `CleanupEvidence`, so it cannot move below the store unchanged.
+- TODO: the cycles `store ↔ submission` and `store ↔ execution` remain.
+  `submission ↔ inputs` and `submission ↔ jobs` remain only through test hooks,
+  and `submission ↔ submission_fixture` is test-support code.
+- Removed on 2026-11-23: `store → inputs` and `store → publication` (limits now
+  in `domain`), `jobs → submission` in production (`SubmissionError`), and
+  `submission → http`, which existed only in admission tests.
 
 ## Tests and fixtures
 
@@ -172,8 +196,8 @@ variables and the Windows independent-host runner.
 - A parent module is `foo.rs`, with children in `foo/`. Do not use `mod.rs`.
 - Soft cap: about 800 production lines per file, not counting tests. Above that,
   split by responsibility. No file needs to be split just to reach a number.
-  Some files are far over this today: `store.rs`, `submission/admission.rs`,
-  `support/declarations.rs`, `cli/src/commands.rs` and `api/src/client.rs`.
+  Files still over the cap are `platform/src/windows.rs`, `platform/src/ipc.rs`
+  and the test-support module `engine/src/submission_fixture.rs`.
 - Default to private. Use `pub(super)` before `pub(crate)`, and `pub(crate)`
   before `pub`. Items reach other crates only through re-exports in `lib.rs`.
 - Keep wire types (`dissect3d-api`), SQLite rows (`store`) and OS handles
