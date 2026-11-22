@@ -120,14 +120,19 @@ impl Read for PrivateInputReader {
 impl OwnedRoot {
     /// Root-specific namespace preflight, not a durability witness for a later
     /// mutation. Every actual write must still execute all of its barriers.
-    /// Windows remains unavailable until its full external-chain protocol is
-    /// established; passing low-level input-file tests cannot enable it.
+    /// Unix syncs every ancestor. Windows follows the DS-G04 protocol: it
+    /// re-verifies the retained root's identity against a fresh no-follow open
+    /// and flushes the root, never pre-existing ancestors above it.
     pub fn check_durable_mutation_support(&self) -> Result<(), PlatformError> {
         #[cfg(unix)]
         {
             sync_root_ancestors(self)
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            crate::windows::durable_preflight(self)
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             Err(PlatformError::UnsupportedRoot)
         }
@@ -166,10 +171,17 @@ impl OwnedRoot {
             sync_root_ancestors(self)?;
             full_sync(&file)
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
         {
-            // Windows' external-root-chain barrier remains an explicit gate.
-            // Do not publish a pending record or authorize a POST without it.
+            // write_atomic flushes the staged data before its write-through
+            // rename; completion flushes the record and owned directories and
+            // re-verifies the root. A recovery record is an atomic update, so
+            // unlike input/artifact publication it may replace its own name.
+            self.write_atomic(relative, bytes)?;
+            crate::windows::complete_recovery_record(self, relative)
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
             let _ = relative;
             Err(PlatformError::UnsupportedRoot)
         }
@@ -271,7 +283,15 @@ impl OwnedRoot {
             file
         };
         #[cfg(windows)]
-        let file = crate::windows::begin_input(&root, relative)?;
+        let file = {
+            // The writer's fresh root must be the caller's retained root.
+            if crate::windows::file_identity(root.windows_root_handle())?
+                != crate::windows::file_identity(self.windows_root_handle())?
+            {
+                return Err(PlatformError::UnsafeRoot);
+            }
+            crate::windows::begin_input(&root, relative)?
+        };
         #[cfg(not(any(unix, windows)))]
         return Err(PlatformError::UnsupportedRoot);
         #[cfg(any(unix, windows))]
@@ -392,6 +412,41 @@ impl OwnedRoot {
         sync_root_ancestors(self)?;
         sync_deletion_cache(self)
     }
+
+    /// Windows counterpart of the Unix quarantine: the same feature pairing,
+    /// one direct child renamed by handle without following it, then the
+    /// DS-G04 directory flushes and root identity recheck.
+    #[cfg(windows)]
+    pub fn quarantine_owned_entry(
+        &self,
+        source_directory: &RelativePath,
+        entry_name: &std::ffi::OsStr,
+        destination: &RelativePath,
+    ) -> Result<(), PlatformError> {
+        // Each private feature quarantines only into its own quarantine.
+        let quarantine = match source_directory.as_str() {
+            "inputs/staging" | "inputs/data" => "inputs/quarantine/",
+            "results/staging" | "results/objects" => "results/quarantine/",
+            _ => return Err(PlatformError::InvalidPath),
+        };
+        // Listed names are opaque, possibly ill-formed UTF-16 or reserved
+        // device names; they are opened verbatim, never parsed as paths. Only
+        // separators, stream syntax, NULs and dot names are refused.
+        use std::os::windows::ffi::OsStrExt;
+        let units = entry_name.encode_wide().collect::<Vec<_>>();
+        let dot = u16::from(b'.');
+        if !destination.as_str().starts_with(quarantine)
+            || units.is_empty()
+            || units == [dot]
+            || units == [dot, dot]
+            || units
+                .iter()
+                .any(|unit| [0, u16::from(b'/'), u16::from(b'\\'), u16::from(b':')].contains(unit))
+        {
+            return Err(PlatformError::InvalidPath);
+        }
+        crate::windows::quarantine_owned_entry(self, source_directory, entry_name, destination)
+    }
 }
 
 impl PrivateInputWriter {
@@ -425,7 +480,7 @@ impl PrivateInputWriter {
         self.finish_with_checkpoint(final_name, |_| Ok(()))
     }
 
-    fn finish_with_checkpoint(
+    pub(crate) fn finish_with_checkpoint(
         self,
         final_name: &RelativePath,
         mut checkpoint: impl FnMut(PublicationStep) -> Result<(), PlatformError>,

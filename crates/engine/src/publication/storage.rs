@@ -20,9 +20,11 @@
 //! here, and from ollama's blob store which keeps digest-named files until no
 //! manifest references them). Durable deletion always precedes charge release.
 //!
-//! Where the root's durable mutation protocol is unproven (Windows today, the
-//! B-WINDOWS work in WE-P02/RP-P02) every operation refuses before charging or
-//! writing anything.
+//! Where the root fails its durable mutation check (an unsupported filesystem
+//! or sync root, or a root renamed/replaced since open) every operation
+//! refuses before charging or writing anything. Windows uses the DS-G04
+//! namespace-durability protocol (decision 2026-11-23); physical power-loss
+//! evidence remains a separate open gate on every target.
 use super::{ManifestBytes, PublicationError, ValidatedCandidate, budget, digest};
 use crate::CoreError;
 use crate::store::results::{
@@ -440,18 +442,10 @@ fn quarantine(
     name: &std::ffi::OsStr,
 ) -> Result<(), PublicationError> {
     let destination = under(QUARANTINE_DIR, &new_id("q_")?)?;
-    #[cfg(unix)]
-    {
-        match root.quarantine_owned_entry(directory, name, &destination) {
-            // Reclamation may have removed it between listing and here.
-            Ok(()) | Err(PlatformError::NotFound) => Ok(()),
-            Err(error) => Err(storage(error)),
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (root, directory, name, destination);
-        Err(PublicationError::Storage)
+    match root.quarantine_owned_entry(directory, name, &destination) {
+        // Reclamation may have removed it between listing and here.
+        Ok(()) | Err(PlatformError::NotFound) => Ok(()),
+        Err(error) => Err(storage(error)),
     }
 }
 

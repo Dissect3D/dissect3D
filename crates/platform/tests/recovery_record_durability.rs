@@ -19,16 +19,21 @@ fn recovery_records_reject_out_of_budget_bytes_before_publication() {
 
 #[cfg(windows)]
 #[test]
-fn unresolved_windows_namespace_barrier_never_publishes_a_recovery_record() {
+fn windows_namespace_protocol_publishes_a_recovery_record_durably() {
     let temp = tempfile::tempdir().unwrap();
-    let root =
-        OwnedRoot::create_private(&temp.path().join("profile"), RootPurpose::ClientConfig).unwrap();
+    let root_path = temp.path().join("profile");
+    let root = OwnedRoot::create_private(&root_path, RootPurpose::ClientConfig).unwrap();
     let path = RelativePath::parse("submissions/record.json").unwrap();
-    assert_eq!(
-        root.write_recovery_record(&path, b"pending"),
-        Err(PlatformError::UnsupportedRoot)
-    );
-    assert_eq!(root.file_metadata(&path), Err(PlatformError::NotFound));
+    assert_eq!(root.write_recovery_record(&path, b"pending"), Ok(()));
+    drop(root);
+    let root = OwnedRoot::open(&root_path, RootPurpose::ClientConfig).unwrap();
+    assert_eq!(root.read_file(&path, 64).unwrap(), b"pending");
+    let staged = std::fs::read_dir(root_path.join("submissions"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .filter(|name| name.to_string_lossy().starts_with(".d3d-tmp-"))
+        .count();
+    assert_eq!(staged, 0, "staged name must be gone after publication");
 }
 
 #[cfg(unix)]

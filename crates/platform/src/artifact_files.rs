@@ -110,16 +110,28 @@ const PREPARE_CHUNK_BYTES: usize = 65_536;
 impl OwnedRoot {
     /// Durably prepare `bytes` at the engine-generated private name
     /// `published`, writing through `staging` with the same verified barriers
-    /// as input capture (exclusive create, data sync, exclusive link, namespace
-    /// and root-chain syncs). Refused before any write where the root's
-    /// durable mutation protocol is unproven (Windows today). A failure never
-    /// yields a witness and leaves the staged or final name for the engine's
-    /// reference-aware reclamation: nothing here deletes on error.
+    /// as input capture: exclusive create, data sync, no-replace publication,
+    /// namespace syncs and the root check (Unix: every ancestor; Windows: the
+    /// DS-G04 owned-directory flushes and root identity recheck). Refused
+    /// before any write where the root's durable mutation protocol is
+    /// unsupported. A failure never yields a witness and leaves the staged or
+    /// final name for the engine's reference-aware reclamation: nothing here
+    /// deletes on error.
     pub fn prepare_artifact(
         &self,
         staging: &RelativePath,
         published: &RelativePath,
         bytes: &[u8],
+    ) -> Result<DurableArtifact, PlatformError> {
+        self.prepare_artifact_with_checkpoint(staging, published, bytes, |_| Ok(()))
+    }
+
+    fn prepare_artifact_with_checkpoint(
+        &self,
+        staging: &RelativePath,
+        published: &RelativePath,
+        bytes: &[u8],
+        checkpoint: impl FnMut(crate::input_files::PublicationStep) -> Result<(), PlatformError>,
     ) -> Result<DurableArtifact, PlatformError> {
         self.check_durable_mutation_support()?;
         if bytes.is_empty() || staging == published {
@@ -130,7 +142,7 @@ impl OwnedRoot {
             writer.write_chunk(chunk)?;
         }
         Ok(DurableArtifact {
-            file: writer.finish(published)?,
+            file: writer.finish_with_checkpoint(published, checkpoint)?,
         })
     }
 
@@ -373,5 +385,54 @@ impl AttemptRoot {
     #[cfg(not(any(unix, windows)))]
     fn open_listed(&self, _name: &str, _key: FileKey) -> Result<(File, u64), PlatformError> {
         Err(PlatformError::UnsupportedRoot)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::input_files::PublicationStep;
+    use crate::{OwnedRoot, PlatformError, RelativePath, RootPurpose};
+
+    #[test]
+    fn injected_failure_at_each_step_issues_no_witness_and_publishes_only_after_the_move() {
+        for fault in [
+            PublicationStep::DataSync,
+            PublicationStep::Publish,
+            PublicationStep::NamespaceSync,
+            PublicationStep::FinalSync,
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let root =
+                OwnedRoot::create_private(&temp.path().join("engine"), RootPurpose::EngineData)
+                    .unwrap();
+            let staging = RelativePath::parse("results/staging/art_x.part").unwrap();
+            let published = RelativePath::parse("results/objects/art_x").unwrap();
+            let mut reached = false;
+            let result =
+                root.prepare_artifact_with_checkpoint(&staging, &published, b"bytes", |step| {
+                    if step == fault {
+                        reached = true;
+                        Err(PlatformError::Io)
+                    } else {
+                        Ok(())
+                    }
+                });
+            assert!(reached, "{fault:?} not reached");
+            assert!(matches!(result, Err(PlatformError::Io)), "{fault:?}");
+            let staged_exists = root.path().join(staging.as_path()).exists();
+            let published_exists = root.path().join(published.as_path()).exists();
+            match fault {
+                PublicationStep::DataSync | PublicationStep::Publish => {
+                    assert!(staged_exists, "{fault:?}: staging lost");
+                    assert!(!published_exists, "{fault:?}: name published early");
+                }
+                PublicationStep::NamespaceSync | PublicationStep::FinalSync => {
+                    // Moved but unwitnessed: retained for reclamation.
+                    assert!(published_exists, "{fault:?}");
+                    #[cfg(windows)]
+                    assert!(!staged_exists, "{fault:?}: staged name remains");
+                }
+            }
+        }
     }
 }

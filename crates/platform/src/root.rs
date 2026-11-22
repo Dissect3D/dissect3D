@@ -46,7 +46,7 @@ pub struct OwnedRoot {
     #[cfg(unix)]
     directory: File,
     #[cfg(windows)]
-    _directories: Vec<File>,
+    directories: Vec<File>,
     path: PathBuf,
 }
 
@@ -81,7 +81,7 @@ impl OwnedRoot {
                     true,
                 )?;
                 Ok(Self {
-                    _directories: directories,
+                    directories,
                     path: path.to_path_buf(),
                 })
             }
@@ -119,7 +119,7 @@ impl OwnedRoot {
                     true,
                 )?;
                 Ok(Self {
-                    _directories: directories,
+                    directories,
                     path: path.to_path_buf(),
                 })
             }
@@ -183,6 +183,15 @@ impl OwnedRoot {
     #[cfg(unix)]
     pub(crate) fn directory(&self) -> &File {
         &self.directory
+    }
+
+    /// The retained handle on the root directory itself. It is opened for
+    /// attributes only, which does not block renames; it is the identity
+    /// reference for the DS-G04 recheck.
+    #[cfg(windows)]
+    pub(crate) fn windows_root_handle(&self) -> &File {
+        // Construction refuses an empty chain, so the last handle always exists.
+        &self.directories[self.directories.len() - 1]
     }
 }
 

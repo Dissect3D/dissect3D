@@ -1,8 +1,7 @@
 //! RP-P02/4-/6 on the native filesystem, with the real Store SQL behind a
-//! test ledger. Durable paths run where the root's protocol is proven (Unix);
-//! Windows must refuse before charging or writing.
+//! test ledger. Durable paths run on Unix and on Windows (DS-G04 protocol);
+//! a root that fails its durable check must refuse before charging or writing.
 use super::*;
-#[cfg(unix)]
 use crate::publication::tests::MESH;
 use crate::publication::tests::{SERIAL, fixture};
 use crate::publication::validate_candidate;
@@ -117,10 +116,10 @@ impl Env {
     }
 }
 
-#[cfg(unix)]
 #[test]
 fn prepared_files_are_durable_private_and_bound_to_their_recorded_rows() {
     use sha2::{Digest, Sha256};
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     let env = env();
     let prepared = prepare_publication(&env.ledger, &env.root, &env.candidate, soon()).unwrap();
@@ -140,9 +139,18 @@ fn prepared_files_are_durable_private_and_bound_to_their_recorded_rows() {
         let bytes = fs::read(&path).unwrap();
         assert_eq!(bytes.len() as u64, file.byte_length());
         assert_eq!(<[u8; 32]>::from(Sha256::digest(&bytes)), file.sha256());
+        #[cfg(unix)]
         assert_eq!(
             fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600
+        );
+        // Windows: the platform's no-follow read validates the private owner
+        // ACL and single link; a fresh read-back must succeed.
+        assert_eq!(
+            env.root
+                .read_file(file.durable().relative_path(), 1_048_576)
+                .unwrap(),
+            bytes
         );
         let recorded: Vec<u8> = env
             .ledger
@@ -202,20 +210,30 @@ fn prepared_files_are_durable_private_and_bound_to_their_recorded_rows() {
     assert_eq!(env.entries("results/objects").len(), 2);
 }
 
-#[cfg(unix)]
 #[test]
 fn a_failed_barrier_yields_no_witness_and_keeps_its_charge_until_terminal_reclaim() {
     let env = env();
-    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
     // Bytes are staged and synced, then the final namespace cannot be opened:
     // `results/objects` is a private regular file, not a directory.
-    fs::DirBuilder::new()
-        .mode(0o700)
-        .create(env.root.path().join("results"))
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(env.root.path().join("results"))
+            .unwrap();
+    }
+    #[cfg(windows)]
+    env.root
+        .ensure_private_directory(&dissect3d_platform::RelativePath::parse("results").unwrap())
         .unwrap();
     let objects = env.root.path().join("results/objects");
     fs::write(&objects, b"not a directory").unwrap();
-    fs::set_permissions(&objects, fs::Permissions::from_mode(0o600)).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&objects, fs::Permissions::from_mode(0o600)).unwrap();
+    }
     assert!(matches!(
         prepare_publication(&env.ledger, &env.root, &env.candidate, soon()),
         Err(PublicationError::Storage)
@@ -239,7 +257,6 @@ fn a_failed_barrier_yields_no_witness_and_keeps_its_charge_until_terminal_reclai
     assert_eq!(env.usage(), ResultUsage::default());
 }
 
-#[cfg(unix)]
 #[test]
 fn stale_attempts_limits_and_expired_deadlines_refuse_before_writing() {
     let env = env();
@@ -271,7 +288,6 @@ fn stale_attempts_limits_and_expired_deadlines_refuse_before_writing() {
     assert!(!env.root.path().join("results").exists(), "nothing written");
 }
 
-#[cfg(unix)]
 #[test]
 fn a_failed_deletion_keeps_the_charge_and_a_later_turn_finishes_it() {
     let env = env();
@@ -307,7 +323,6 @@ fn a_failed_deletion_keeps_the_charge_and_a_later_turn_finishes_it() {
     assert_eq!(env.allocation_state(), None);
 }
 
-#[cfg(unix)]
 #[test]
 fn audit_quarantines_unreferenced_entries_and_a_failed_lookup_keeps_everything() {
     let mut env = env();
@@ -318,7 +333,19 @@ fn audit_quarantines_unreferenced_entries_and_a_failed_lookup_keeps_everything()
     fs::write(objects.join("stray.bin"), b"x").unwrap();
     fs::write(objects.join("art_0123456789abcdef0123456789abcdef"), b"y").unwrap();
     fs::create_dir_all(env.root.path().join("results/staging")).unwrap();
+    #[cfg(unix)]
     std::os::unix::fs::symlink(&outside, env.root.path().join("results/staging/link")).unwrap();
+    #[cfg(windows)]
+    {
+        // A junction needs no privilege; it must move without being followed.
+        let output = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(env.root.path().join("results").join("staging").join("link"))
+            .arg(env.parent.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "junction creation");
+    }
     let planted = (
         env.entries("results/objects"),
         env.entries("results/staging"),
@@ -362,10 +389,15 @@ fn audit_quarantines_unreferenced_entries_and_a_failed_lookup_keeps_everything()
     assert_eq!(env.allocation_state().as_deref(), Some("prepared"));
 }
 
-#[cfg(windows)]
 #[test]
-fn windows_refuses_preparation_and_reclamation_before_charging_or_writing() {
+fn a_root_failing_its_durable_check_refuses_before_charging_or_writing() {
     let env = env();
+    // Rename the selected root away and put a valid private root in its
+    // place: the retained root no longer matches a fresh no-follow open.
+    let selected = env.root.path().to_path_buf();
+    let moved = env.parent.path().join("moved-engine");
+    fs::rename(&selected, &moved).unwrap();
+    let _replacement = OwnedRoot::create_private(&selected, RootPurpose::EngineData).unwrap();
     assert!(matches!(
         prepare_publication(&env.ledger, &env.root, &env.candidate, soon()),
         Err(PublicationError::Storage)
@@ -379,5 +411,6 @@ fn windows_refuses_preparation_and_reclamation_before_charging_or_writing() {
         Err(PublicationError::Storage)
     ));
     assert_eq!(env.usage(), ResultUsage::default());
-    assert!(!env.root.path().join("results").exists());
+    assert!(!selected.join("results").exists());
+    assert!(!moved.join("results").exists());
 }

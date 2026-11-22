@@ -385,13 +385,17 @@ pub(crate) fn open_directory_chain(path: &Path, create: bool) -> Result<Vec<File
 
     let mut current = PathBuf::new();
     let mut directories = Vec::new();
+    // Only a directory created by this call is engine-owned; every
+    // pre-existing ancestor above the root is external (DS-G04 step 4).
+    let mut parent_owned = false;
     for component in path.components() {
         match component {
             Component::Prefix(prefix) => current.push(prefix.as_os_str()),
             Component::RootDir => current.push(component.as_os_str()),
             Component::Normal(name) => {
                 current.push(name);
-                let directory = open_directory(&current, create)?;
+                let (directory, created) = open_directory(&current, create, parent_owned)?;
+                parent_owned = created;
                 directories.push(directory);
             }
             Component::CurDir | Component::ParentDir => return Err(PlatformError::InvalidPath),
@@ -411,13 +415,24 @@ pub(crate) fn ensure_private_directory(
     let mut current = root.path().to_path_buf();
     for component in path.components() {
         current.push(component);
-        let directory = open_directory(&current, true)?;
+        let (directory, _) = open_directory(&current, true, true)?;
         validate_directory(&directory, true)?;
     }
     Ok(())
 }
 
-fn open_directory(path: &Path, create: bool) -> Result<File, PlatformError> {
+/// Open one directory without following reparse points, creating it when
+/// asked. Returns whether this call created it.
+///
+/// A newly created directory and its parent are flushed before the chain
+/// continues. An engine-owned parent must flush; an external pre-existing
+/// parent is flushed only when this user can open it for writing.
+fn open_directory(
+    path: &Path,
+    create: bool,
+    parent_owned: bool,
+) -> Result<(File, bool), PlatformError> {
+    let mut created = false;
     if create {
         let descriptor = private_descriptor()?;
         let attributes = private_security_attributes(&descriptor);
@@ -430,10 +445,15 @@ fn open_directory(path: &Path, create: bool) -> Result<File, PlatformError> {
                 return Err(map_io(error));
             }
         } else {
-            // A newly created root or ancestor must be durably reachable too.
+            created = true;
             // Do not continue down a newly created chain after a failed barrier.
-            sync_input_directory(path)?;
-            sync_external_directory(path.parent().ok_or(PlatformError::InvalidPath)?)?;
+            drop(flush_owned_directory(path)?);
+            let parent = path.parent().ok_or(PlatformError::InvalidPath)?;
+            if parent_owned {
+                drop(flush_owned_directory(parent)?);
+            } else {
+                flush_external_parent_if_writable(parent)?;
+            }
         }
     }
 
@@ -444,8 +464,10 @@ fn open_directory(path: &Path, create: bool) -> Result<File, PlatformError> {
         CreateFileW(
             encoded.as_ptr(),
             FILE_READ_ATTRIBUTES | windows_sys::Win32::Storage::FileSystem::READ_CONTROL,
-            // Keeping DELETE sharing disabled prevents other processes from
-            // renaming a checked directory while its handle is retained.
+            // DELETE sharing is withheld, but these attribute/READ_CONTROL-only
+            // opens do not take part in share-access checks, so they do NOT
+            // stop a rename (observed 2026-11-23). Durable mutations rely on
+            // the root identity recheck (verify_root_identity) instead.
             FILE_SHARE_READ | FILE_SHARE_WRITE,
             std::ptr::null(),
             OPEN_EXISTING,
@@ -455,7 +477,7 @@ fn open_directory(path: &Path, create: bool) -> Result<File, PlatformError> {
     };
     let file = file_from_handle(handle)?;
     validate_directory_type(&file)?;
-    Ok(file)
+    Ok((file, created))
 }
 
 fn file_from_handle(handle: HANDLE) -> Result<File, PlatformError> {
@@ -642,13 +664,95 @@ pub(crate) fn validate_filesystem(path: &Path) -> Result<(), PlatformError> {
     {
         return Err(PlatformError::Io);
     }
-    let name = String::from_utf16_lossy(
-        &filesystem[..filesystem
-            .iter()
-            .position(|unit| *unit == 0)
-            .unwrap_or(filesystem.len())],
-    );
-    if name.eq_ignore_ascii_case("NTFS") {
+    if !supported_filesystem_name(&filesystem) {
+        return Err(PlatformError::UnsupportedRoot);
+    }
+    refuse_cloud_sync_root(path)
+}
+
+/// DS-G04 step 5: only local fixed NTFS is a supported durable root. ReFS,
+/// FAT, exFAT and every other reported name are refused.
+fn supported_filesystem_name(name: &[u16]) -> bool {
+    let length = name
+        .iter()
+        .position(|unit| *unit == 0)
+        .unwrap_or(name.len());
+    String::from_utf16_lossy(&name[..length]).eq_ignore_ascii_case("NTFS")
+}
+
+/// Recheck the filesystem through an open handle, so a volume reached by a
+/// path the drive-letter check did not see is still refused.
+fn validate_volume_by_handle(file: &File) -> Result<(), PlatformError> {
+    use windows_sys::Win32::Storage::FileSystem::GetVolumeInformationByHandleW;
+    let mut filesystem = [0_u16; 32];
+    // SAFETY: the handle is live and every buffer is writable for its stated size.
+    if unsafe {
+        GetVolumeInformationByHandleW(
+            file.as_raw_handle(),
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            filesystem.as_mut_ptr(),
+            filesystem.len() as u32,
+        )
+    } == 0
+    {
+        return Err(PlatformError::Io);
+    }
+    if supported_filesystem_name(&filesystem) {
+        Ok(())
+    } else {
+        Err(PlatformError::UnsupportedRoot)
+    }
+}
+
+/// Refuse any root inside a registered Cloud Files sync root (OneDrive, Box
+/// and other providers), whatever its folder name. The nearest existing
+/// ancestor is queried so a root can be refused before it is created.
+fn refuse_cloud_sync_root(path: &Path) -> Result<(), PlatformError> {
+    use windows_sys::Win32::Foundation::{
+        ERROR_CLOUD_FILE_NOT_UNDER_SYNC_ROOT, ERROR_INVALID_FUNCTION, ERROR_NOT_SUPPORTED,
+    };
+    use windows_sys::Win32::Storage::CloudFilters::{
+        CF_SYNC_ROOT_INFO_BASIC, CfGetSyncRootInfoByPath,
+    };
+    let existing = path
+        .ancestors()
+        .find(|ancestor| fs::symlink_metadata(ancestor).is_ok())
+        .ok_or(PlatformError::InvalidPath)?;
+    let encoded = wide_path(existing);
+    let mut information = [0_u64; 64];
+    let mut returned = 0_u32;
+    // SAFETY: the path is NUL-terminated; the aligned buffer is writable for
+    // its full byte length and `returned` is a writable output.
+    let status = unsafe {
+        CfGetSyncRootInfoByPath(
+            encoded.as_ptr(),
+            CF_SYNC_ROOT_INFO_BASIC,
+            information.as_mut_ptr().cast(),
+            std::mem::size_of_val(&information) as u32,
+            &mut returned,
+        )
+    };
+    classify_sync_root_status(
+        status,
+        &[
+            ERROR_CLOUD_FILE_NOT_UNDER_SYNC_ROOT,
+            // Observed 2026-11-23 on a volume with no cloud filter attached.
+            ERROR_INVALID_FUNCTION,
+            ERROR_NOT_SUPPORTED,
+        ],
+    )
+}
+
+/// Success means "inside a sync root". Only the listed Win32 codes mean
+/// "not a sync root"; any other failure is refused rather than assumed safe.
+fn classify_sync_root_status(status: i32, not_sync_root: &[u32]) -> Result<(), PlatformError> {
+    const FACILITY_WIN32: u32 = 0x8007_0000;
+    let code = status as u32;
+    if code & 0xFFFF_0000 == FACILITY_WIN32 && not_sync_root.contains(&(code & 0xFFFF)) {
         Ok(())
     } else {
         Err(PlatformError::UnsupportedRoot)
@@ -778,9 +882,185 @@ pub(crate) fn write_atomic(
     result
 }
 
+// ---------------------------------------------------------------------------
+// Namespace durability protocol (DS-G04 decision, 2026-11-23).
+//
+// 1. File data: FlushFileBuffers on the file before it becomes visible.
+// 2. Publication: MoveFileExW(MOVEFILE_WRITE_THROUGH) without
+//    MOVEFILE_REPLACE_EXISTING or MOVEFILE_COPY_ALLOWED: an existing name or a
+//    cross-volume move fails. Recovery records are the documented exception:
+//    they are atomic replace-updates on every target (see write_atomic).
+// 3. Flush every engine-owned directory from the root to the target's parent
+//    through write-access, BACKUP_SEMANTICS, OPEN_REPARSE_POINT handles.
+// 4. Never flush a pre-existing ancestor above the root (standard users get
+//    ERROR_ACCESS_DENIED at `C:\`). Instead re-verify the retained root's
+//    identity (volume serial + file index) against a fresh no-follow open,
+//    and flush the root's parent once, at creation, when it is writable.
+// 5. Supported storage is local fixed NTFS outside cloud sync roots.
+//
+// These are process-crash and handle-reopen guarantees under the documented
+// Win32 contracts. They are not physical power-loss evidence.
+// ---------------------------------------------------------------------------
+
+/// Record of every barrier, in order, kept only by test builds so barrier
+/// order is mutation-sensitive. Normal builds construct and discard nothing.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Barrier {
+    File(PathBuf),
+    Directory(PathBuf),
+    ExternalParent { path: PathBuf, flushed: bool },
+    RootIdentity(PathBuf),
+    Publish(PathBuf),
+}
+
+#[cfg(test)]
+thread_local! {
+    static BARRIERS: std::cell::RefCell<Vec<Barrier>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+pub(crate) fn take_barriers() -> Vec<Barrier> {
+    BARRIERS.with(|log| std::mem::take(&mut *log.borrow_mut()))
+}
+
+#[cfg(test)]
+fn note(barrier: impl FnOnce() -> Barrier) {
+    BARRIERS.with(|log| log.borrow_mut().push(barrier()));
+}
+
+#[cfg(not(test))]
+fn note(_: impl FnOnce() -> Barrier) {}
+
+/// Native identity of an open file or directory on one volume. NTFS keeps a
+/// file index stable until deletion; ReFS (unsupported) needs 128-bit IDs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct FileIdentity {
+    volume_serial: u32,
+    file_index: u64,
+}
+
+pub(crate) fn file_identity(file: &File) -> Result<FileIdentity, PlatformError> {
+    let mut information = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: the handle is live and `information` is a writable output.
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut information) } == 0 {
+        return Err(PlatformError::Io);
+    }
+    Ok(FileIdentity {
+        volume_serial: information.dwVolumeSerialNumber,
+        file_index: (u64::from(information.nFileIndexHigh) << 32)
+            | u64::from(information.nFileIndexLow),
+    })
+}
+
+/// Step 4: the retained root handle must still be the directory a fresh
+/// no-follow open of the selected path reaches. A rename-and-replace of the
+/// root or any ancestor after open fails this check. The fresh chain is
+/// returned for callers that keep it open; it does not block renames.
+pub(crate) fn verify_root_identity(root: &OwnedRoot) -> Result<Vec<File>, PlatformError> {
+    verify_root_identity_against(root.path(), root.windows_root_handle())
+}
+
+fn verify_root_identity_against(path: &Path, retained: &File) -> Result<Vec<File>, PlatformError> {
+    crate::root::validate_storage_path(path)?;
+    validate_filesystem(path)?;
+    let fresh = open_directory_chain(path, false)?;
+    let selected = fresh.last().ok_or(PlatformError::UnsafeRoot)?;
+    validate_directory(selected, true)?;
+    validate_volume_by_handle(selected)?;
+    if file_identity(selected)? != file_identity(retained)? {
+        return Err(PlatformError::UnsafeRoot);
+    }
+    note(|| Barrier::RootIdentity(path.to_path_buf()));
+    Ok(fresh)
+}
+
+/// Root preflight shared by capability checks and every durable mutation:
+/// verified identity, then a flush of the root directory itself.
+pub(crate) fn durable_preflight(root: &OwnedRoot) -> Result<(), PlatformError> {
+    let _held = verify_root_identity(root)?;
+    let flushed = flush_owned_directory(root.path())?;
+    if file_identity(&flushed)? != file_identity(root.windows_root_handle())? {
+        return Err(PlatformError::UnsafeRoot);
+    }
+    Ok(())
+}
+
+/// Step 3 for one engine-owned directory: open it for writing without
+/// following reparse points or sharing DELETE, check its private ACL and
+/// flush it. The handle is returned so callers can keep it pinned.
+fn flush_owned_directory(path: &Path) -> Result<File, PlatformError> {
+    let directory = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .map_err(map_io)?;
+    validate_directory(&directory, false)?;
+    directory.sync_all().map_err(|_| PlatformError::Io)?;
+    note(|| Barrier::Directory(path.to_path_buf()));
+    Ok(directory)
+}
+
+/// Step 3 for a path: the root, then each engine-owned directory down to the
+/// parent of `relative`. All handles stay open until every flush finishes.
+fn flush_owned_chain(root: &OwnedRoot, relative: &RelativePath) -> Result<(), PlatformError> {
+    let components = relative.components().collect::<Vec<_>>();
+    let mut current = root.path().to_path_buf();
+    let first = flush_owned_directory(&current)?;
+    if file_identity(&first)? != file_identity(root.windows_root_handle())? {
+        return Err(PlatformError::UnsafeRoot);
+    }
+    let mut held = vec![first];
+    for component in &components[..components.len() - 1] {
+        current.push(component);
+        held.push(flush_owned_directory(&current)?);
+    }
+    Ok(())
+}
+
+/// Step 4 at creation: flush an external parent once, only when this user
+/// may open it for writing. Access denial is the documented standard-user
+/// outcome for protected ancestors such as `C:\`, not a failed barrier.
+fn flush_external_parent_if_writable(path: &Path) -> Result<(), PlatformError> {
+    use windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED;
+    match OpenOptions::new()
+        .read(true)
+        .write(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+    {
+        Ok(directory) => {
+            validate_directory_type(&directory)?;
+            directory.sync_all().map_err(|_| PlatformError::Io)?;
+            note(|| Barrier::ExternalParent {
+                path: path.to_path_buf(),
+                flushed: true,
+            });
+            Ok(())
+        }
+        Err(error) if error.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) => {
+            note(|| Barrier::ExternalParent {
+                path: path.to_path_buf(),
+                flushed: false,
+            });
+            Ok(())
+        }
+        Err(error) => Err(map_io(error)),
+    }
+}
+
+fn flush_file(file: &File, path: &Path) -> Result<(), PlatformError> {
+    file.sync_all().map_err(|_| PlatformError::Io)?;
+    note(|| Barrier::File(path.to_path_buf()));
+    Ok(())
+}
+
 pub(crate) fn begin_input(root: &OwnedRoot, path: &RelativePath) -> Result<File, PlatformError> {
-    // Recheck the root's own namespace before authorizing content below it.
-    sync_external_directory(root.path().parent().ok_or(PlatformError::InvalidPath)?)?;
+    // Recheck the root's identity before authorizing content below it.
+    durable_preflight(root)?;
     let (parent, name) = open_relative_parent(root, path, true)?;
     let file = OpenOptions::new()
         .read(true)
@@ -806,81 +1086,169 @@ pub(crate) fn finish_input(
 ) -> Result<(), PlatformError> {
     use crate::input_files::PublicationStep;
     validate_file(&file)?;
+    let identity = file_identity(&file)?;
+    let staged_path = root.path().join(staged.as_path());
     checkpoint(PublicationStep::DataSync)?;
-    file.sync_all().map_err(|_| PlatformError::Io)?;
+    // Step 1: the bytes are on stable storage before the name can appear.
+    flush_file(&file, &staged_path)?;
     let (from, staged_name) = open_relative_parent(root, staged, false)?;
     let (to, name) = open_relative_parent(root, final_name, true)?;
     let from_handles = open_directory_chain(&from, false)?;
     let to_handles = open_directory_chain(&to, false)?;
-    // Retain every checked directory until publication and its barriers finish.
+    // Keep every checked directory open until publication and its barriers
+    // finish. These handles do not block renames; the final root identity
+    // recheck is what binds the published name to the selected root.
     for directory in from_handles.iter().chain(&to_handles) {
         validate_directory_type(directory)?;
     }
     drop(file);
-    let from = wide_path(&from.join(staged_name));
-    let to = wide_path(&to.join(name));
+    let from = from.join(staged_name);
+    let to = to.join(name);
     checkpoint(PublicationStep::Publish)?;
-    // No REPLACE_EXISTING or COPY_ALLOWED: collision and cross-volume moves fail.
-    // SAFETY: both checked, protected paths are NUL terminated and live.
-    if unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), MOVEFILE_WRITE_THROUGH) } == 0 {
-        return Err(map_io(std::io::Error::last_os_error()));
-    }
-    let published = open_relative_file(root, final_name, false, true, false)?;
-    published.sync_all().map_err(|_| PlatformError::Io)?;
+    publish_without_replacing(&from, &to)?;
     checkpoint(PublicationStep::NamespaceSync)?;
-    sync_input_ancestors(root, final_name)?;
-    sync_input_ancestors(root, staged)?;
+    let published = open_relative_file(root, final_name, false, true, false)?;
+    if file_identity(&published)? != identity {
+        return Err(PlatformError::InvalidFile);
+    }
+    flush_file(&published, &to)?;
+    // Step 3: both affected directory chains, root first.
+    flush_owned_chain(root, final_name)?;
+    flush_owned_chain(root, staged)?;
+    // Step 4: the published name is reachable from the selected root.
+    drop(verify_root_identity(root)?);
+    drop((from_handles, to_handles));
     checkpoint(PublicationStep::FinalSync)
 }
 
-/// Fail closed if the native filesystem cannot flush directory namespace state.
-/// WRITE_THROUGH rename alone does not establish newly created ancestor barriers.
-fn sync_input_ancestors(root: &OwnedRoot, path: &RelativePath) -> Result<(), PlatformError> {
-    let mut current = root.path().to_path_buf();
-    sync_input_directory(&current)?;
-    let components = path.components().collect::<Vec<_>>();
-    for component in &components[..components.len() - 1] {
-        current.push(component);
-        sync_input_directory(&current)?;
+/// Step 2. No REPLACE_EXISTING or COPY_ALLOWED: a collision or cross-volume
+/// move fails instead of overwriting or copying.
+fn publish_without_replacing(from: &Path, to: &Path) -> Result<(), PlatformError> {
+    let source = wide_path(from);
+    let destination = wide_path(to);
+    // SAFETY: both checked, protected paths are NUL terminated and live.
+    if unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_WRITE_THROUGH,
+        )
+    } == 0
+    {
+        return Err(map_io(std::io::Error::last_os_error()));
     }
+    note(|| Barrier::Publish(to.to_path_buf()));
     Ok(())
 }
 
-fn sync_input_directory(path: &Path) -> Result<(), PlatformError> {
-    sync_directory_namespace(path, true)
-}
-
-fn sync_external_directory(path: &Path) -> Result<(), PlatformError> {
-    // Flushing an external parent grants no private-file authority. Preserve
-    // OwnedRoot's existing ancestor policy, including ordinary inherited ACLs.
-    sync_directory_namespace(path, false)
-}
-
-fn sync_directory_namespace(path: &Path, private: bool) -> Result<(), PlatformError> {
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-        .open(path)
-        .map_err(map_io)?;
-    if private {
-        validate_directory(&file, false)?;
-    } else {
-        validate_directory_type(&file)?;
-    }
-    file.sync_all().map_err(|_| PlatformError::Io)
+/// Complete a recovery record already placed by `write_atomic` (which
+/// flushed its data before the write-through rename): flush the final file,
+/// every owned directory to its parent, then re-verify the root.
+pub(crate) fn complete_recovery_record(
+    root: &OwnedRoot,
+    relative: &RelativePath,
+) -> Result<(), PlatformError> {
+    let file = open_relative_file(root, relative, false, true, false)?;
+    flush_file(&file, &root.path().join(relative.as_path()))?;
+    flush_owned_chain(root, relative)?;
+    drop(verify_root_identity(root)?);
+    Ok(())
 }
 
 pub(crate) fn remove_input_durable(
     root: &OwnedRoot,
     path: &RelativePath,
 ) -> Result<(), PlatformError> {
+    durable_preflight(root)?;
     match remove_file(root, path) {
         Ok(()) | Err(PlatformError::NotFound) => {}
         Err(error) => return Err(error),
     }
-    sync_input_ancestors(root, path)
+    flush_owned_chain(root, path)?;
+    drop(verify_root_identity(root)?);
+    Ok(())
+}
+
+/// Move one direct child of an engine directory into quarantine without
+/// following, opening for data or deleting it. The entry is opened for
+/// DELETE with OPEN_REPARSE_POINT and renamed by handle with
+/// ReplaceIfExists = FALSE, so links and directories move as themselves.
+/// Callers validate the feature/quarantine pairing and entry name first.
+pub(crate) fn quarantine_owned_entry(
+    root: &OwnedRoot,
+    source_directory: &RelativePath,
+    entry_name: &std::ffi::OsStr,
+    destination: &RelativePath,
+) -> Result<(), PlatformError> {
+    use windows_sys::Win32::Storage::FileSystem::{
+        DELETE, FILE_RENAME_INFO, FILE_SHARE_DELETE, FileRenameInfo, SECURITY_IDENTIFICATION,
+        SYNCHRONIZE, SetFileInformationByHandle,
+    };
+    durable_preflight(root)?;
+    // A fixed placeholder child names the source folder's chain for flushing;
+    // the untrusted entry name itself is never parsed as a relative path.
+    let source_chain = RelativePath::parse(format!("{}/entry", source_directory.as_str()))?;
+    let (source_parent, _) = open_relative_parent(root, &source_chain, false)?;
+    let source_handles = open_directory_chain(&source_parent, false)?;
+    let (destination_parent, destination_name) = open_relative_parent(root, destination, true)?;
+    let destination_handles = open_directory_chain(&destination_parent, false)?;
+    let target = verbatim(&destination_parent.join(&destination_name))?;
+    match OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(&target)
+    {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        _ => return Err(PlatformError::Busy),
+    }
+    // Verbatim: a listed `CON` or `name.` is that file, not a device or an
+    // alias produced by Win32 path normalization.
+    let mut source = verbatim(&source_parent)?;
+    source.push(entry_name);
+    let entry = OpenOptions::new()
+        .access_mode(DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .security_qos_flags(SECURITY_IDENTIFICATION)
+        .open(&source)
+        .map_err(map_io)?;
+    let name = target.as_os_str().encode_wide().collect::<Vec<_>>();
+    let header = std::mem::offset_of!(FILE_RENAME_INFO, FileName);
+    let bytes = header + (name.len() + 1) * 2;
+    // u64 storage keeps the HANDLE-bearing structure aligned.
+    let mut buffer = vec![0_u64; bytes.div_ceil(8)];
+    let information = buffer.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+    // SAFETY: the buffer is aligned and large enough for the fixed header plus
+    // the NUL-terminated name; every field is written before the call.
+    unsafe {
+        (*information).Anonymous.ReplaceIfExists = false;
+        (*information).RootDirectory = std::ptr::null_mut();
+        (*information).FileNameLength = (name.len() * 2) as u32;
+        let target_name = buffer.as_mut_ptr().cast::<u8>().add(header).cast::<u16>();
+        std::ptr::copy_nonoverlapping(name.as_ptr(), target_name, name.len());
+        *target_name.add(name.len()) = 0;
+    }
+    // SAFETY: `entry` is live with DELETE access and the buffer holds a
+    // complete FILE_RENAME_INFO of `bytes` bytes.
+    if unsafe {
+        SetFileInformationByHandle(
+            entry.as_raw_handle(),
+            FileRenameInfo,
+            buffer.as_ptr().cast(),
+            bytes as u32,
+        )
+    } == 0
+    {
+        return Err(map_io(std::io::Error::last_os_error()));
+    }
+    note(|| Barrier::Publish(target.clone()));
+    drop(entry);
+    flush_owned_chain(root, &source_chain)?;
+    flush_owned_chain(root, destination)?;
+    drop(verify_root_identity(root)?);
+    drop((source_handles, destination_handles));
+    Ok(())
 }
 
 pub(crate) fn open_lease_file_at(
@@ -926,7 +1294,7 @@ fn open_relative_parent(
     let mut parent = root.path().to_path_buf();
     for component in directories {
         parent.push(component);
-        let directory = open_directory(parent.as_path(), create)?;
+        let (directory, _) = open_directory(parent.as_path(), create, true)?;
         validate_directory(&directory, false)?;
     }
     Ok((parent, (*name).to_owned()))
@@ -942,6 +1310,30 @@ fn validate_replace_target(path: &Path) -> Result<(), PlatformError> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(map_io(error)),
     }
+}
+
+/// Verbatim (`\\?\` prefixed) form of a checked drive-letter path, so the final names are
+/// used exactly as listed. Other prefixes are refused.
+fn verbatim(path: &Path) -> Result<PathBuf, PlatformError> {
+    use std::path::Prefix;
+    let mut result = std::ffi::OsString::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => match prefix.kind() {
+                Prefix::Disk(letter) | Prefix::VerbatimDisk(letter) => {
+                    result.push(format!(r"\\?\{}:", char::from(letter)));
+                }
+                _ => return Err(PlatformError::InvalidPath),
+            },
+            Component::RootDir => {}
+            Component::Normal(name) => {
+                result.push("\\");
+                result.push(name);
+            }
+            Component::CurDir | Component::ParentDir => return Err(PlatformError::InvalidPath),
+        }
+    }
+    Ok(PathBuf::from(result))
 }
 
 fn wide_path(path: &Path) -> Vec<u16> {
@@ -987,7 +1379,9 @@ pub(crate) fn create_attempt_directory(
             },
         );
     }
-    sync_input_directory(path.parent().ok_or(PlatformError::InvalidPath)?)?;
+    drop(flush_owned_directory(
+        path.parent().ok_or(PlatformError::InvalidPath)?,
+    )?);
     // SAFETY: CreateFileW receives a valid NUL-terminated path; the returned
     // handle is checked before ownership is transferred to `File`.
     let handle = unsafe {
@@ -1135,3 +1529,7 @@ pub(crate) fn open_attempt_file(path: &Path) -> Result<(File, u64, u64, u64), Pl
         (u64::from(info.nFileSizeHigh) << 32) | u64::from(info.nFileSizeLow),
     ))
 }
+
+#[cfg(test)]
+#[path = "windows_durability_tests.rs"]
+mod durability_tests;
