@@ -397,7 +397,7 @@ pub(crate) fn audit_turn(
             return Err(PublicationError::Storage);
         };
         let batch = scan
-            .next_batch(crate::publication::policy::RECLAIM_ENTRIES_PER_TURN)
+            .next_batch(crate::domain::publication_policy::RECLAIM_ENTRIES_PER_TURN)
             .map_err(storage)?;
         let names = batch
             .entries

@@ -22,18 +22,7 @@ pub(crate) mod test_support;
 mod schema;
 
 #[cfg(unix)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct SubmissionError {
-    pub(crate) code: dissect3d_api::ErrorCode,
-    pub(crate) limit: Option<&'static str>,
-}
-
-#[cfg(unix)]
-impl From<dissect3d_api::ErrorCode> for SubmissionError {
-    fn from(code: dissect3d_api::ErrorCode) -> Self {
-        Self { code, limit: None }
-    }
-}
+pub(crate) use crate::domain::SubmissionError;
 
 #[cfg(unix)]
 impl From<crate::CoreError> for SubmissionError {

@@ -6,7 +6,7 @@
 
 use super::inputs::read_observed_wall_time_at;
 use super::*;
-use crate::submission::SubmissionError;
+use crate::domain::SubmissionError;
 use dissect3d_api::ErrorCode;
 
 pub(super) type Result<T> = std::result::Result<T, SubmissionError>;

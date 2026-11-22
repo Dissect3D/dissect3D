@@ -1,6 +1,6 @@
 //! Private execution snapshots. SQL captures rows; bounded callers decode them.
 use super::*;
-use crate::submission::SubmissionError;
+use crate::domain::SubmissionError;
 use dissect3d_api::{
     CleanupStatus, ExecutionCancellation, ExecutionCleanup, ExecutionJobPage, ExecutionJobSnapshot,
     ExecutionJobState, ExecutionJobSummary, ExecutionOutcome, ExecutionPolicy, ExecutionRecord,

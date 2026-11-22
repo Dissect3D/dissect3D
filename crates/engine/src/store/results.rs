@@ -6,7 +6,7 @@
 //! is released only when the caller reports durable deletion of every file.
 //! A reference lookup that fails is reported as an error, never as absence.
 use super::*;
-use crate::publication::policy::{
+use crate::domain::publication_policy::{
     ARTIFACT_BYTES_PER_ATTEMPT_MAX, MANIFEST_BYTES_PER_ATTEMPT_MAX, PRIVATE_BYTES_MAX,
     PUBLISHED_BYTES_MAX, RECLAIM_BYTES_PER_TURN, RECLAIM_ENTRIES_PER_TURN, RESULT_RECORDS_MAX,
     STORAGE_FREE_RESERVE_BYTES,
@@ -177,7 +177,7 @@ fn validate(request: &PublicationReservation) -> Result<u64, CoreError> {
         || manifests[0].object_name != request.publication_id
         || !(1..=MANIFEST_BYTES_PER_ATTEMPT_MAX).contains(&manifests[0].byte_length)
         || artifacts.is_empty()
-        || artifacts.len() > crate::publication::policy::ARTIFACT_FILES_PER_ATTEMPT_MAX
+        || artifacts.len() > crate::domain::publication_policy::ARTIFACT_FILES_PER_ATTEMPT_MAX
         || artifacts
             .iter()
             .any(|f| !generated_name(&f.object_name, "art_") || f.byte_length == 0)

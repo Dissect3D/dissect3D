@@ -4,13 +4,10 @@ use dissect3d_api::SubmissionCapability;
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-pub(crate) const MAX_INPUT_BYTES: u64 = 268_435_456;
-pub(crate) const MAX_UPLOADS: i64 = 2;
-pub(crate) const MAX_STAGING_BYTES: u64 = 2_147_483_648;
-pub(crate) const MAX_INPUT_ROWS: i64 = 1_024;
-pub(crate) const UPLOAD_TTL_MS: i64 = 86_400_000;
-pub(crate) const UPLOAD_METADATA_RESERVE_BYTES: u64 = 4_194_304;
-pub(crate) const STORAGE_FREE_RESERVE_BYTES: u64 = 1_073_741_824;
+pub(crate) use crate::domain::input_policy::{
+    MAX_INPUT_BYTES, MAX_INPUT_ROWS, MAX_STAGING_BYTES, MAX_UPLOADS, STORAGE_FREE_RESERVE_BYTES,
+    UPLOAD_METADATA_RESERVE_BYTES, UPLOAD_TTL_MS,
+};
 pub(super) const MAX_CHUNK_BYTES: usize = 65_536;
 pub(super) const UPLOAD_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 pub(super) const UPLOAD_TOTAL_TIMEOUT: Duration = Duration::from_secs(600);

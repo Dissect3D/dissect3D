@@ -85,7 +85,7 @@ pub(super) enum Command {
         AuthContext,
         IdempotencyKey,
         crate::submission::equivalence::SubmittedJobRequest,
-        SyncSender<Result<submission::ReadState, crate::submission::SubmissionError>>,
+        SyncSender<Result<submission::ReadState, crate::domain::SubmissionError>>,
     ),
     #[cfg(unix)]
     FinishSubmission(
@@ -97,7 +97,7 @@ pub(super) enum Command {
         SyncSender<
             Result<
                 Option<Option<dissect3d_api::AcceptanceReceipt>>,
-                crate::submission::SubmissionError,
+                crate::domain::SubmissionError,
             >,
         >,
     ),
@@ -106,7 +106,7 @@ pub(super) enum Command {
         AuthContext,
         IdempotencyKey,
         dissect3d_api::JobId,
-        SyncSender<Result<retry::RetryRead, crate::submission::SubmissionError>>,
+        SyncSender<Result<retry::RetryRead, crate::domain::SubmissionError>>,
     ),
     #[cfg(unix)]
     FinishRetry(
@@ -115,30 +115,30 @@ pub(super) enum Command {
         dissect3d_api::JobId,
         Box<retry::RetryPrepared>,
         SyncSender<
-            Result<Option<dissect3d_api::ExecutionAcceptance>, crate::submission::SubmissionError>,
+            Result<Option<dissect3d_api::ExecutionAcceptance>, crate::domain::SubmissionError>,
         >,
     ),
     #[cfg(unix)]
     ShowJob(
         AuthContext,
         dissect3d_api::JobId,
-        mpsc::SyncSender<Result<dissect3d_api::JobSnapshot, crate::submission::SubmissionError>>,
+        mpsc::SyncSender<Result<dissect3d_api::JobSnapshot, crate::domain::SubmissionError>>,
     ),
     #[cfg(unix)]
     ListJobs(
         AuthContext,
         dissect3d_api::JobsQuery,
-        mpsc::SyncSender<Result<dissect3d_api::JobPage, crate::submission::SubmissionError>>,
+        mpsc::SyncSender<Result<dissect3d_api::JobPage, crate::domain::SubmissionError>>,
     ),
     #[cfg(unix)]
     JobAuditBatch(
         String,
-        mpsc::SyncSender<Result<Vec<jobs::AuditEntry>, crate::submission::SubmissionError>>,
+        mpsc::SyncSender<Result<Vec<jobs::AuditEntry>, crate::domain::SubmissionError>>,
     ),
     #[cfg(unix)]
     MarkJobInputFault(
         InputId,
-        mpsc::SyncSender<Result<(), crate::submission::SubmissionError>>,
+        mpsc::SyncSender<Result<(), crate::domain::SubmissionError>>,
     ),
     CompleteShutdown(InstanceId, mpsc::SyncSender<Result<(), CoreError>>),
     SignalShutdown(

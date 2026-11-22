@@ -7,6 +7,7 @@
 mod bootstrap;
 mod credentials;
 mod diagnostics;
+mod domain;
 #[allow(
     dead_code,
     reason = "WE-P06 composes supervision; dispatch and public routes stay inactive"

@@ -32,7 +32,7 @@ use std::time::{Duration, Instant};
 #[cfg(unix)]
 pub(crate) mod inputs;
 #[cfg(unix)]
-use crate::inputs::policy::{
+use crate::domain::input_policy::{
     MAX_INPUT_BYTES, MAX_INPUT_ROWS, MAX_STAGING_BYTES, MAX_UPLOADS, STORAGE_FREE_RESERVE_BYTES,
     UPLOAD_METADATA_RESERVE_BYTES, UPLOAD_TTL_MS,
 };
@@ -374,7 +374,7 @@ impl Store {
         auth: AuthContext,
         key: IdempotencyKey,
         request: dissect3d_api::JobRequest,
-    ) -> Result<Option<dissect3d_api::AcceptanceReceipt>, crate::submission::SubmissionError> {
+    ) -> Result<Option<dissect3d_api::AcceptanceReceipt>, crate::domain::SubmissionError> {
         self.prepare_submission(
             auth,
             key,
@@ -390,7 +390,7 @@ impl Store {
         key: IdempotencyKey,
         request: dissect3d_api::JobRequest,
         candidate: crate::submission::admission::AdmissionCandidate,
-    ) -> Result<dissect3d_api::AcceptanceReceipt, crate::submission::SubmissionError> {
+    ) -> Result<dissect3d_api::AcceptanceReceipt, crate::domain::SubmissionError> {
         self.prepare_submission(
             auth,
             key,
@@ -406,9 +406,9 @@ impl Store {
         auth: AuthContext,
         key: IdempotencyKey,
         request: dissect3d_api::ExecutionJobRequest,
-    ) -> Result<Option<dissect3d_api::AcceptanceReceipt>, crate::submission::SubmissionError> {
+    ) -> Result<Option<dissect3d_api::AcceptanceReceipt>, crate::domain::SubmissionError> {
         dissect3d_api::encode_execution_request(&request).map_err(|_| {
-            crate::submission::SubmissionError::from(dissect3d_api::ErrorCode::InvalidRequest)
+            crate::domain::SubmissionError::from(dissect3d_api::ErrorCode::InvalidRequest)
         })?;
         self.prepare_submission(
             auth,
@@ -424,9 +424,9 @@ impl Store {
         key: IdempotencyKey,
         request: dissect3d_api::ExecutionJobRequest,
         candidate: crate::submission::admission::AdmissionCandidate,
-    ) -> Result<dissect3d_api::AcceptanceReceipt, crate::submission::SubmissionError> {
+    ) -> Result<dissect3d_api::AcceptanceReceipt, crate::domain::SubmissionError> {
         dissect3d_api::encode_execution_request(&request).map_err(|_| {
-            crate::submission::SubmissionError::from(dissect3d_api::ErrorCode::InvalidRequest)
+            crate::domain::SubmissionError::from(dissect3d_api::ErrorCode::InvalidRequest)
         })?;
         self.prepare_submission(
             auth,
@@ -486,7 +486,7 @@ impl Store {
         key: IdempotencyKey,
         request: crate::submission::equivalence::SubmittedJobRequest,
         candidate: Option<crate::submission::admission::AdmissionCandidate>,
-    ) -> Result<Option<dissect3d_api::AcceptanceReceipt>, crate::submission::SubmissionError> {
+    ) -> Result<Option<dissect3d_api::AcceptanceReceipt>, crate::domain::SubmissionError> {
         // Candidate ownership must survive stale preparation. A finish command
         // borrows it through an Arc, including after its reply is abandoned.
         let candidate = candidate.map(Arc::new);
@@ -530,7 +530,7 @@ impl Store {
         key: IdempotencyKey,
         source: dissect3d_api::JobId,
         prerequisites: retry::RetryPrerequisites,
-    ) -> Result<dissect3d_api::ExecutionAcceptance, crate::submission::SubmissionError> {
+    ) -> Result<dissect3d_api::ExecutionAcceptance, crate::domain::SubmissionError> {
         self.bounded_admission(
             || {
                 self.request(|reply| {
@@ -568,10 +568,10 @@ impl Store {
     #[cfg(unix)]
     fn bounded_admission<S, P, T>(
         &self,
-        read: impl Fn() -> Result<S, crate::submission::SubmissionError>,
+        read: impl Fn() -> Result<S, crate::domain::SubmissionError>,
         prepare: impl Fn(S) -> P,
-        finish: impl Fn(P) -> Result<Option<T>, crate::submission::SubmissionError>,
-    ) -> Result<T, crate::submission::SubmissionError> {
+        finish: impl Fn(P) -> Result<Option<T>, crate::domain::SubmissionError>,
+    ) -> Result<T, crate::domain::SubmissionError> {
         let _permit = self.submission_preparation.acquire()?;
         for _ in 0..4 {
             if let Some(outcome) = finish(prepare(read()?))? {
@@ -586,7 +586,7 @@ impl Store {
         &self,
         auth: AuthContext,
         id: dissect3d_api::JobId,
-    ) -> Result<dissect3d_api::JobSnapshot, crate::submission::SubmissionError> {
+    ) -> Result<dissect3d_api::JobSnapshot, crate::domain::SubmissionError> {
         self.request(|reply| Command::ShowJob(auth, id, reply))
     }
     #[cfg(unix)]
@@ -594,21 +594,21 @@ impl Store {
         &self,
         auth: AuthContext,
         query: dissect3d_api::JobsQuery,
-    ) -> Result<dissect3d_api::JobPage, crate::submission::SubmissionError> {
+    ) -> Result<dissect3d_api::JobPage, crate::domain::SubmissionError> {
         self.request(|reply| Command::ListJobs(auth, query, reply))
     }
     #[cfg(unix)]
     pub(crate) fn job_audit_batch(
         &self,
         after: String,
-    ) -> Result<Vec<jobs::AuditEntry>, crate::submission::SubmissionError> {
+    ) -> Result<Vec<jobs::AuditEntry>, crate::domain::SubmissionError> {
         self.request(|reply| Command::JobAuditBatch(after, reply))
     }
     #[cfg(unix)]
     pub(crate) fn mark_job_input_fault(
         &self,
         id: InputId,
-    ) -> Result<(), crate::submission::SubmissionError> {
+    ) -> Result<(), crate::domain::SubmissionError> {
         self.request(|reply| Command::MarkJobInputFault(id, reply))
     }
     pub(crate) fn complete_shutdown(&self, instance_id: InstanceId) -> Result<(), CoreError> {

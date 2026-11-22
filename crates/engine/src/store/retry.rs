@@ -13,7 +13,7 @@ use super::admission::{
 };
 use super::submission::{ActorTurn, event_bytes, lifecycle_bytes, snapshot_bytes};
 use super::*;
-use crate::submission::SubmissionError;
+use crate::domain::SubmissionError;
 use crate::submission::admission::PreparedAdmission;
 use dissect3d_api::{
     ErrorCode, ExecutionAcceptance, ExecutionPolicy, JOB_CONTRACT, JobId, ResolvedJob,

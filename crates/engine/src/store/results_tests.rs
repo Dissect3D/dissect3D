@@ -1,7 +1,7 @@
 //! RP-P02/1, /5, /6 Store regressions on real SQLite (every OS).
 use super::super::results_schema::DROP_V8_TABLES;
 use super::*;
-use crate::publication::policy::{
+use crate::domain::publication_policy::{
     PRIVATE_BYTES_MAX, RECLAIM_ENTRIES_PER_TURN, RESULT_RECORDS_MAX, STORAGE_FREE_RESERVE_BYTES,
 };
 use dissect3d_platform::RootPurpose;

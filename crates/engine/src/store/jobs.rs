@@ -1,7 +1,7 @@
 //! Creator-scoped history and high-water pagination, serialized by the actor.
 
 use super::*;
-use crate::submission::SubmissionError;
+use crate::domain::SubmissionError;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use dissect3d_api::{
     ErrorCode, JobId, JobPage, JobSnapshot, JobState, JobSummary, JobsQuery, ResolvedJob,

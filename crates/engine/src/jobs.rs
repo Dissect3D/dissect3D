@@ -1,6 +1,6 @@
 //! Engine-owned private job inspection. Polling reads retained snapshots only.
 
-use crate::{AuthContext, Store, submission::SubmissionError};
+use crate::{AuthContext, Store, domain::SubmissionError};
 use dissect3d_api::{ErrorCode, JobId, JobPage, JobSnapshot, JobsQuery};
 use dissect3d_platform::{OwnedRoot, RelativePath};
 use sha2::{Digest, Sha256};

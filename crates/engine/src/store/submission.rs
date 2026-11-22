@@ -6,7 +6,7 @@ use super::admission::{
 };
 use super::inputs::observe_wall_time_at;
 use super::*;
-use crate::submission::SubmissionError;
+use crate::domain::SubmissionError;
 use crate::submission::admission::AdmissionCandidate;
 use crate::submission::equivalence::{SubmittedJobRequest, VerifiedInputMap};
 use dissect3d_api::{AcceptanceReceipt, ErrorCode, JobId, ResolvedJob};
