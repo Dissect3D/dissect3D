@@ -34,7 +34,7 @@ fn files(c: char) -> Vec<ReservedFile> {
 
 /// Reserve and prepare an allocation, as preparation would after its files
 /// passed every barrier, and return the matching commit request.
-fn prepared(f: &Fixture, attempt: &AttemptRef, c: char) -> PublicationCommit {
+pub(super) fn prepared(f: &Fixture, attempt: &AttemptRef, c: char) -> PublicationCommit {
     let reserved = files(c);
     f.store
         .reserve_publication(PublicationReservation {
@@ -72,14 +72,14 @@ fn commit_for(attempt: &AttemptRef, c: char, reserved: &[ReservedFile]) -> Publi
     }
 }
 
-fn running(f: &Fixture, key: &str) -> AttemptRef {
+pub(super) fn running(f: &Fixture, key: &str) -> AttemptRef {
     let job = accept(f, key).job_id;
     AttemptRef::from(&launched(f, &job))
 }
 
 /// (job state, phase, outcome, job cleanup, attempt cleanup, revision,
 ///  allocation state, results rows, publication sequence, released reservations)
-type Facts = (
+pub(super) type Facts = (
     String,
     String,
     Option<String>,
@@ -92,7 +92,7 @@ type Facts = (
     i64,
 );
 
-fn facts(f: &Fixture, attempt: &AttemptRef) -> Facts {
+pub(super) fn facts(f: &Fixture, attempt: &AttemptRef) -> Facts {
     db(f)
         .query_row(
             "SELECT e.state,e.phase,e.outcome_code,e.cleanup_status,a.cleanup_status,
@@ -122,7 +122,7 @@ fn facts(f: &Fixture, attempt: &AttemptRef) -> Facts {
         .unwrap()
 }
 
-fn refused(outcome: Result<CommitOutcome, CoreError>) -> CommitRefusal {
+pub(super) fn refused(outcome: Result<CommitOutcome, CoreError>) -> CommitRefusal {
     match outcome {
         Ok(CommitOutcome::Refused(refusal)) => refusal,
         other => panic!("expected a refusal, got {other:?}"),

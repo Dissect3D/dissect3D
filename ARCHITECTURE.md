@@ -85,7 +85,7 @@ its children live in `foo/`. Several modules are compiled on Unix only today
 | `submission` | Bounded admission, request equivalence, durable submission orchestration and the bounded OBJ fixture validator. |
 | `inputs` | Input upload capture and publication, budgets, policy limits and conservative recovery. |
 | `jobs` | Private job inspection. Polling reads retained snapshots only. |
-| `execution` | Worker supervision: attempt files, launcher, session legality, progress and the supervisor. Dispatch is inactive. |
+| `execution` | Worker supervision: attempt files, launcher, session legality, progress, the supervisor and the central dispatch turn (`scheduler`: FIFO among eligible queued jobs over the Store's reservation transaction). Dispatch is inactive: no service drives the turn yet. |
 | `worker_protocol` | The private engine–worker frame and message codec. |
 | `publication` | Validation of captured result candidates, private durable storage and publication policy limits. No route or dispatch uses it yet. |
 | `store` | The `Store` handle, the SQL actor thread, schema and migrations, and all durable records. `store.rs` holds the handle, its records and `CoreError`. `store/actor.rs` has the command enum and actor loop, `store/schema.rs` database open, migrations and recovery backups, `store/credentials.rs` and `store/shutdown.rs` those operations, and `store/ids.rs` id and time helpers. The other files in `store/` hold one record family each (`submission`, `jobs`, `retry`, `execution`, `finalize`, `cleanup`, `results`, `inputs`, ...). |

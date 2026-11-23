@@ -320,6 +320,8 @@ pub(super) fn commit_publication(
     if timing.expired() {
         return Ok(CommitOutcome::Refused(CommitRefusal::DeadlineExpired));
     }
+    #[cfg(test)]
+    live.hold_commit();
     // A failed COMMIT is uncertain, never a definite refusal.
     tx.commit().map_err(|_| CoreError::StoreUnavailable)?;
     live.forget(&attempt.attempt_id);

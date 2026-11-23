@@ -9,6 +9,7 @@ pub(crate) mod attempt_files;
 pub(crate) mod launcher;
 pub(crate) mod legality;
 pub(crate) mod progress;
+pub(crate) mod scheduler;
 pub(crate) mod supervisor;
 pub(crate) mod types;
 
@@ -24,6 +25,9 @@ mod process_fixture_tests;
 #[cfg(test)]
 #[path = "execution/r2_worker_tests.rs"]
 mod r2_worker_tests;
+#[cfg(test)]
+#[path = "execution/scheduler_tests.rs"]
+mod scheduler_tests;
 #[cfg(test)]
 #[path = "execution/supervisor_tests.rs"]
 pub(crate) mod supervisor_tests;

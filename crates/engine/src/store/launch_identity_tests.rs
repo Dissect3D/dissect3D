@@ -28,11 +28,15 @@ fn record(attempt: &AttemptRef, identity: WorkerIdentity) -> LaunchRecord {
 /// after a confirmed spawn.
 pub(super) fn launched(f: &Fixture, job: &JobId) -> execution::DispatchRecord {
     let dispatched = dispatch(f, job);
-    let attempt = AttemptRef::from(&dispatched);
+    record_launch(f, &dispatched);
+    dispatched
+}
+/// Record the launch identity of an attempt dispatched elsewhere.
+pub(super) fn record_launch(f: &Fixture, dispatched: &execution::DispatchRecord) {
+    let attempt = AttemptRef::from(dispatched);
     f.store
         .record_launch_identity(record(&attempt, launch_identity(&attempt)))
         .unwrap();
-    dispatched
 }
 
 fn stored(f: &Fixture, attempt: &AttemptRef) -> Option<String> {

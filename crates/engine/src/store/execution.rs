@@ -77,8 +77,28 @@ pub(crate) struct DispatchRecord {
     pub(crate) timeout_ms: Option<u64>,
     pub(crate) timing: Arc<AttemptTiming>,
 }
+/// One queued job as the dispatcher sees it, in acceptance order. Reading it
+/// reserves nothing; the dispatch transaction rechecks everything.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct QueuedCandidate {
+    pub(crate) job_id: JobId,
+    pub(crate) acceptance_sequence: i64,
+    pub(crate) snapshot_revision: i64,
+    /// Exact captured resolution bytes.
+    pub(crate) resolved_json: String,
+    /// The captured inputs were last verified intact.
+    pub(crate) storage_verified: bool,
+}
+/// Most queued candidates one read returns.
+pub(crate) const CANDIDATE_PAGE: usize = 32;
+
 #[derive(Default)]
-pub(super) struct LiveAttempts(HashMap<String, DispatchRecord>);
+pub(super) struct LiveAttempts(
+    HashMap<String, DispatchRecord>,
+    /// Test-only stand-in for a slow success COMMIT: entered, then release.
+    #[cfg(test)]
+    Option<(SyncSender<()>, std::sync::mpsc::Receiver<()>)>,
+);
 
 pub(super) enum ExecutionCommand {
     Dispatch(
@@ -111,6 +131,14 @@ pub(super) enum ExecutionCommand {
         Box<super::results_commit::PublicationCommit>,
         SyncSender<Result<super::results_commit::CommitOutcome, CoreError>>,
     ),
+    Candidates(
+        i64,
+        usize,
+        SyncSender<Result<Vec<QueuedCandidate>, CoreError>>,
+    ),
+    /// Hold the next success COMMIT after its final eligibility check.
+    #[cfg(test)]
+    HoldNextCommit(SyncSender<()>, std::sync::mpsc::Receiver<()>),
 }
 impl Store {
     // WE-P04/06 must supply fresh readiness, input-integrity and eligibility checks
@@ -128,6 +156,19 @@ impl Store {
         job: JobId,
     ) -> Result<&'static str, CoreError> {
         self.request(|reply| Command::Execution(ExecutionCommand::Cancel(auth, job, reply)))
+    }
+    /// Queued jobs after `after_sequence`, oldest acceptance first.
+    pub(crate) fn queued_candidates(
+        &self,
+        after_sequence: i64,
+        limit: usize,
+    ) -> Result<Vec<QueuedCandidate>, CoreError> {
+        if limit == 0 || limit > CANDIDATE_PAGE {
+            return Err(CoreError::Conflict);
+        }
+        self.request(|reply| {
+            Command::Execution(ExecutionCommand::Candidates(after_sequence, limit, reply))
+        })
     }
     pub(crate) fn attempt_timing(
         &self,
@@ -152,6 +193,14 @@ impl LiveAttempts {
     pub(super) fn timing(&self, attempt_id: &str) -> Option<Arc<AttemptTiming>> {
         self.0.get(attempt_id).map(|record| record.timing.clone())
     }
+    /// Test-only: stall here, as a COMMIT that started in time but is slow.
+    #[cfg(test)]
+    pub(super) fn hold_commit(&mut self) {
+        if let Some((entered, release)) = self.1.take() {
+            let _ = entered.send(());
+            let _ = release.recv_timeout(Duration::from_secs(5));
+        }
+    }
     pub(super) fn handle(
         &mut self,
         connection: &mut Connection,
@@ -159,6 +208,10 @@ impl LiveAttempts {
         stopping: bool,
     ) {
         match command {
+            #[cfg(test)]
+            ExecutionCommand::HoldNextCommit(entered, release) => {
+                self.1 = Some((entered, release));
+            }
             ExecutionCommand::Dispatch(request, reply) => {
                 let result = if stopping || cfg!(windows) {
                     Err(CoreError::Busy)
@@ -224,6 +277,9 @@ impl LiveAttempts {
                 };
                 let _ = reply.send(result);
             }
+            ExecutionCommand::Candidates(after, limit, reply) => {
+                let _ = reply.send(queued_candidates(connection, after, limit));
+            }
             ExecutionCommand::Timing(id, reply) => {
                 let _ = reply.send(
                     self.0
@@ -234,6 +290,41 @@ impl LiveAttempts {
             }
         }
     }
+}
+fn queued_candidates(
+    connection: &Connection,
+    after: i64,
+    limit: usize,
+) -> Result<Vec<QueuedCandidate>, CoreError> {
+    let mut statement = sql(connection.prepare(
+        "SELECT e.job_id,j.acceptance_sequence,e.snapshot_revision,j.resolved_json,j.storage_status
+         FROM job_execution e JOIN jobs j USING(job_id)
+         WHERE e.state='queued' AND j.acceptance_sequence>?1
+         ORDER BY j.acceptance_sequence LIMIT ?2",
+    ))?;
+    let rows = sql(
+        statement.query_map(rusqlite::params![after, limit as i64], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get::<_, String>(4)?,
+            ))
+        }),
+    )?;
+    let mut candidates = Vec::with_capacity(limit);
+    for row in rows {
+        let (job, acceptance_sequence, snapshot_revision, resolved_json, status) = sql(row)?;
+        candidates.push(QueuedCandidate {
+            job_id: JobId::parse(job).map_err(|_| CoreError::InvalidStore)?,
+            acceptance_sequence,
+            snapshot_revision,
+            resolved_json,
+            storage_verified: status == "verified",
+        });
+    }
+    Ok(candidates)
 }
 pub(super) fn dispatch(
     db: &mut Connection,

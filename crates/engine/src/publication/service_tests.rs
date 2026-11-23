@@ -30,10 +30,17 @@ struct Scripted {
     commit_gate: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
     /// A job state committed by another writer just before this commit.
     state_at_commit: Mutex<Option<&'static str>>,
+    /// Delays the reservation (a slow ledger turn) until this instant.
+    hold_reserve: Mutex<Option<Instant>>,
 }
 
 impl ResultLedger for Scripted {
     fn reserve(&self, request: PublicationReservation) -> Result<(), CoreError> {
+        if let Some(until) = *self.hold_reserve.lock().unwrap() {
+            while Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
         self.ledger.reserve(request)
     }
     fn mark_prepared(&self, result_id: &str) -> Result<(), CoreError> {
@@ -134,6 +141,7 @@ impl Case {
                 finalized: Mutex::default(),
                 commit_gate: Mutex::default(),
                 state_at_commit: Mutex::default(),
+                hold_reserve: Mutex::default(),
             },
             dispatch,
         }
@@ -186,6 +194,13 @@ impl Case {
     fn run(&self, mesh: &[u8]) -> PublishOutcome {
         let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
         publish_blocking(&self.store, &self.root, self.request(mesh))
+    }
+    /// Hold the serial lock, then start a fresh attempt clock of `budget`, so
+    /// waiting for other tests never consumes it.
+    fn serial_with_budget(&mut self, budget: Duration) -> std::sync::MutexGuard<'static, ()> {
+        let serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+        self.dispatch.timing = Arc::new(AttemptTiming::for_supervision_test(Some(budget)));
+        serial
     }
     fn set_state(&self, state: &str) {
         self.store
@@ -452,4 +467,79 @@ fn a_preparation_refused_by_the_ledger_is_a_storage_failure_not_a_lost_attempt()
     case.set_state("cancel_requested");
     assert_eq!(case.run(MESH), ended());
     assert_eq!(case.finalized(), vec![AttemptEnd::ResultStorageFailed]);
+}
+
+/// Run `case` on its own thread with its commit held until the attempt clock
+/// has expired; returns the outcome. The commit was entered while eligible.
+fn run_with_commit_held_past_expiry(mut case: Case) -> (Case, PublishOutcome) {
+    let (release, gate) = std::sync::mpsc::sync_channel(1);
+    *case.store.commit_gate.lock().unwrap() = Some(gate);
+    let _serial = case.serial_with_budget(Duration::from_secs(2));
+    let case = case;
+    let outcome = std::thread::scope(|scope| {
+        let running = scope.spawn(|| publish_blocking(&case.store, &case.root, case.request(MESH)));
+        let give_up = Instant::now() + Duration::from_secs(10);
+        while case.store.seen_commits.lock().unwrap().is_empty() {
+            assert!(Instant::now() < give_up, "the commit was never entered");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(!case.dispatch.timing.expired(), "entered while eligible");
+        while !case.dispatch.timing.expired() {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        release.send(()).unwrap();
+        running.join().unwrap()
+    });
+    (case, outcome)
+}
+
+/// AD-01: an eligible commit that completes, or whose reply arrives, after
+/// the attempt clock expired is success. The late clock is not consulted.
+#[test]
+fn a_commit_acknowledged_after_expiry_is_published_not_a_deadline_failure() {
+    let case = Case::new().script(vec![Ok(CommitOutcome::Committed(receipt()))]);
+    let (case, outcome) = run_with_commit_held_past_expiry(case);
+    assert_eq!(outcome, PublishOutcome::Published(receipt()));
+    assert!(case.finalized().is_empty());
+}
+
+/// AD-01: the commit reply is lost after expiry. The authoritative read finds
+/// the committed result, so nothing is finalized as a failure.
+#[test]
+fn a_commit_reply_lost_after_expiry_is_reconciled_to_the_committed_result() {
+    let case = Case::new().script(vec![Err(CoreError::StoreUnavailable)]);
+    *case.store.lookup.lock().unwrap() = Some(Ok(Some(receipt())));
+    let (case, outcome) = run_with_commit_held_past_expiry(case);
+    assert_eq!(outcome, PublishOutcome::Published(receipt()));
+    assert!(case.finalized().is_empty());
+}
+
+/// AD-03: the worker, candidate and cleanup finished in time, but durable
+/// preparation is delayed past the attempt deadline. The budget is not reset,
+/// no commit is attempted, the attempt ends with the deadline outcome on its
+/// cleanup witness, and the abandoned allocation stays charged.
+#[test]
+fn preparation_delayed_past_the_attempt_deadline_ends_with_the_deadline_outcome() {
+    let mut case = Case::new();
+    let serial = case.serial_with_budget(Duration::from_secs(2));
+    let (started, deadline) = (
+        case.dispatch.timing.started(),
+        case.dispatch.timing.deadline(),
+    );
+    *case.store.hold_reserve.lock().unwrap() = deadline;
+    let outcome = publish_blocking(&case.store, &case.root, case.request(MESH));
+    drop(serial);
+    assert_eq!(outcome, ended());
+    assert_eq!(case.finalized(), vec![AttemptEnd::DeadlineExceeded]);
+    assert!(case.store.seen_commits.lock().unwrap().is_empty());
+    assert_eq!(case.allocation().as_deref(), Some("failed"));
+    assert!(case.usage().private_bytes > 0, "charged until reclaimed");
+    assert_eq!(
+        (
+            case.dispatch.timing.started(),
+            case.dispatch.timing.deadline()
+        ),
+        (started, deadline),
+        "no new or extended budget"
+    );
 }

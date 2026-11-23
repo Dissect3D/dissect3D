@@ -13,7 +13,10 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
-        let dir = tempfile::tempdir().unwrap();
+        Self::create(tempfile::tempdir().unwrap())
+    }
+    /// A fresh enrolled Store under `dir`/engine.
+    fn create(dir: tempfile::TempDir) -> Self {
         let path = dir.path().join("engine");
         let root = OwnedRoot::create_private(&path, RootPurpose::EngineData).unwrap();
         let lease = AuthorityLease::acquire(&root).unwrap();
@@ -1421,3 +1424,12 @@ mod results_actor_tests;
 // 2026-11-23 RP-P03 authoritative publication transaction.
 #[path = "results_commit_tests.rs"]
 mod results_commit_tests;
+// 2026-11-23 RP-P03/6 process death around each durable publication step.
+#[path = "publication_crash_tests.rs"]
+mod publication_crash_tests;
+// 2026-11-23 RP-P03/7 offline corruption of committed result bytes.
+#[path = "publication_corruption_tests.rs"]
+mod publication_corruption_tests;
+// 2026-11-23 WE-P06/1 central dispatch turns.
+#[path = "dispatch_turn_tests.rs"]
+mod dispatch_turn_tests;

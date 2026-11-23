@@ -420,7 +420,7 @@ fn prepare_file(
 
 /// What one reclamation turn achieved.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(super) struct ReclaimReport {
+pub(crate) struct ReclaimReport {
     pub(crate) deleted: usize,
     pub(crate) released_bytes: u64,
     /// The Store handed out files this turn, so another turn may find more.
@@ -430,7 +430,7 @@ pub(super) struct ReclaimReport {
 /// Durably delete one bounded batch of reclaimable files, then release the
 /// charge of allocations left with none. A failed deletion stops the turn;
 /// only names already durably removed are confirmed.
-pub(super) fn reclaim_turn(
+pub(crate) fn reclaim_turn(
     ledger: &impl ResultLedger,
     root: &OwnedRoot,
 ) -> Result<ReclaimReport, PublicationError> {
@@ -463,6 +463,46 @@ pub(super) fn reclaim_turn(
     })
 }
 
+/// Why one committed file cannot be served accurately (RP-004, RP-P03/7).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ArtifactFault {
+    /// The committed file is gone: `artifact_unavailable`.
+    Unavailable,
+    /// The file is present but is not exactly its committed bytes, or cannot
+    /// be read safely: `storage_integrity_fault`.
+    Integrity,
+}
+
+/// Read one committed file through a fresh confined, no-follow private
+/// handle and check it against its committed length and digest. A fault is
+/// reported as found: nothing is re-hashed into the record, rebuilt,
+/// rewritten or run as another attempt. A reference that is not a generated
+/// object name is never opened.
+pub(crate) fn read_committed(
+    root: &OwnedRoot,
+    file: &crate::store::results_commit::CommittedFile,
+) -> Result<Vec<u8>, ArtifactFault> {
+    use sha2::{Digest, Sha256};
+    if !generated_name(&file.object_name, "art_") && !generated_name(&file.object_name, "pub_") {
+        return Err(ArtifactFault::Integrity);
+    }
+    let object = under(OBJECTS_DIR, &file.object_name).map_err(|_| ArtifactFault::Integrity)?;
+    let reader = match root.open_immutable_input(&object) {
+        Ok(reader) => reader,
+        Err(PlatformError::NotFound) => return Err(ArtifactFault::Unavailable),
+        Err(_) => return Err(ArtifactFault::Integrity),
+    };
+    let mut bytes = Vec::new();
+    reader
+        .take(file.byte_length.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|_| ArtifactFault::Integrity)?;
+    if bytes.len() as u64 != file.byte_length || Sha256::digest(&bytes)[..] != file.sha256 {
+        return Err(ArtifactFault::Integrity);
+    }
+    Ok(bytes)
+}
+
 fn remove_everywhere(root: &OwnedRoot, name: &str) -> Result<(), PublicationError> {
     if !generated_name(name, "art_") && !generated_name(name, "pub_") {
         return Err(PublicationError::Storage);
@@ -478,7 +518,7 @@ fn remove_everywhere(root: &OwnedRoot, name: &str) -> Result<(), PublicationErro
 
 /// Position of a bounded sweep over the result directories.
 #[derive(Default)]
-pub(super) struct AuditCursor {
+pub(crate) struct AuditCursor {
     directory: usize,
     scan: Option<OwnedInputScan>,
 }
@@ -496,7 +536,7 @@ pub(crate) struct AuditReport {
 /// entry (including links, folders and undecodable names) is moved to
 /// `results/quarantine` without being opened or deleted. A failed lookup is
 /// unknown, not absence: the turn stops and keeps everything.
-pub(super) fn audit_turn(
+pub(crate) fn audit_turn(
     ledger: &impl ResultLedger,
     root: &OwnedRoot,
     cursor: &mut AuditCursor,
