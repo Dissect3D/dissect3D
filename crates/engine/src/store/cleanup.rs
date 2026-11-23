@@ -45,11 +45,43 @@ impl From<&DispatchRecord> for AttemptRef {
 #[derive(Clone, Debug)]
 pub(crate) struct CleanupEvidence {
     identity: dissect3d_platform::WorkerIdentity,
+    kind: EvidenceKind,
+}
+/// What established the termination. Restart evidence stays distinguishable
+/// from a live witness in the recorded cleanup reason (decision 2026-11-24).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EvidenceKind {
+    /// The supervisor's native whole-tree witness.
+    Witness,
+    /// Restart found no recorded tree member alive (owner-death containment).
+    OwnerDeathContainment,
+    /// Restart found a recorded member alive and ended it by verified identity.
+    SurvivorTerminated,
 }
 impl CleanupEvidence {
     pub(crate) fn from_witness(witness: dissect3d_platform::CleanupConfirmed) -> Self {
         Self {
             identity: witness.identity().clone(),
+            kind: EvidenceKind::Witness,
+        }
+    }
+    /// Restart reconciliation of an earlier instance's worker (WE-P07/4).
+    pub(crate) fn after_restart(absent: dissect3d_platform::SurvivorsAbsent) -> Self {
+        Self {
+            identity: absent.identity().clone(),
+            kind: if absent.terminated() {
+                EvidenceKind::SurvivorTerminated
+            } else {
+                EvidenceKind::OwnerDeathContainment
+            },
+        }
+    }
+    /// The reason recorded with confirmed cleanup; a live witness has none.
+    pub(super) fn reason_code(&self) -> Option<&'static str> {
+        match self.kind {
+            EvidenceKind::Witness => None,
+            EvidenceKind::OwnerDeathContainment => Some("owner_death_containment"),
+            EvidenceKind::SurvivorTerminated => Some("restart_survivor_terminated"),
         }
     }
     /// The native worker identity whose whole tree the witness confirmed.
@@ -59,7 +91,10 @@ impl CleanupEvidence {
     /// Test-only evidence for a given identity (see `test_identity`).
     #[cfg(test)]
     pub(crate) fn for_test(identity: dissect3d_platform::WorkerIdentity) -> Self {
-        Self { identity }
+        Self {
+            identity,
+            kind: EvidenceKind::Witness,
+        }
     }
 }
 

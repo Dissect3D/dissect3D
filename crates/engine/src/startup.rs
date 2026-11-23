@@ -120,6 +120,39 @@ pub async fn run_submission_test_engine(data_root: &Path) -> Result<(), StartupE
     result
 }
 
+/// Isolated execution host backed by the explicitly prepared r2 package
+/// (WE-P06/WE-P09): prepared admission plus the controller, so accepted jobs
+/// dispatch to the contained r2 worker. Never the normal composition.
+#[cfg(all(unix, feature = "test-support"))]
+pub async fn run_execution_test_engine(data_root: &Path) -> Result<(), StartupError> {
+    dissect3d_platform::ensure_independent_engine().map_err(|_| StartupError::Runtime)?;
+    if !data_root.is_absolute() {
+        return Err(StartupError::Root);
+    }
+    let root =
+        OwnedRoot::open(data_root, RootPurpose::EngineData).map_err(|_| StartupError::Root)?;
+    let diagnostic_path = data_root.to_path_buf();
+    let result = async {
+        let lease = AuthorityLease::acquire(&root).map_err(|_| StartupError::Authority)?;
+        let fixture =
+            crate::execution_fixture::preparation::load(&root).map_err(StartupError::Fixture)?;
+        run_engine_inner(
+            data_root,
+            root,
+            lease,
+            Composition::Execution(Box::new(fixture)),
+        )
+        .await
+    }
+    .await;
+    if let Err(error) = result
+        && let Ok(root) = OwnedRoot::open(&diagnostic_path, RootPurpose::EngineData)
+    {
+        crate::diagnostics::record_startup_failure(&root, error);
+    }
+    result
+}
+
 async fn run_engine_with_catalog(
     data_root: &Path,
     catalog: crate::support::Catalog,
@@ -156,6 +189,18 @@ async fn run_engine_with_root(
     run_engine_with_lease(data_root, root, lease, catalog).await
 }
 
+/// What the HTTP host is composed with.
+enum Composition {
+    Catalog(Arc<crate::support::Catalog>),
+    #[cfg(feature = "test-support")]
+    Prepared(
+        Arc<crate::support::Catalog>,
+        Box<crate::submission_fixture::PreparedReadiness>,
+    ),
+    #[cfg(all(unix, feature = "test-support"))]
+    Execution(Box<crate::execution_fixture::preparation::PreparedExecutionFixture>),
+}
+
 pub(crate) async fn run_engine_with_lease(
     data_root: &Path,
     root: OwnedRoot,
@@ -164,6 +209,22 @@ pub(crate) async fn run_engine_with_lease(
     #[cfg(feature = "test-support")] prepared_readiness: Option<
         crate::submission_fixture::PreparedReadiness,
     >,
+) -> Result<(), StartupError> {
+    #[cfg(feature = "test-support")]
+    let composition = match prepared_readiness {
+        Some(readiness) => Composition::Prepared(catalog, Box::new(readiness)),
+        None => Composition::Catalog(catalog),
+    };
+    #[cfg(not(feature = "test-support"))]
+    let composition = Composition::Catalog(catalog);
+    run_engine_inner(data_root, root, lease, composition).await
+}
+
+async fn run_engine_inner(
+    data_root: &Path,
+    root: OwnedRoot,
+    lease: AuthorityLease,
+    composition: Composition,
 ) -> Result<(), StartupError> {
     // Register before publishing readiness so an immediate interrupt is queued.
     #[cfg(unix)]
@@ -182,19 +243,11 @@ pub(crate) async fn run_engine_with_lease(
     let bootstrap = BootstrapListener::bind(&service_root, identity.instance_id.as_str())
         .map_err(|_| StartupError::Bootstrap)?;
     let bootstrap_endpoint = discovery_bootstrap(bootstrap.endpoint())?;
-    #[cfg(feature = "test-support")]
-    let server = match prepared_readiness {
-        Some(readiness) => {
-            HttpServer::bind_with_prepared_catalog(
-                &service_root,
-                store.clone(),
-                CorePolicy::default(),
-                catalog,
-                readiness,
-            )
-            .await
-        }
-        None => {
+    // The execution controller, when this host composes one (WE-P07/3).
+    #[cfg(all(unix, feature = "test-support"))]
+    let mut execution: Option<Arc<crate::execution::controller::ExecutionHandle>> = None;
+    let server = match composition {
+        Composition::Catalog(catalog) => {
             HttpServer::bind_with_catalog(
                 &service_root,
                 store.clone(),
@@ -203,13 +256,61 @@ pub(crate) async fn run_engine_with_lease(
             )
             .await
         }
+        #[cfg(feature = "test-support")]
+        Composition::Prepared(catalog, readiness) => {
+            HttpServer::bind_with_prepared_catalog(
+                &service_root,
+                store.clone(),
+                CorePolicy::default(),
+                catalog,
+                *readiness,
+            )
+            .await
+        }
+        #[cfg(all(unix, feature = "test-support"))]
+        Composition::Execution(mut fixture) => {
+            let catalog = Arc::new(std::mem::replace(
+                &mut fixture.catalog,
+                crate::support::Catalog::empty(),
+            ));
+            let readiness = fixture.readiness.clone();
+            let attempts_root = Arc::new(
+                OwnedRoot::open(data_root, RootPurpose::EngineData)
+                    .map_err(|_| StartupError::Root)?,
+            );
+            // WE-P07/4: earlier workers are reconciled before any dispatch.
+            let recovery_store = store.clone();
+            tokio::task::spawn_blocking(move || {
+                crate::execution::recovery::reconcile(&recovery_store)
+            })
+            .await
+            .map_err(|_| StartupError::Runtime)?
+            .map_err(|_| StartupError::Store)?;
+            let handle = crate::execution::controller::start(
+                crate::execution::controller::ExecutionDependencies {
+                    store: store.clone(),
+                    root: Arc::clone(&attempts_root),
+                    source: Arc::new(crate::execution_fixture::attempts::FixtureAttempts::new(
+                        *fixture,
+                        attempts_root,
+                    )),
+                    limits: crate::execution::controller::ExecutionLimits::CONTROLLED,
+                },
+            );
+            let handle = Arc::new(handle);
+            execution = Some(Arc::clone(&handle));
+            HttpServer::bind_with_execution(
+                &service_root,
+                store.clone(),
+                CorePolicy::default(),
+                catalog,
+                readiness,
+                handle,
+            )
+            .await
+        }
     }
     .map_err(|_| StartupError::Https)?;
-    #[cfg(not(feature = "test-support"))]
-    let server =
-        HttpServer::bind_with_catalog(&service_root, store.clone(), CorePolicy::default(), catalog)
-            .await
-            .map_err(|_| StartupError::Https)?;
     let process = current_process_identity().map_err(|_| StartupError::Runtime)?;
     let service_instance_id = identity.instance_id.clone();
     let (ca_der, ca_sha256) = server.trust_anchor();
@@ -296,6 +397,25 @@ pub(crate) async fn run_engine_with_lease(
         _ => Instant::now(),
     };
     let _ = stop_http.send(drain_deadline);
+    // WE-005: running attempts stop within the same core deadline, before
+    // the final store/session completion. An early end (HTTP failure) still
+    // stops them, with a fresh bounded deadline; its result is an error anyway.
+    #[cfg(all(unix, feature = "test-support"))]
+    let execution_stop = match &execution {
+        Some(handle) => {
+            let deadline = match &end {
+                LifetimeEnd::Shutdown(Ok(deadline)) => *deadline,
+                _ => {
+                    Instant::now()
+                        + Duration::from_millis(u64::from(
+                            CorePolicy::default().shutdown_timeout_ms,
+                        ))
+                }
+            };
+            handle.shutdown(deadline).await
+        }
+        None => crate::execution::controller::ShutdownOutcome::Clean,
+    };
     // Always stop both channels, including signal/storage and HTTP-task errors.
     let bootstrap_result = tokio::task::spawn_blocking(move || bootstrap_thread.join()).await;
     let result = match end {
@@ -319,6 +439,15 @@ pub(crate) async fn run_engine_with_lease(
             Err(StartupError::Runtime)
         }
     });
+    // Uncertain worker cleanup is never a clean shutdown (WE-005).
+    #[cfg(all(unix, feature = "test-support"))]
+    let result = result.and(
+        if execution_stop == crate::execution::controller::ShutdownOutcome::Clean {
+            Ok(())
+        } else {
+            Err(StartupError::ShutdownDeadline)
+        },
+    );
     let result = match result {
         Ok(()) => {
             let completion_store = store.clone();

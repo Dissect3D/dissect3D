@@ -13,6 +13,8 @@ mod lease;
 pub mod native_test_hooks;
 mod process;
 mod root;
+#[cfg(test)]
+mod survivor_tests;
 #[cfg(windows)]
 mod windows;
 mod worker;
@@ -34,7 +36,7 @@ pub use process::{
 };
 pub use root::{OwnedRoot, PlatformError, RootPurpose};
 pub use worker::{
-    CleanupConfirmed, CleanupFault, MAX_WORKER_INPUTS, WORKER_CONTROL_ENV, WORKER_INPUTS_ENV,
-    WorkerChannels, WorkerCommand, WorkerIdentity, WorkerProcess, worker_control_channels,
-    worker_inherited_input,
+    CleanupConfirmed, CleanupFault, MAX_WORKER_INPUTS, SurvivorsAbsent, WORKER_CONTROL_ENV,
+    WORKER_INPUTS_ENV, WorkerChannels, WorkerCommand, WorkerIdentity, WorkerProcess,
+    reconcile_survivors, worker_control_channels, worker_inherited_input,
 };

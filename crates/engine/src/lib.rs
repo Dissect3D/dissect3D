@@ -53,6 +53,8 @@ pub use http::{HttpError, HttpServer};
 pub use policy::CorePolicy;
 #[cfg(feature = "test-support")]
 pub use startup::run_discovery_test_engine;
+#[cfg(all(unix, feature = "test-support"))]
+pub use startup::run_execution_test_engine;
 #[cfg(feature = "test-support")]
 pub use startup::run_selection_test_engine;
 #[cfg(feature = "test-support")]

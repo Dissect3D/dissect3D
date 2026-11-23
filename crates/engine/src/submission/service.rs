@@ -75,10 +75,6 @@ impl SubmissionService {
         self.submit_request(auth, key, SubmittedJobRequest::Legacy(request))
             .await
     }
-    #[allow(
-        dead_code,
-        reason = "WE-P06 routes are inactive until all execution dependencies are ready"
-    )]
     pub(crate) async fn submit_execution(
         &self,
         auth: AuthContext,
@@ -90,10 +86,6 @@ impl SubmissionService {
     }
     /// WE-003 exact linked retry. Replay of a retained binding never consults
     /// readiness or reconciliation; fresh work requires both.
-    #[allow(
-        dead_code,
-        reason = "WE-P06 routes are inactive until all execution dependencies are ready"
-    )]
     pub(crate) async fn retry_execution(
         &self,
         auth: AuthContext,
@@ -108,6 +100,19 @@ impl SubmissionService {
         tokio::task::spawn_blocking(move || store.retry_job(auth, key, source, prerequisites))
             .await
             .map_err(|_| SubmissionError::from(ErrorCode::StoreUnavailable))?
+    }
+    /// WE-001: an original Stage 3 body under the negotiated header replays
+    /// its retained binding exactly. It never creates fresh work on an
+    /// execution-enabled engine.
+    pub(crate) async fn replay_legacy(
+        &self,
+        auth: AuthContext,
+        key: IdempotencyKey,
+        request: JobRequest,
+    ) -> Result<AcceptanceReceipt, SubmissionError> {
+        self.probe(auth, key, SubmittedJobRequest::Legacy(request))
+            .await?
+            .ok_or_else(|| ErrorCode::IncompatibleContract.into())
     }
     async fn submit_request(
         &self,

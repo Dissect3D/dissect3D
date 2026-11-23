@@ -16,9 +16,9 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use dissect3d_api::{
-    ApiError, ApiErrorBody, AuthRevokeRequest, AuthStatus, ClientId, CorrelationId, EngineInfo,
-    ErrorCode, IdempotencyKey, OperationId, OperationReceipt, OperationTarget, ShutdownRequest,
-    TokenDigest, decode_json,
+    ApiError, ApiErrorBody, AuthRevokeRequest, AuthStatus, ClientId, CorrelationId, ErrorCode,
+    IdempotencyKey, OperationId, OperationReceipt, OperationTarget, ShutdownRequest, TokenDigest,
+    decode_json,
 };
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
@@ -227,6 +227,8 @@ fn required_grant(method: &Method, path: &str) -> Option<&'static str> {
         (&Method::POST, "/v1/inputs") => Some("inputs.create"),
         (&Method::POST, "/v1/jobs") => Some("jobs.submit"),
         (&Method::GET, "/v1/jobs") => Some("jobs.list"),
+        (&Method::POST, path) if job_control(path) == Some("cancel") => Some("jobs.cancel"),
+        (&Method::POST, path) if job_control(path) == Some("retry") => Some("jobs.retry"),
         (&Method::GET, path) if path.starts_with("/v1/jobs/") => Some("jobs.show"),
         (&Method::GET, path)
             if path
@@ -237,6 +239,12 @@ fn required_grant(method: &Method, path: &str) -> Option<&'static str> {
         }
         _ => None,
     }
+}
+
+/// `cancel` or `retry` for `/v1/jobs/{one segment}/{action}`.
+fn job_control(path: &str) -> Option<&str> {
+    let (id, action) = path.strip_prefix("/v1/jobs/")?.split_once('/')?;
+    (!id.is_empty() && !action.contains('/')).then_some(action)
 }
 
 fn exact_single_header(headers: &HeaderMap, name: axum::http::HeaderName, expected: &[u8]) -> bool {
@@ -283,10 +291,20 @@ fn hex_nibble(value: u8) -> u8 {
     }
 }
 
+/// `/v1/info` of an execution host: the core record plus `job_execution`,
+/// which older core clients ignore.
+#[cfg(unix)]
+#[derive(serde::Serialize)]
+struct ExecutionInfo {
+    #[serde(flatten)]
+    core: dissect3d_api::EngineInfo,
+    job_execution: dissect3d_api::ExecutionCapability,
+}
+
 async fn info(
     Extension(authorized): Extension<AuthorizedRequest>,
     State(state): State<Arc<ServiceState>>,
-) -> Json<EngineInfo> {
+) -> Response {
     #[cfg(all(unix, test))]
     state.test_hooks.info().await;
     let info = engine_info(
@@ -310,7 +328,22 @@ async fn info(
         }
         info
     };
-    Json(info)
+    #[cfg(unix)]
+    if state.execution.is_some() {
+        let mut info = info;
+        // Old Stage 3 clients refuse a dispatching engine (WE-001).
+        if let Some(submission) = info.submission.as_mut() {
+            submission.dispatch_enabled = true;
+        }
+        info.supported_operations
+            .extend(["jobs.cancel", "jobs.retry"].map(str::to_owned));
+        return Json(ExecutionInfo {
+            core: info,
+            job_execution: crate::execution::control::capability(),
+        })
+        .into_response();
+    }
+    Json(info).into_response()
 }
 
 async fn status(Extension(authorized): Extension<AuthorizedRequest>) -> Json<AuthStatus> {

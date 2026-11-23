@@ -35,6 +35,71 @@ impl ProcessWatcher {
     /// Rechecking the birth marker after registration prevents PID reuse from
     /// binding the observer to a later process.
     pub fn new(identity: &ProcessIdentity) -> Result<Self, PlatformError> {
+        Self::open(identity, false)
+    }
+
+    /// Like [`ProcessWatcher::new`], with the right to end that exact process
+    /// through [`ProcessWatcher::kill`] (restart reconciliation, WE-P07/4).
+    pub fn new_terminable(identity: &ProcessIdentity) -> Result<Self, PlatformError> {
+        Self::open(identity, true)
+    }
+
+    /// Forcibly end the verified process this watcher is bound to. Linux and
+    /// Windows signal through the pinned handle, so a reused PID is never
+    /// hit. macOS has no process handle: the start marker is rechecked just
+    /// before `kill`, which leaves a short PID-reuse window (recorded limit).
+    pub fn kill(&self) -> Result<(), PlatformError> {
+        #[cfg(target_os = "linux")]
+        {
+            match rustix::process::pidfd_send_signal(&self.handle, rustix::process::Signal::KILL) {
+                Ok(()) | Err(rustix::io::Errno::SRCH) => Ok(()),
+                Err(_) => Err(PlatformError::Io),
+            }
+        }
+        #[cfg(target_os = "macos")]
+        {
+            if !process_matches(&self.identity)? {
+                return Ok(());
+            }
+            let pid = libc::pid_t::try_from(self.identity.pid).map_err(|_| PlatformError::Io)?;
+            // SAFETY: plain signal delivery to a verified pid.
+            if unsafe { libc::kill(pid, libc::SIGKILL) } == 0
+                || std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+            {
+                Ok(())
+            } else {
+                Err(PlatformError::Io)
+            }
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle;
+            // SAFETY: the handle is a live owned process handle opened with
+            // PROCESS_TERMINATE by `new_terminable`.
+            if unsafe {
+                windows_sys::Win32::System::Threading::TerminateProcess(
+                    self.handle.as_raw_handle().cast(),
+                    1,
+                )
+            } != 0
+                // A process that already exited (still open elsewhere) cannot
+                // be terminated again; its signaled handle proves the exit.
+                || self.wait(Duration::ZERO)?
+            {
+                Ok(())
+            } else {
+                Err(PlatformError::Io)
+            }
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+        {
+            Err(PlatformError::UnsupportedRoot)
+        }
+    }
+
+    fn open(identity: &ProcessIdentity, terminate: bool) -> Result<Self, PlatformError> {
+        #[cfg(not(windows))]
+        let _ = terminate;
         if !process_matches(identity)? {
             return Err(PlatformError::NotFound);
         }
@@ -94,14 +159,12 @@ impl ProcessWatcher {
             use std::os::windows::io::FromRawHandle;
             use windows_sys::Win32::System::Threading::{
                 OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+                PROCESS_TERMINATE,
             };
-            let raw = unsafe {
-                OpenProcess(
-                    PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
-                    0,
-                    identity.pid,
-                )
-            };
+            let rights = PROCESS_QUERY_LIMITED_INFORMATION
+                | PROCESS_SYNCHRONIZE
+                | if terminate { PROCESS_TERMINATE } else { 0 };
+            let raw = unsafe { OpenProcess(rights, 0, identity.pid) };
             if raw.is_null() {
                 return Err(crate::windows::process_query_error());
             }

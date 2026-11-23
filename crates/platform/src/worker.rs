@@ -4,7 +4,7 @@ use std::ffi::OsString;
 use std::fs::File;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 #[cfg(windows)]
 #[path = "worker/windows.rs"]
@@ -156,6 +156,70 @@ pub enum CleanupFault {
     Deadline,
     OwnershipLost,
     NativeFailure,
+}
+
+/// Restart evidence about a previous engine's worker (WE-P07/4; user decision
+/// 2026-11-24): no recorded member of its tree (guardian, worker) still
+/// matches its pid and start marker. A member found alive was ended through a
+/// handle bound to the verified process. The rest of the tree relies on the
+/// tested owner-death containment (Linux guardian lifeline, Windows
+/// kill-on-close Job); this is that evidence kind, distinct from a
+/// [`CleanupConfirmed`] live witness. Only [`reconcile_survivors`] mints it.
+#[derive(Clone, Debug)]
+pub struct SurvivorsAbsent {
+    identity: WorkerIdentity,
+    terminated: bool,
+}
+impl SurvivorsAbsent {
+    pub fn identity(&self) -> &WorkerIdentity {
+        &self.identity
+    }
+    /// A recorded member was still alive and had to be ended.
+    pub fn terminated(&self) -> bool {
+        self.terminated
+    }
+}
+
+/// Reconcile a previous engine's worker tree at restart. A live guardian is
+/// first given half the time to finish the cleanup it starts when it loses
+/// its lifeline; then any recorded member that still matches is killed
+/// through a verified handle and awaited. Never signals a PID whose start
+/// marker differs. A query failure or a member that outlives `timeout` is a
+/// fault: holds stay.
+pub fn reconcile_survivors(
+    identity: &WorkerIdentity,
+    timeout: Duration,
+) -> Result<SurvivorsAbsent, CleanupFault> {
+    use crate::process::{ProcessWatcher, wait_for_process_exit};
+    let native = |_| CleanupFault::NativeFailure;
+    let deadline = Instant::now() + timeout;
+    if let Some(guardian) = &identity.guardian {
+        wait_for_process_exit(guardian, timeout / 2).map_err(native)?;
+    }
+    let members = std::iter::once(&identity.process).chain(identity.guardian.as_ref());
+    let mut terminated = false;
+    for member in members {
+        // A verified handle, or proof that no process has this identity.
+        let watcher = match ProcessWatcher::new_terminable(member) {
+            Ok(watcher) => watcher,
+            Err(PlatformError::NotFound) => continue,
+            Err(_) => return Err(CleanupFault::NativeFailure),
+        };
+        // Exited, but still open elsewhere (Windows): already absent.
+        if watcher.wait(Duration::ZERO).map_err(native)? {
+            continue;
+        }
+        watcher.kill().map_err(native)?;
+        terminated = true;
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if !watcher.wait(remaining).map_err(native)? {
+            return Err(CleanupFault::Deadline);
+        }
+    }
+    Ok(SurvivorsAbsent {
+        identity: identity.clone(),
+        terminated,
+    })
 }
 
 pub struct WorkerProcess {

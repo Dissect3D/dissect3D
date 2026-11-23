@@ -40,7 +40,7 @@ pub(crate) fn process_limits() -> SupervisionLimits {
         ..limits()
     }
 }
-pub(super) fn plan(limits: SupervisionLimits) -> AttemptPlan {
+pub(crate) fn plan(limits: SupervisionLimits) -> AttemptPlan {
     AttemptPlan {
         expectation: expectation(),
         resolution_handle: "res:1".into(),

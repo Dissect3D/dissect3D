@@ -67,10 +67,17 @@ struct ServiceState {
     #[cfg(unix)]
     inputs: Arc<crate::inputs::InputService>,
     catalog: Arc<Catalog>,
+    /// The facts discovery observations explain: Phase 2 values, or the
+    /// explicit execution host's engine-owned facts (WE-P06/6).
+    observations: Arc<dyn crate::support::ObservationSource>,
     #[cfg(unix)]
     submissions: Arc<crate::submission::service::SubmissionService>,
     #[cfg(unix)]
     jobs: Arc<crate::jobs::JobsService>,
+    /// Present only in an explicitly composed execution host (WE-001): the
+    /// controller that negotiated execution routes drive.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    execution: Option<Arc<crate::execution::controller::ExecutionHandle>>,
 }
 
 #[cfg(feature = "test-support")]
@@ -117,9 +124,9 @@ impl HttpServer {
         catalog: Arc<Catalog>,
     ) -> Result<Self, HttpError> {
         #[cfg(feature = "test-support")]
-        return Self::bind_inner(root, store, policy, catalog, None).await;
+        return Self::bind_inner(root, store, policy, catalog, None, None).await;
         #[cfg(not(feature = "test-support"))]
-        Self::bind_inner(root, store, policy, catalog, ()).await
+        Self::bind_inner(root, store, policy, catalog, (), None).await
     }
 
     #[cfg(feature = "test-support")]
@@ -130,7 +137,28 @@ impl HttpServer {
         catalog: Arc<Catalog>,
         readiness: PreparedReadiness,
     ) -> Result<Self, HttpError> {
-        Self::bind_inner(root, store, policy, catalog, Some(readiness)).await
+        Self::bind_inner(root, store, policy, catalog, Some(readiness), None).await
+    }
+
+    /// The explicit execution host: prepared admission plus the controller.
+    #[cfg(all(unix, feature = "test-support"))]
+    pub(crate) async fn bind_with_execution(
+        root: &OwnedRoot,
+        store: Arc<Store>,
+        policy: CorePolicy,
+        catalog: Arc<Catalog>,
+        readiness: PreparedReadiness,
+        execution: Arc<crate::execution::controller::ExecutionHandle>,
+    ) -> Result<Self, HttpError> {
+        Self::bind_inner(
+            root,
+            store,
+            policy,
+            catalog,
+            Some(readiness),
+            Some(execution),
+        )
+        .await
     }
 
     async fn bind_inner(
@@ -140,6 +168,7 @@ impl HttpServer {
         catalog: Arc<Catalog>,
         #[cfg(feature = "test-support")] prepared_readiness: PreparedReadinessOption,
         #[cfg(not(feature = "test-support"))] _prepared_readiness: PreparedReadinessOption,
+        execution: Option<Arc<crate::execution::controller::ExecutionHandle>>,
     ) -> Result<Self, HttpError> {
         let tls = TlsMaterial::load_or_create(root).map_err(|_| HttpError::Tls)?;
         let request_timeout = Duration::from_millis(u64::from(policy.request_timeout_ms));
@@ -165,6 +194,17 @@ impl HttpServer {
         let prepared = None;
         #[cfg(all(not(unix), feature = "test-support"))]
         let _ = prepared_readiness;
+        let observations: Arc<dyn crate::support::ObservationSource> = match &execution {
+            #[cfg(all(unix, feature = "test-support"))]
+            Some(handle) => match &prepared_readiness {
+                Some(readiness) => Arc::new(crate::execution_fixture::observations::host_facts(
+                    readiness,
+                    handle.loaded(),
+                )),
+                None => Arc::new(crate::support::PhaseTwoFacts),
+            },
+            _ => Arc::new(crate::support::PhaseTwoFacts),
+        };
         #[cfg(unix)]
         let jobs = Arc::new(crate::jobs::JobsService::new(
             store.clone(),
@@ -190,10 +230,12 @@ impl HttpServer {
             #[cfg(unix)]
             inputs,
             catalog,
+            observations,
             #[cfg(unix)]
             submissions,
             #[cfg(unix)]
             jobs,
+            execution,
         });
         #[cfg(unix)]
         let recovery_state = state.inputs.clone();

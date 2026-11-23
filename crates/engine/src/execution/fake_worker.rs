@@ -14,14 +14,14 @@ use std::time::Instant;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, DuplexStream, ReadHalf, WriteHalf};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum OnLoad {
+pub(crate) enum OnLoad {
     Loaded,
     LoadedTwice,
     Fail,
     Hang,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum OnExecute {
+pub(crate) enum OnExecute {
     Candidate,
     Fail,
     Hang,
@@ -31,23 +31,25 @@ pub(super) enum OnExecute {
     ProgressThenCandidate(u32),
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum LaunchMode {
+pub(crate) enum LaunchMode {
     Ok,
     NotStarted,
     Uncertain,
 }
 
 #[derive(Clone, Debug)]
-pub(super) struct Behavior {
-    pub(super) session_override: Option<&'static str>,
-    pub(super) configured: bool,
-    pub(super) on_load: OnLoad,
-    pub(super) on_execute: OnExecute,
-    pub(super) pong: bool,
-    pub(super) cancel_ack: bool,
-    pub(super) candidate_after_cancel: bool,
+pub(crate) struct Behavior {
+    pub(crate) session_override: Option<&'static str>,
+    pub(crate) configured: bool,
+    pub(crate) on_load: OnLoad,
+    pub(crate) on_execute: OnExecute,
+    pub(crate) pong: bool,
+    pub(crate) cancel_ack: bool,
+    pub(crate) candidate_after_cancel: bool,
     /// Bytes written to diagnostics before the execution report.
-    pub(super) diagnostics: usize,
+    pub(crate) diagnostics: usize,
+    /// Candidate payload to report instead of the built-in one.
+    pub(crate) candidate: Option<Value>,
 }
 impl Default for Behavior {
     fn default() -> Self {
@@ -60,37 +62,38 @@ impl Default for Behavior {
             cancel_ack: true,
             candidate_after_cancel: false,
             diagnostics: 0,
+            candidate: None,
         }
     }
 }
 
 /// What the fake observed.
 #[derive(Debug, Default)]
-pub(super) struct Record {
-    pub(super) launches: AtomicU32,
-    pub(super) executes: AtomicU32,
-    pub(super) pings: AtomicU32,
-    pub(super) shutdowns: AtomicU32,
-    pub(super) terminations: AtomicU32,
-    pub(super) cancels: Mutex<Vec<String>>,
+pub(crate) struct Record {
+    pub(crate) launches: AtomicU32,
+    pub(crate) executes: AtomicU32,
+    pub(crate) pings: AtomicU32,
+    pub(crate) shutdowns: AtomicU32,
+    pub(crate) terminations: AtomicU32,
+    pub(crate) cancels: Mutex<Vec<String>>,
 }
 impl Record {
-    pub(super) fn count(counter: &AtomicU32) -> u32 {
+    pub(crate) fn count(counter: &AtomicU32) -> u32 {
         counter.load(Ordering::SeqCst)
     }
-    pub(super) fn cancel_reasons(&self) -> Vec<String> {
+    pub(crate) fn cancel_reasons(&self) -> Vec<String> {
         self.cancels.lock().unwrap().clone()
     }
 }
 
-pub(super) struct FakeLauncher {
-    pub(super) behavior: Behavior,
-    pub(super) record: Arc<Record>,
-    pub(super) mode: LaunchMode,
-    pub(super) cleanup: Result<(), CleanupFault>,
+pub(crate) struct FakeLauncher {
+    pub(crate) behavior: Behavior,
+    pub(crate) record: Arc<Record>,
+    pub(crate) mode: LaunchMode,
+    pub(crate) cleanup: Result<(), CleanupFault>,
 }
 impl FakeLauncher {
-    pub(super) fn new(behavior: Behavior) -> (Self, Arc<Record>) {
+    pub(crate) fn new(behavior: Behavior) -> (Self, Arc<Record>) {
         let record = Arc::new(Record::default());
         (
             Self {
@@ -104,7 +107,7 @@ impl FakeLauncher {
     }
 }
 
-pub(super) struct FakeProcess {
+pub(crate) struct FakeProcess {
     record: Arc<Record>,
     worker: tokio::task::AbortHandle,
     cleanup: Result<(), CleanupFault>,
@@ -133,16 +136,16 @@ pub(crate) enum LedgerMode {
 /// Test launch ledger: keeps every record and, with `record`, how many
 /// executes the fake worker had already received when the record arrived.
 pub(crate) struct TestLedger {
-    pub(super) mode: LedgerMode,
-    pub(super) records: Mutex<Vec<LaunchRecord>>,
-    pub(super) executes_before_record: Mutex<Vec<u32>>,
-    pub(super) worker: Option<Arc<Record>>,
+    pub(crate) mode: LedgerMode,
+    pub(crate) records: Mutex<Vec<LaunchRecord>>,
+    pub(crate) executes_before_record: Mutex<Vec<u32>>,
+    pub(crate) worker: Option<Arc<Record>>,
 }
 impl TestLedger {
     pub(crate) fn new(mode: LedgerMode) -> Arc<Self> {
         Self::observing(mode, None)
     }
-    pub(super) fn observing(mode: LedgerMode, worker: Option<Arc<Record>>) -> Arc<Self> {
+    pub(crate) fn observing(mode: LedgerMode, worker: Option<Arc<Record>>) -> Arc<Self> {
         Arc::new(Self {
             mode,
             records: Mutex::new(Vec::new()),
@@ -150,7 +153,7 @@ impl TestLedger {
             worker,
         })
     }
-    pub(super) fn identities(&self) -> Vec<WorkerIdentity> {
+    pub(crate) fn identities(&self) -> Vec<WorkerIdentity> {
         let records = self.records.lock().unwrap();
         records.iter().map(|r| r.identity.clone()).collect()
     }
@@ -215,7 +218,7 @@ impl WorkerLauncher for FakeLauncher {
     }
 }
 
-pub(super) fn line(session: &str, kind: &str, payload: Value, extra: &[(&str, Value)]) -> Vec<u8> {
+pub(crate) fn line(session: &str, kind: &str, payload: Value, extra: &[(&str, Value)]) -> Vec<u8> {
     let mut object = serde_json::Map::new();
     object.insert("protocol_version".into(), "d3d-worker/1".into());
     object.insert("kind".into(), kind.into());
@@ -254,9 +257,11 @@ async fn run(
     let candidate = line(
         &session,
         "candidate",
-        json!({"description_handle": "out:desc", "files": [
-            {"relative_name": "mesh.obj", "byte_length": 10, "sha256": "d".repeat(64)}
-        ]}),
+        behavior.candidate.clone().unwrap_or_else(|| {
+            json!({"description_handle": "out:desc", "files": [
+                {"relative_name": "mesh.obj", "byte_length": 10, "sha256": "d".repeat(64)}
+            ]})
+        }),
         &scoped(None),
     );
     let (reader, mut writer) = tokio::io::split(control);

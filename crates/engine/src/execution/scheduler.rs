@@ -149,3 +149,28 @@ pub(crate) fn dispatch_turn(
     }
     turn
 }
+
+/// The current blocker of every queued job, oldest first, from the same
+/// eligibility facts a turn uses. Reserves nothing; at most the bounded
+/// nonterminal queue is read, page by page.
+pub(crate) fn queued_blockers(
+    store: &impl DispatchStore,
+    eligibility: impl Fn(&QueuedCandidate) -> Eligibility,
+) -> Result<Vec<(JobId, &'static str)>, CoreError> {
+    let mut blocked = Vec::new();
+    let mut after = 0;
+    loop {
+        let page = store.queued_candidates(after, CANDIDATE_PAGE)?;
+        let Some(last) = page.last() else {
+            return Ok(blocked);
+        };
+        after = last.acceptance_sequence;
+        for candidate in page {
+            if !candidate.storage_verified {
+                blocked.push((candidate.job_id, "storage_integrity_fault"));
+            } else if let Eligibility::Blocked(code) = eligibility(&candidate) {
+                blocked.push((candidate.job_id, code));
+            }
+        }
+    }
+}

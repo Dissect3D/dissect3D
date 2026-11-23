@@ -1433,3 +1433,18 @@ mod publication_corruption_tests;
 // 2026-11-23 WE-P06/1 central dispatch turns.
 #[path = "dispatch_turn_tests.rs"]
 mod dispatch_turn_tests;
+// 2026-11-23 WE-P06 execution controller.
+#[path = "execution_controller_tests.rs"]
+mod execution_controller_tests;
+// 2026-11-23 WE-P06/3 real attempt source for the prepared r2 package.
+#[path = "fixture_attempts_tests.rs"]
+mod fixture_attempts_tests;
+// 2026-11-23 WE-P06 execution routes over real HTTPS.
+#[path = "execution_routes_tests.rs"]
+mod execution_routes_tests;
+// 2026-11-24 WE-P07/4 restart reconciliation of earlier workers.
+#[path = "recovery_tests.rs"]
+mod recovery_tests;
+// 2026-11-24 WE-P07/3-4 through real engine processes.
+#[path = "execution_restart_tests.rs"]
+mod execution_restart_tests;

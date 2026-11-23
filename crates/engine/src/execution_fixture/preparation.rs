@@ -15,10 +15,10 @@ use super::{
     ADAPTER_ID, ADAPTER_REVISION, CLOSURE_MANIFEST, CLOSURE_SHA256, SOURCE_FILES, expected_marker,
     sha256_hex,
 };
-use crate::submission_fixture::{FixtureError, selection_snapshot_value};
+use crate::submission_fixture::{FixtureError, PreparedReadiness, selection_snapshot_value};
 use crate::support::{Catalog, ControlledPackage, DiscoveryLimits, ResolvedSelection, Selection};
 use crate::worker_protocol::{WorkerReport, decode_inbound, random_id};
-use dissect3d_api::TaskKey;
+use dissect3d_api::{ContentDigest, PreparedReadiness as PreparedReadinessDto, TaskKey};
 use dissect3d_platform::{
     AuthorityLease, OwnedRoot, RelativePath, RootPurpose, WorkerCommand, WorkerProcess,
 };
@@ -111,6 +111,9 @@ pub(crate) struct PreparedExecutionFixture {
     /// The exact resolution document handed to the worker.
     pub(crate) resolution_document: Vec<u8>,
     pub(crate) readiness_fingerprint: String,
+    /// The readiness facts admission captures and dispatch compares; built
+    /// once from the verified report, never re-derived per job.
+    pub(crate) readiness: PreparedReadiness,
     /// The worker build identity `hello` must report.
     pub(crate) worker_sha256: String,
     worker: PathBuf,
@@ -124,7 +127,9 @@ impl PreparedExecutionFixture {
     /// installed worker and guardian bytes against the prepared report.
     pub(crate) fn command(&self, report_root: &OwnedRoot) -> Result<WorkerCommand, FixtureError> {
         let fresh = load(report_root)?;
-        if fresh.worker_sha256 != self.worker_sha256 {
+        if fresh.worker_sha256 != self.worker_sha256
+            || fresh.readiness.snapshot != self.readiness.snapshot
+        {
             return Err(FixtureError::Integrity);
         }
         let mut command = WorkerCommand::new(self.worker.clone());
@@ -277,6 +282,26 @@ fn material() -> Result<Material, FixtureError> {
         sources,
         catalog,
         resolved,
+    })
+}
+
+/// The readiness snapshot an r2 acceptance captures: the probe check, the
+/// sealed report and the exact worker build and closure it verified.
+fn readiness_snapshot(report: &Report) -> Result<PreparedReadinessDto, FixtureError> {
+    let digest =
+        |value: &str| ContentDigest::parse(value.to_owned()).map_err(|_| FixtureError::Integrity);
+    Ok(PreparedReadinessDto {
+        check_id: report.check_id.clone(),
+        fingerprint: digest(&report.readiness_fingerprint)?,
+        runtime_realization: format!(
+            "native-test:{}:{}:worker-sha256:{}:closure-sha256:{}:manifest-sha256:{}",
+            report.target_os,
+            report.target_architecture,
+            report.worker_sha256,
+            report.worker_closure_sha256,
+            report.integrity_sha256,
+        ),
+        integrity_sha256: digest(&report.integrity_sha256)?,
     })
 }
 
@@ -692,7 +717,12 @@ pub(crate) fn load(root: &OwnedRoot) -> Result<PreparedExecutionFixture, Fixture
     verify(root, &report)?;
     let material = material()?;
     let command = launch_command(root, &report)?;
+    let readiness = PreparedReadiness {
+        resolved: material.resolved.clone(),
+        snapshot: readiness_snapshot(&report)?,
+    };
     Ok(PreparedExecutionFixture {
+        readiness,
         resolution_document: resolution_document(&material.resolved)?,
         catalog: material.catalog,
         resolved: material.resolved,

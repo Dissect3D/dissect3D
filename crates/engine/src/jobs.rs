@@ -41,6 +41,48 @@ impl JobsService {
         }
         Ok(snapshot)
     }
+    /// Execution-aware snapshot (WE-001/WE-002), creator-scoped. Another
+    /// creator's job is indistinguishable from a missing one. A queued job's
+    /// blocker is the controller's, never a static answer.
+    pub(crate) async fn execution_show(
+        &self,
+        auth: AuthContext,
+        id: JobId,
+        controller: Arc<crate::execution::controller::ExecutionHandle>,
+    ) -> Result<dissect3d_api::ExecutionJobSnapshot, SubmissionError> {
+        let store = self.store.clone();
+        let snapshot = tokio::task::spawn_blocking(move || {
+            let blocker = |job: &JobId| controller.blocker(job);
+            store.execution_job_snapshot_with(auth, id, Some(&blocker))
+        })
+        .await
+        .map_err(|_| SubmissionError::from(ErrorCode::StoreUnavailable))?
+        .map_err(|error| match error {
+            crate::CoreError::NotFound => ErrorCode::NotFound.into(),
+            other => SubmissionError::from(other),
+        })?;
+        if !self.is_reconciled()
+            && snapshot.summary.storage_status == dissect3d_api::StorageStatus::Verified
+        {
+            return Err(ErrorCode::StorageUnavailable.into());
+        }
+        Ok(snapshot)
+    }
+    /// Execution-aware creator-scoped page.
+    pub(crate) async fn execution_list(
+        &self,
+        auth: AuthContext,
+        query: JobsQuery,
+        controller: Arc<crate::execution::controller::ExecutionHandle>,
+    ) -> Result<dissect3d_api::ExecutionJobPage, SubmissionError> {
+        let store = self.store.clone();
+        tokio::task::spawn_blocking(move || {
+            let blocker = |job: &JobId| controller.blocker(job);
+            store.execution_job_page_with(auth, query, Some(&blocker))
+        })
+        .await
+        .map_err(|_| SubmissionError::from(ErrorCode::StoreUnavailable))?
+    }
     pub(crate) async fn list(
         &self,
         auth: AuthContext,

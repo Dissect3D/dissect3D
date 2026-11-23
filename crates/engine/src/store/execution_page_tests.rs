@@ -297,8 +297,9 @@ fn corrupt_or_unpublishable_stored_rows_fail_the_page_closed_instead_of_being_sk
         ("state", "bogus", ErrorCode::StoreUnavailable),
         ("phase", "", ErrorCode::StoreUnavailable),
         ("cleanup_status", "maybe", ErrorCode::StoreUnavailable),
-        // RP-P03 supplies real result IDs; success is never shown with none.
-        ("state", "succeeded", ErrorCode::Busy),
+        // Success is never shown without its committed result (RP-P03): a
+        // success row with none is corrupt and fails closed.
+        ("state", "succeeded", ErrorCode::StoreUnavailable),
     ] {
         let f = Fixture::new();
         let auth = authorize(&f);

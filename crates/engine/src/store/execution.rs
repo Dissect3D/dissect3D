@@ -106,6 +106,10 @@ pub(super) enum ExecutionCommand {
         SyncSender<Result<DispatchRecord, CoreError>>,
     ),
     Timing(String, SyncSender<Result<Arc<AttemptTiming>, CoreError>>),
+    StopIntent(
+        super::cleanup::AttemptRef,
+        SyncSender<Result<crate::execution::types::StopIntent, CoreError>>,
+    ),
     Cancel(
         AuthContext,
         JobId,
@@ -136,6 +140,8 @@ pub(super) enum ExecutionCommand {
         usize,
         SyncSender<Result<Vec<QueuedCandidate>, CoreError>>,
     ),
+    /// Earlier instances' attempts with unconfirmed cleanup (WE-P07/4).
+    Recovery(SyncSender<Result<Vec<super::recovery::RecoveryCandidate>, CoreError>>),
     /// Hold the next success COMMIT after its final eligibility check.
     #[cfg(test)]
     HoldNextCommit(SyncSender<()>, std::sync::mpsc::Receiver<()>),
@@ -169,6 +175,16 @@ impl Store {
         self.request(|reply| {
             Command::Execution(ExecutionCommand::Candidates(after_sequence, limit, reply))
         })
+    }
+    /// The committed stop intent of this instance's running attempt: a
+    /// durable user cancellation reads as `UserCancel`. Terminal or foreign
+    /// attempts are `Conflict`.
+    pub(crate) fn attempt_stop_intent(
+        &self,
+        attempt: super::cleanup::AttemptRef,
+    ) -> Result<crate::execution::types::StopIntent, CoreError> {
+        attempt.validate()?;
+        self.request(|reply| Command::Execution(ExecutionCommand::StopIntent(attempt, reply)))
     }
     pub(crate) fn attempt_timing(
         &self,
@@ -280,6 +296,17 @@ impl LiveAttempts {
             ExecutionCommand::Candidates(after, limit, reply) => {
                 let _ = reply.send(queued_candidates(connection, after, limit));
             }
+            ExecutionCommand::Recovery(reply) => {
+                let _ = reply.send(super::recovery::candidates(connection));
+            }
+            ExecutionCommand::StopIntent(attempt, reply) => {
+                let result = if !self.contains(&attempt.attempt_id) {
+                    Err(CoreError::Conflict)
+                } else {
+                    stop_intent(connection, &attempt)
+                };
+                let _ = reply.send(result);
+            }
             ExecutionCommand::Timing(id, reply) => {
                 let _ = reply.send(
                     self.0
@@ -289,6 +316,29 @@ impl LiveAttempts {
                 );
             }
         }
+    }
+}
+fn stop_intent(
+    connection: &Connection,
+    attempt: &super::cleanup::AttemptRef,
+) -> Result<crate::execution::types::StopIntent, CoreError> {
+    use crate::execution::types::StopIntent;
+    let state: Option<String> = sql(connection
+        .query_row(
+            "SELECT e.state FROM job_execution e JOIN job_attempts a USING(job_id)
+             WHERE e.job_id=?1 AND a.attempt_id=?2 AND a.session_id=?3",
+            rusqlite::params![
+                attempt.job_id.as_str(),
+                attempt.attempt_id,
+                attempt.session_id
+            ],
+            |r| r.get(0),
+        )
+        .optional())?;
+    match state.as_deref() {
+        Some("running") => Ok(StopIntent::Continue),
+        Some("cancel_requested") => Ok(StopIntent::UserCancel),
+        _ => Err(CoreError::Conflict),
     }
 }
 fn queued_candidates(
@@ -441,14 +491,14 @@ pub(super) fn dispatch(
 /// oldest events first and never the newest; job records hold the authoritative
 /// facts, so retention never erases terminal, cancellation or cleanup state.
 #[derive(Clone, Copy, Debug)]
-pub(super) struct EventRetention {
+pub(crate) struct EventRetention {
     /// Retained revisions per job.
-    pub(super) revisions: i64,
+    pub(crate) revisions: i64,
     /// Retained `snapshot_json` bytes per job (`job_event_history_bytes_max`),
     /// separate from the admission bound `job_metadata_bytes_max`.
-    pub(super) bytes: i64,
+    pub(crate) bytes: i64,
 }
-pub(super) const EVENT_RETENTION: EventRetention = EventRetention {
+pub(crate) const EVENT_RETENTION: EventRetention = EventRetention {
     revisions: 256,
     bytes: 262_144,
 };

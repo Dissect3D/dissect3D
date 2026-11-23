@@ -49,6 +49,10 @@ name = "submission_test_host"
 required-features = ["test-support"]
 
 [[example]]
+name = "execution_test_host"
+required-features = ["test-support"]
+
+[[example]]
 name = "submission_fixture_tool"
 required-features = ["test-support"]
 

@@ -16,6 +16,14 @@
 //! Invasive faults live in private test harnesses, never in parameters.
 #[path = "../tests/fixtures/execution/adapter.rs"]
 mod adapter;
+// Admission is Unix-only until the Windows submission services are wired (B-WINDOWS).
+#[cfg(all(unix, feature = "test-support"))]
+#[path = "execution_fixture/attempts.rs"]
+pub(crate) mod attempts;
+// Discovery facts of the execution host (WE-P06/6).
+#[cfg(all(unix, feature = "test-support"))]
+#[path = "execution_fixture/observations.rs"]
+pub(crate) mod observations;
 #[cfg(feature = "test-support")]
 #[path = "execution_fixture/preparation.rs"]
 pub(crate) mod preparation;

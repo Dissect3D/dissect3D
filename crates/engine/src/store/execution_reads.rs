@@ -50,16 +50,19 @@ struct RawSummary {
     retry_of: Option<String>,
     attempt: Option<String>,
     pub(super) storage: String,
+    /// The committed result, present only after authoritative publication.
+    result: Option<String>,
 }
 /// Columns read by [`RawSummary::from_row`], in order, over [`SUMMARY_FROM`].
 const SUMMARY_COLUMNS: &str =
     "j.job_id,j.acceptance_sequence,j.created_at_ms,e.snapshot_revision,e.state,e.phase,
      e.progress_json,e.timeout_ms,e.cancel_requested_at_ms,e.cleanup_status,e.cleanup_reason,
-     e.outcome_code,e.retry_of,a.attempt_id,j.storage_status";
+     e.outcome_code,e.retry_of,a.attempt_id,j.storage_status,res.result_id";
 /// One row per job: `job_execution` is 1:1 and one attempt per job is unique.
 const SUMMARY_FROM: &str = "FROM jobs j
      JOIN job_execution e USING(job_id)
-     LEFT JOIN job_attempts a USING(job_id)";
+     LEFT JOIN job_attempts a USING(job_id)
+     LEFT JOIN results res USING(job_id)";
 impl RawSummary {
     fn from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
         Ok(Self {
@@ -78,6 +81,7 @@ impl RawSummary {
             retry_of: r.get(12)?,
             attempt: r.get(13)?,
             storage: r.get(14)?,
+            result: r.get(15)?,
         })
     }
 }
@@ -139,7 +143,7 @@ fn read(
             |r| {
                 Ok(RawSnapshot {
                     summary: RawSummary::from_row(r)?,
-                    resolved: r.get(15)?,
+                    resolved: r.get(16)?,
                     response_limit,
                 })
             },
@@ -151,8 +155,16 @@ fn timestamp(value: i64) -> Result<TimestampMs, CoreError> {
     TimestampMs::new(value.try_into().map_err(|_| CoreError::InvalidStore)?)
         .map_err(|_| CoreError::InvalidStore)
 }
+/// The engine-owned blocker of one queued job, from the dispatch controller's
+/// latest eligibility scan (`None`: eligible, waiting for its turn). Without
+/// a controller every queued job reads `execution_unavailable`.
+pub(crate) type QueuedBlocker<'a> = &'a (dyn Fn(&JobId) -> Option<&'static str> + Sync);
+
 /// Decode and validate one stored row; a corrupt row fails closed, never skipped.
-fn decode_summary(row: &RawSummary) -> Result<ExecutionJobSummary, CoreError> {
+fn decode_summary(
+    row: &RawSummary,
+    blocker: Option<QueuedBlocker<'_>>,
+) -> Result<ExecutionJobSummary, CoreError> {
     let state = match row.state.as_str() {
         "queued" => ExecutionJobState::Queued,
         "running" => ExecutionJobState::Running,
@@ -160,9 +172,11 @@ fn decode_summary(row: &RawSummary) -> Result<ExecutionJobSummary, CoreError> {
         "failed" => ExecutionJobState::Failed,
         "canceled" => ExecutionJobState::Canceled,
         "interrupted" => ExecutionJobState::Interrupted,
-        // RP-P03 must supply real committed result identities before reads of
-        // successful outcomes can be implemented. Do not fabricate empty results.
-        "succeeded" | "partial" => return Err(CoreError::Busy),
+        // Success exists only with its committed result (RP-P03).
+        "succeeded" => ExecutionJobState::Succeeded,
+        // The fixture never produces partial results; their declared task
+        // semantics are not implemented, so no partial view is fabricated.
+        "partial" => return Err(CoreError::Busy),
         _ => return Err(CoreError::InvalidStore),
     };
     let cleanup = match row.cleanup.as_str() {
@@ -187,10 +201,18 @@ fn decode_summary(row: &RawSummary) -> Result<ExecutionJobSummary, CoreError> {
             .map_err(|_| CoreError::InvalidStore)
         })
         .transpose()?;
+    let job_id = JobId::parse(&row.id).map_err(|_| CoreError::InvalidStore)?;
+    let blockers = match (state, blocker) {
+        (ExecutionJobState::Queued, None) => vec!["execution_unavailable".into()],
+        (ExecutionJobState::Queued, Some(lookup)) => {
+            lookup(&job_id).map(str::to_owned).into_iter().collect()
+        }
+        _ => vec![],
+    };
     let summary = ExecutionJobSummary {
         api_version: "1.0".into(),
         job_contract: dissect3d_api::JOB_CONTRACT.into(),
-        job_id: JobId::parse(&row.id).map_err(|_| CoreError::InvalidStore)?,
+        job_id,
         acceptance_sequence: row.sequence,
         created_at_ms: timestamp(row.created)?,
         snapshot_revision: row
@@ -200,11 +222,7 @@ fn decode_summary(row: &RawSummary) -> Result<ExecutionJobSummary, CoreError> {
         state,
         phase: row.phase.clone(),
         progress,
-        blockers: if state == ExecutionJobState::Queued {
-            vec!["execution_unavailable".into()]
-        } else {
-            vec![]
-        },
+        blockers,
         attempt_id: row.attempt.clone(),
         cancellation: ExecutionCancellation {
             requested: row.canceled.is_some(),
@@ -220,7 +238,13 @@ fn decode_summary(row: &RawSummary) -> Result<ExecutionJobSummary, CoreError> {
             status: cleanup,
             reason: row.cleanup_reason.clone(),
         },
-        result_ids: vec![],
+        result_ids: match (state, &row.result) {
+            (ExecutionJobState::Succeeded, Some(id)) => vec![id.clone()],
+            (ExecutionJobState::Succeeded, None) | (_, Some(_)) => {
+                return Err(CoreError::InvalidStore);
+            }
+            (_, None) => vec![],
+        },
         retry_of: row
             .retry_of
             .as_ref()
@@ -240,9 +264,12 @@ fn decode_summary(row: &RawSummary) -> Result<ExecutionJobSummary, CoreError> {
     summary.validate().map_err(|_| CoreError::InvalidStore)?;
     Ok(summary)
 }
-fn decode(row: &RawSnapshot) -> Result<ExecutionJobSnapshot, CoreError> {
+fn decode(
+    row: &RawSnapshot,
+    blocker: Option<QueuedBlocker<'_>>,
+) -> Result<ExecutionJobSnapshot, CoreError> {
     let snapshot = ExecutionJobSnapshot {
-        summary: decode_summary(&row.summary)?,
+        summary: decode_summary(&row.summary, blocker)?,
         resolved: dissect3d_api::decode_submission_json(row.resolved.as_bytes(), 262_144)
             .map_err(|_| CoreError::InvalidStore)?,
     };
@@ -350,11 +377,19 @@ fn confirm_page(db: &Connection, auth: &AuthContext, keys: &[PageKey]) -> Result
 /// stop before the limit with an honest cursor; an item that cannot fit alone is
 /// an explicit capacity error, never a silent drop.
 pub(super) fn pack(raw: &RawPage) -> Result<ExecutionJobPage, SubmissionError> {
+    pack_with(raw, None)
+}
+/// Pack with the controller's queued blockers already in place, so the
+/// response cap is measured on the bytes actually sent.
+fn pack_with(
+    raw: &RawPage,
+    blocker: Option<QueuedBlocker<'_>>,
+) -> Result<ExecutionJobPage, SubmissionError> {
     let capacity = || SubmissionError::from(CoreError::CapacityExceeded("control_response_bytes"));
     let mut items = raw
         .rows
         .iter()
-        .map(decode_summary)
+        .map(|row| decode_summary(row, blocker))
         .collect::<Result<Vec<_>, CoreError>>()?;
     let mut more = raw.more;
     let limit = raw.response_limit.min(262_144);
@@ -394,11 +429,33 @@ impl Store {
         auth: AuthContext,
         id: JobId,
     ) -> Result<ExecutionJobSnapshot, CoreError> {
+        self.execution_job_snapshot_with(auth, id, None)
+    }
+    /// One snapshot from a single consistent, grant-checked read, without the
+    /// later currency confirmation. Only for a response to a mutation already
+    /// committed (cancel), whose job may keep changing; the client polls for
+    /// newer revisions.
+    pub(crate) fn execution_job_snapshot_unconfirmed(
+        &self,
+        auth: AuthContext,
+        id: JobId,
+    ) -> Result<ExecutionJobSnapshot, CoreError> {
+        let row =
+            self.request(|reply| Command::ExecutionRead(ReadCommand::Snapshot(auth, id, reply)))?;
+        decode(&row, None)
+    }
+    /// The snapshot with the controller's queued blocker (execution host).
+    pub(crate) fn execution_job_snapshot_with(
+        &self,
+        auth: AuthContext,
+        id: JobId,
+        blocker: Option<QueuedBlocker<'_>>,
+    ) -> Result<ExecutionJobSnapshot, CoreError> {
         for _ in 0..4 {
             let row = self.request(|reply| {
                 Command::ExecutionRead(ReadCommand::Snapshot(auth.clone(), id.clone(), reply))
             })?;
-            let snapshot = decode(&row);
+            let snapshot = decode(&row, blocker);
             if self.request(|reply| {
                 Command::ExecutionRead(ReadCommand::Confirm(
                     auth.clone(),
@@ -423,11 +480,20 @@ impl Store {
         auth: AuthContext,
         query: JobsQuery,
     ) -> Result<ExecutionJobPage, SubmissionError> {
+        self.execution_job_page_with(auth, query, None)
+    }
+    /// The page with the controller's queued blockers (execution host).
+    pub(crate) fn execution_job_page_with(
+        &self,
+        auth: AuthContext,
+        query: JobsQuery,
+        blocker: Option<QueuedBlocker<'_>>,
+    ) -> Result<ExecutionJobPage, SubmissionError> {
         for _ in 0..4 {
             let raw = self.request(|reply| {
                 Command::ExecutionRead(ReadCommand::Page(auth.clone(), query.clone(), reply))
             })?;
-            let page = pack(&raw);
+            let page = pack_with(&raw, blocker);
             let fresh: bool = self.request(|reply| {
                 Command::ExecutionRead(ReadCommand::ConfirmPage(auth.clone(), raw.keys(), reply))
             })?;

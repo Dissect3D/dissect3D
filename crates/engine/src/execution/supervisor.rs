@@ -12,6 +12,7 @@
 //! The result is a typed `AttemptExit`; nothing here commits an outcome.
 use super::legality::{Observation, Phase, Session, SessionIdentity};
 use super::progress::{AttemptPhase, ObservationUpdate, ProgressClass, ProgressCoalescer};
+use super::shutdown::ShutdownClock;
 use super::types::{
     AttemptCleanup, AttemptEnd, AttemptExit, AttemptPlan, NeverLaunched, StopIntent,
 };
@@ -178,6 +179,8 @@ struct Attempt<'a, R, W> {
     capture: Arc<Mutex<DiagnosticCapture>>,
     stop: watch::Receiver<StopIntent>,
     observations: &'a watch::Sender<Option<ObservationUpdate>>,
+    /// Caps every stop phase once engine shutdown began (WE-P07/3).
+    shutdown: &'a ShutdownClock,
 }
 
 impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> Attempt<'_, R, W> {
@@ -344,7 +347,9 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> Attempt<'_, R, W> {
     /// Cooperative stop within its own bound; then external termination
     /// always follows. Late reports (including a candidate) are ignored.
     async fn cooperate(&mut self, verdict: &Verdict) {
-        let limits = self.plan.limits;
+        let mut limits = self.plan.limits;
+        limits.shutdown = self.shutdown.cap_cooperative(limits.shutdown);
+        limits.cooperative_cancel = self.shutdown.cap_cooperative(limits.cooperative_cancel);
         let reason = match verdict {
             Verdict::Candidate(_) => {
                 if let Ok(frame) = self.session.shutdown("attempt_complete")
@@ -416,6 +421,21 @@ impl WorkerSupervisor {
         ledger: Arc<K>,
         stop: watch::Receiver<StopIntent>,
         observations: &watch::Sender<Option<ObservationUpdate>>,
+    ) -> AttemptExit {
+        let clock = ShutdownClock::default();
+        Self::run_until(dispatch, plan, launcher, ledger, stop, observations, &clock).await
+    }
+
+    /// `run`, with every stop phase capped by the engine's shared shutdown
+    /// deadline once `shutdown` has one (WE-P07/3).
+    pub(crate) async fn run_until<L: WorkerLauncher, K: LaunchLedger>(
+        dispatch: &DispatchRecord,
+        plan: AttemptPlan,
+        launcher: L,
+        ledger: Arc<K>,
+        stop: watch::Receiver<StopIntent>,
+        observations: &watch::Sender<Option<ObservationUpdate>>,
+        shutdown: &ShutdownClock,
     ) -> AttemptExit {
         let capture = Arc::new(Mutex::new(DiagnosticCapture::default()));
         let summary = |capture: &Arc<Mutex<DiagnosticCapture>>| {
@@ -508,7 +528,7 @@ impl WorkerSupervisor {
             note(DiagnosticCategory::LaunchFailed);
             note(DiagnosticCategory::CleanupFault);
             let Launched { process, .. } = launched;
-            let cleanup = match terminate(process, limits.termination).await {
+            let cleanup = match terminate(process, shutdown.cap(limits.termination)).await {
                 AttemptCleanup::Confirmed(_) => AttemptCleanup::Fault(IDENTITY_UNRECORDED),
                 other => other,
             };
@@ -545,6 +565,7 @@ impl WorkerSupervisor {
             capture: Arc::clone(&capture),
             stop,
             observations,
+            shutdown,
         };
         let initial = attempt.coalescer.flush(Instant::now());
         attempt.publish(initial);
@@ -552,7 +573,7 @@ impl WorkerSupervisor {
         attempt.phase(AttemptPhase::Stopping);
         attempt.cooperate(&verdict).await;
         drop(attempt);
-        let cleanup = terminate(process, limits.termination).await;
+        let cleanup = terminate(process, shutdown.cap(limits.termination)).await;
         drain.abort();
         if matches!(cleanup, AttemptCleanup::Fault(_)) {
             note(DiagnosticCategory::CleanupFault);

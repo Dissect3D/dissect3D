@@ -50,6 +50,21 @@ pub(crate) struct ObservationFacts {
     pub(crate) observed_at_ms: Option<u64>,
 }
 
+/// The owner of the operational facts each discovery observation explains.
+/// The normal engine and the Phase 2 hosts use [`PhaseTwoFacts`]; an explicit
+/// execution host supplies its engine-owned facts instead (WE-P06/6).
+pub(crate) trait ObservationSource: Send + Sync {
+    fn facts(&self, scope: &InspectionScope) -> ObservationFacts;
+}
+
+/// The Phase 2 unavailable/absent facts.
+pub(crate) struct PhaseTwoFacts;
+impl ObservationSource for PhaseTwoFacts {
+    fn facts(&self, scope: &InspectionScope) -> ObservationFacts {
+        ObservationFacts::phase_two(scope)
+    }
+}
+
 impl ObservationFacts {
     pub(crate) fn phase_two(scope: &InspectionScope) -> Self {
         let unresolved_binding = matches!(scope, InspectionScope::Binding { .. });
@@ -393,7 +408,7 @@ fn declaration_evidence(
     }
 }
 
-fn reason(code: &str, field: &str, guidance: &str) -> ObservationReason {
+pub(super) fn reason(code: &str, field: &str, guidance: &str) -> ObservationReason {
     ObservationReason {
         code: code.to_owned(),
         field: field.to_owned(),

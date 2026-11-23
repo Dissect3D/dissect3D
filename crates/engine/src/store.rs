@@ -72,6 +72,9 @@ pub(crate) mod finalize;
 )]
 pub(crate) mod launch_identity;
 pub(crate) mod reauthorization;
+// WE-P07/4 restart reconciliation reads; only the execution host uses them.
+#[cfg_attr(not(all(unix, feature = "test-support")), allow(dead_code))]
+pub(crate) mod recovery;
 #[allow(
     dead_code,
     reason = "RP-P03/RP-P04/WE-P06 compose result metadata; publication stays inactive"

@@ -72,6 +72,30 @@ pub(super) fn encode(identity: &WorkerIdentity) -> Option<String> {
     )
 }
 
+/// The recorded identity back, for restart recovery. Only an exact canonical
+/// encoding decodes: anything `encode` would not have written is `None`.
+pub(super) fn decode(json: &str) -> Option<WorkerIdentity> {
+    let value: serde_json::Value = serde_json::from_str(json).ok()?;
+    let process = |v: &serde_json::Value| {
+        Some(ProcessIdentity {
+            pid: u32::try_from(v.get("pid")?.as_u64()?).ok()?,
+            start_marker: v.get("start_marker")?.as_str()?.to_owned(),
+        })
+    };
+    let guardian = match value.get("guardian")? {
+        serde_json::Value::Null => None,
+        other => Some(process(other)?),
+    };
+    let hex = value.get("session_nonce")?.as_str()?;
+    let nonce = session_nonce(&format!("ses_{hex}"))?;
+    let identity = WorkerIdentity {
+        process: process(value.get("process")?)?,
+        guardian,
+        session_nonce: nonce,
+    };
+    (encode(&identity)? == json).then_some(identity)
+}
+
 /// One attempt's native worker identity, reported once after its spawn.
 #[derive(Clone, Debug)]
 pub(crate) struct LaunchRecord {
@@ -170,7 +194,8 @@ impl CleanupBasis<'_> {
     pub(super) fn reason(&self) -> Option<&str> {
         match self {
             Self::Fault(reason) => Some(reason),
-            _ => None,
+            Self::Confirmed(evidence) => evidence.reason_code(),
+            Self::NeverLaunched => None,
         }
     }
 }

@@ -1,7 +1,7 @@
 //! WE-P06/1 dispatch-turn decisions against a scripted Store. The real Store
 //! transaction (atomic reservation, cancel-before-dispatch, duplicates) is
 //! exercised in `store/dispatch_turn_tests.rs`.
-use super::scheduler::{DispatchStore, Eligibility, dispatch_turn};
+use super::scheduler::{DispatchStore, Eligibility, dispatch_turn, queued_blockers};
 use crate::CoreError;
 use crate::store::execution::{AttemptTiming, DispatchRecord, DispatchRequest, QueuedCandidate};
 use dissect3d_api::JobId;
@@ -294,4 +294,36 @@ fn a_replay_refused_after_an_uncertain_dispatch_stays_uncertain() {
         );
         assert_eq!(store.dispatched_jobs(), vec![job(1), job(1)], "{replay:?}");
     }
+}
+
+#[test]
+fn the_blocker_scan_reports_every_blocked_queued_job_and_reserves_nothing() {
+    // More than one page, with blocked jobs on both pages.
+    let mut queued: Vec<_> = (1..=40).map(candidate).collect();
+    queued[2].storage_verified = false;
+    let store = Scripted::new(queued);
+    let blocked = queued_blockers(&store, |c| {
+        if c.job_id == job(5) || c.job_id == job(38) {
+            Eligibility::Blocked("profile_not_executable")
+        } else {
+            Eligibility::Ready {
+                resources: vec!["cpu:fixture".into()],
+            }
+        }
+    })
+    .unwrap();
+    assert_eq!(
+        blocked,
+        vec![
+            (job(3), "storage_integrity_fault"),
+            (job(5), "profile_not_executable"),
+            (job(38), "profile_not_executable"),
+        ]
+    );
+    assert!(
+        store.dispatched_jobs().is_empty(),
+        "a scan never dispatches"
+    );
+    *store.fail_reads_after.lock().unwrap() = Some(0);
+    assert!(queued_blockers(&store, |_| Eligibility::Blocked("x")).is_err());
 }

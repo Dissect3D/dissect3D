@@ -2,7 +2,7 @@
 
 use super::{AuthorizedRequest, ServiceState, access};
 use crate::support::{
-    Catalog, DiscoveryError, InventoryQuery, InventoryResult, ModelRecord, ObservationFacts,
+    Catalog, DiscoveryError, InventoryQuery, InventoryResult, ModelRecord, ObservationSource,
     Selection, TaskBindingRecord, for_model_binding, for_runtime, observe,
 };
 use axum::Router;
@@ -49,7 +49,7 @@ async fn models_list(
         Ok(query) => query,
         Err(error) => return discovery_error(error),
     };
-    let result = state.catalog.list(
+    let result = state.catalog.list_observed(
         authorized.identity.instance_id.as_str(),
         InventoryQuery::Models {
             limit: query.page.limit,
@@ -58,6 +58,7 @@ async fn models_list(
             task_version: query.task_version,
             loaded: query.loaded,
         },
+        &*state.observations,
     );
     match result {
         Ok(InventoryResult::Models(page)) => {
@@ -85,12 +86,13 @@ async fn runtimes_list(
         Ok(page) => page,
         Err(error) => return discovery_error(error),
     };
-    match state.catalog.list(
+    match state.catalog.list_observed(
         authorized.identity.instance_id.as_str(),
         InventoryQuery::Runtimes {
             limit: page.limit,
             cursor: page.cursor,
         },
+        &*state.observations,
     ) {
         Ok(InventoryResult::Runtimes(page)) => {
             success_response(&page, state.catalog.limits.response_bytes_max)
@@ -117,13 +119,14 @@ async fn tasks_list(
         Ok(query) => query,
         Err(error) => return discovery_error(error),
     };
-    match state.catalog.list(
+    match state.catalog.list_observed(
         authorized.identity.instance_id.as_str(),
         InventoryQuery::Tasks {
             limit: query.page.limit,
             cursor: query.page.cursor,
             support_ref: query.support_ref,
         },
+        &*state.observations,
     ) {
         Ok(InventoryResult::Tasks(page)) => {
             success_response(&page, state.catalog.limits.response_bytes_max)
@@ -153,7 +156,12 @@ async fn model_detail(State(state): State<Arc<ServiceState>>, request: Request<B
     let Some(model) = state.catalog.model(&selector) else {
         return discovery_error(DiscoveryError::NotFound);
     };
-    let observations = match model_observations(&state.catalog, model, selection.as_ref()) {
+    let observations = match model_observations(
+        &*state.observations,
+        &state.catalog,
+        model,
+        selection.as_ref(),
+    ) {
         Ok(observations) => observations,
         Err(error) => return discovery_error(error),
     };
@@ -192,7 +200,7 @@ async fn runtime_detail(
     let (scope, evidence, tested) = for_runtime(runtime);
     let observations = vec![observe(
         &scope,
-        &ObservationFacts::phase_two(&scope),
+        &state.observations.facts(&scope),
         evidence,
         tested,
     )];
@@ -250,12 +258,7 @@ async fn task_detail(State(state): State<Arc<ServiceState>>, request: Request<Bo
                 Ok(parts) => parts,
                 Err(error) => return discovery_error(error),
             };
-        let observation = observe(
-            &scope,
-            &ObservationFacts::phase_two(&scope),
-            evidence,
-            tested,
-        );
+        let observation = observe(&scope, &state.observations.facts(&scope), evidence, tested);
         let detail = TaskBindingDetail {
             id: binding.id.clone(),
             task: binding.task.clone(),
@@ -381,6 +384,7 @@ fn model_selection(
 }
 
 fn model_observations(
+    state_facts: &dyn ObservationSource,
     catalog: &Catalog,
     model: &ModelRecord,
     selection: Option<&Selection>,
@@ -400,7 +404,7 @@ fn model_observations(
             for_model_binding(catalog, model, binding, Some(selection))?;
         observations.push(observe(
             &scope,
-            &ObservationFacts::phase_two(&scope),
+            &state_facts.facts(&scope),
             evidence,
             tested,
         ));
@@ -409,7 +413,7 @@ fn model_observations(
             let (scope, evidence, tested) = for_model_binding(catalog, model, binding, None)?;
             observations.push(observe(
                 &scope,
-                &ObservationFacts::phase_two(&scope),
+                &state_facts.facts(&scope),
                 evidence,
                 tested,
             ));

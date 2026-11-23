@@ -3,6 +3,9 @@
 mod compatibility;
 #[cfg(any(test, feature = "test-support"))]
 mod declarations;
+// The explicit execution host's engine-owned discovery facts (WE-P06/6).
+#[cfg(all(unix, feature = "test-support"))]
+pub(crate) mod live_facts;
 mod observations;
 mod pagination;
 mod resolver;
@@ -14,7 +17,11 @@ use dissect3d_api::{SchemaAttachment, TaskKey};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-pub(crate) use observations::{ObservationFacts, for_model_binding, for_runtime, observe};
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use observations::ObservationFacts;
+pub(crate) use observations::{
+    ObservationSource, PhaseTwoFacts, for_model_binding, for_runtime, observe,
+};
 pub(crate) use pagination::{InventoryQuery, InventoryResult};
 
 use sha2::{Digest, Sha256};

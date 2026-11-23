@@ -1,6 +1,6 @@
 //! Stable bounded inventory pages and restart-bound opaque cursors.
 
-use super::observations::{ObservationFacts, for_model_binding, for_runtime, observe};
+use super::observations::{ObservationSource, for_model_binding, for_runtime, observe};
 use super::{Catalog, DiscoveryError};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -55,10 +55,23 @@ struct PageContext<'a> {
 }
 
 impl Catalog {
+    /// A page with the Phase 2 facts.
+    #[cfg(test)]
     pub(crate) fn list(
         &self,
         instance_id: &str,
         query: InventoryQuery,
+    ) -> Result<InventoryResult, DiscoveryError> {
+        self.list_observed(instance_id, query, &super::observations::PhaseTwoFacts)
+    }
+
+    /// A page whose observations explain `facts`. The `loaded` filter matches
+    /// a model when any of its observations reports a loaded worker.
+    pub(crate) fn list_observed(
+        &self,
+        instance_id: &str,
+        query: InventoryQuery,
+        facts: &dyn ObservationSource,
     ) -> Result<InventoryResult, DiscoveryError> {
         match query {
             InventoryQuery::Models {
@@ -73,7 +86,7 @@ impl Catalog {
                     "task_version": task_version,
                     "loaded": loaded,
                 });
-                let ids = self
+                let summaries = self
                     .models
                     .values()
                     .filter(|model| {
@@ -84,25 +97,16 @@ impl Catalog {
                                         .as_ref()
                                         .is_none_or(|version| binding.task.version() == version)
                             })
-                        }) && loaded != Some(true)
+                        })
                     })
-                    .map(|model| model.id.clone())
-                    .collect::<Vec<_>>();
-                let summaries = ids
-                    .iter()
-                    .map(|id| {
-                        let model = self
-                            .models
-                            .values()
-                            .find(|model| &model.id == id)
-                            .ok_or(DiscoveryError::NotFound)?;
+                    .map(|model| {
                         let mut observations = Vec::new();
                         for binding in &model.tasks {
                             let (scope, evidence, tested) =
                                 for_model_binding(self, model, binding, None)?;
                             observations.push(observe(
                                 &scope,
-                                &ObservationFacts::phase_two(&scope),
+                                &facts.facts(&scope),
                                 evidence,
                                 tested,
                             ));
@@ -115,7 +119,20 @@ impl Catalog {
                             observations,
                         })
                     })
-                    .collect::<Result<Vec<_>, DiscoveryError>>()?;
+                    .collect::<Result<Vec<_>, DiscoveryError>>()?
+                    .into_iter()
+                    .filter(|summary| {
+                        loaded.is_none_or(|wanted| {
+                            let held = summary.observations.iter().any(|observation| {
+                                observation
+                                    .loaded
+                                    .as_ref()
+                                    .is_some_and(|loaded| loaded.status == "loaded")
+                            });
+                            held == wanted
+                        })
+                    })
+                    .collect::<Vec<_>>();
                 let page = make_page(
                     PageContext {
                         instance_id,
@@ -138,7 +155,7 @@ impl Catalog {
                     .values()
                     .map(|runtime| {
                         let (scope, evidence, tested) = for_runtime(runtime);
-                        let facts = ObservationFacts::phase_two(&scope);
+                        let facts = facts.facts(&scope);
                         RuntimeSummary {
                             id: runtime.id.clone(),
                             runtime_ref: runtime.runtime_ref.clone(),
@@ -183,12 +200,7 @@ impl Catalog {
                             .get(&task.support_ref)
                             .ok_or(DiscoveryError::NotFound)?;
                         let (scope, evidence, tested) = for_model_binding(self, model, task, None)?;
-                        let observation = observe(
-                            &scope,
-                            &ObservationFacts::phase_two(&scope),
-                            evidence,
-                            tested,
-                        );
+                        let observation = observe(&scope, &facts.facts(&scope), evidence, tested);
                         Ok(TaskSummary {
                             id: task.id.clone(),
                             task: task.task.clone(),
