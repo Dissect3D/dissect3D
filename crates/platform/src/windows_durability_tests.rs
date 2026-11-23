@@ -275,25 +275,23 @@ fn only_ntfs_is_a_supported_filesystem_name() {
 }
 
 #[test]
-fn sync_root_status_fails_closed_except_for_listed_codes() {
-    let allowed = [390, 1, 50];
-    assert_eq!(
-        classify_sync_root_status(0x8007_0186_u32 as i32, &allowed),
-        Ok(())
-    );
-    assert_eq!(
-        classify_sync_root_status(0x8007_0001_u32 as i32, &allowed),
-        Ok(())
-    );
+fn sync_root_status_fails_closed_except_for_the_recorded_codes() {
+    // DS-G04 (2026-11-23) records exactly these "not a sync root" results:
+    // ERROR_CLOUD_FILE_NOT_UNDER_SYNC_ROOT and ERROR_INVALID_FUNCTION.
+    assert_eq!(NOT_A_SYNC_ROOT, [390, 1]);
+    for status in [0x8007_0186_u32 as i32, 0x8007_0001_u32 as i32] {
+        assert_eq!(classify_sync_root_status(status), Ok(()), "{status:#x}");
+    }
     for status in [
         0,
         1,
         0x8007_0002_u32 as i32,
         0x8007_0005_u32 as i32,
+        0x8007_0032_u32 as i32,
         0x8000_4005_u32 as i32,
     ] {
         assert_eq!(
-            classify_sync_root_status(status, &allowed),
+            classify_sync_root_status(status),
             Err(PlatformError::UnsupportedRoot),
             "{status:#x}"
         );
@@ -322,4 +320,25 @@ fn a_root_below_a_registered_sync_root_is_refused_before_creation() {
     if !exercised {
         eprintln!("NOT EXERCISED: no registered sync root folder present");
     }
+}
+
+#[test]
+fn not_found_means_an_absent_entry_only_while_the_root_is_in_place() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = root_at(&temp);
+    assert_eq!(
+        confirm_absent(&root, Err::<(), _>(PlatformError::NotFound)),
+        Err(PlatformError::NotFound)
+    );
+    assert_eq!(confirm_absent(&root, Ok(7)), Ok(7));
+    fs::rename(root.path(), temp.path().join("moved")).unwrap();
+    assert_eq!(
+        confirm_absent(&root, Err::<(), _>(PlatformError::NotFound)),
+        Err(PlatformError::UnsafeRoot)
+    );
+    // Other failures pass through unchanged.
+    assert_eq!(
+        confirm_absent(&root, Err::<(), _>(PlatformError::Io)),
+        Err(PlatformError::Io)
+    );
 }

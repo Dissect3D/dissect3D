@@ -235,9 +235,15 @@ fn a_renamed_root_without_replacement_refuses_every_mutation() {
     let root = OwnedRoot::create_private(&selected, RootPurpose::EngineData).unwrap();
     let moved = temp.path().join("moved");
     fs::rename(&selected, &moved).unwrap();
+    // A missing root is never reported as NotFound: callers read NotFound
+    // as "this entry is absent" and may release its storage charge.
     assert_eq!(
         root.check_durable_mutation_support(),
-        Err(PlatformError::NotFound)
+        Err(PlatformError::UnsafeRoot)
+    );
+    assert_eq!(
+        root.remove_durable(&name("r.json")),
+        Err(PlatformError::UnsafeRoot)
     );
     assert!(root.write_recovery_record(&name("r.json"), b"no").is_err());
     assert!(!moved.join("r.json").exists());

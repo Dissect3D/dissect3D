@@ -107,6 +107,10 @@ pub(super) enum ExecutionCommand {
         super::launch_identity::LaunchRecord,
         SyncSender<Result<(), CoreError>>,
     ),
+    CommitPublication(
+        Box<super::results_commit::PublicationCommit>,
+        SyncSender<Result<super::results_commit::CommitOutcome, CoreError>>,
+    ),
 }
 impl Store {
     // WE-P04/06 must supply fresh readiness, input-integrity and eligibility checks
@@ -143,6 +147,10 @@ impl LiveAttempts {
     /// Whether this running instance dispatched the attempt and still owns it.
     pub(super) fn contains(&self, attempt_id: &str) -> bool {
         self.0.contains_key(attempt_id)
+    }
+    /// The Store-owned clock registered at this attempt's dispatch.
+    pub(super) fn timing(&self, attempt_id: &str) -> Option<Arc<AttemptTiming>> {
+        self.0.get(attempt_id).map(|record| record.timing.clone())
     }
     pub(super) fn handle(
         &mut self,
@@ -203,6 +211,16 @@ impl LiveAttempts {
                     Err(CoreError::Busy)
                 } else {
                     super::launch_identity::record_launch(connection, self, record)
+                };
+                let _ = reply.send(result);
+            }
+            // The shutdown barrier refuses inside the transaction, so its
+            // ordering against publication is decided by the actor (RP-P03/1).
+            ExecutionCommand::CommitPublication(commit, reply) => {
+                let result = if cfg!(windows) {
+                    Err(CoreError::Busy)
+                } else {
+                    super::results_commit::commit_publication(connection, self, *commit, stopping)
                 };
                 let _ = reply.send(result);
             }

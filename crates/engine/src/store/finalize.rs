@@ -46,6 +46,8 @@ fn terminal_for(end: AttemptEnd) -> Option<(&'static str, &'static str)> {
         AttemptEnd::LaunchFailed => ("failed", "worker_launch_failed"),
         AttemptEnd::WorkerFailed => ("failed", "worker_failed"),
         AttemptEnd::CleanupUnconfirmed => ("failed", "cleanup_unconfirmed"),
+        AttemptEnd::ResultValidationFailed => ("failed", "result_validation_failed"),
+        AttemptEnd::ResultStorageFailed => ("failed", "result_storage_failed"),
         // The worker schema's `engine_shutdown` reason (WE-005: interrupted).
         AttemptEnd::Stopped(StopIntent::EngineShutdown) => ("interrupted", "engine_shutdown"),
         // A user stop follows committed cancellation: never a running outcome.

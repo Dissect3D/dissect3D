@@ -77,6 +77,11 @@ pub(crate) mod reauthorization;
     reason = "RP-P03/RP-P04/WE-P06 compose result metadata; publication stays inactive"
 )]
 pub(crate) mod results;
+#[allow(
+    dead_code,
+    reason = "WE-P06 drives the publication commit; publication stays inactive"
+)]
+pub(crate) mod results_commit;
 mod results_schema;
 use execution_schema::add_execution_tables;
 use results_schema::add_result_tables;

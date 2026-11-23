@@ -281,6 +281,7 @@ impl ValidatedCandidate {
 }
 pub(crate) mod capture;
 pub(crate) mod policy;
+pub(crate) mod service;
 pub(crate) mod storage;
 #[cfg(test)]
 #[path = "publication_tests.rs"]

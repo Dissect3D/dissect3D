@@ -111,6 +111,13 @@ pub(crate) enum AttemptEnd {
     /// A candidate arrived but termination could not be established.
     CleanupUnconfirmed,
     Stopped(StopIntent),
+    /// After confirmed cleanup, independent validation refused the candidate
+    /// (decision 2026-11-23: `result_validation_failed`).
+    ResultValidationFailed,
+    /// After confirmed cleanup, engine-side capture, input integrity,
+    /// preparation or commit storage failed with no committed result
+    /// (decision 2026-11-23: `result_storage_failed`).
+    ResultStorageFailed,
 }
 
 /// The supervisor's only result. No callback or worker message publishes.

@@ -78,6 +78,10 @@ pub(super) enum ResultCommand {
     ConfirmReclaimed(Vec<String>, SyncSender<Result<u64, CoreError>>),
     KnownObjects(Vec<String>, SyncSender<Result<Vec<String>, CoreError>>),
     Usage(SyncSender<Result<ResultUsage, CoreError>>),
+    PublicationForAttempt(
+        String,
+        SyncSender<Result<Option<super::results_commit::PublicationReceipt>, CoreError>>,
+    ),
 }
 
 pub(super) fn handle(connection: &mut Connection, command: ResultCommand, stopping: bool) {
@@ -108,6 +112,12 @@ pub(super) fn handle(connection: &mut Connection, command: ResultCommand, stoppi
         }
         ResultCommand::Usage(reply) => {
             let _ = reply.send(usage(connection));
+        }
+        ResultCommand::PublicationForAttempt(attempt_id, reply) => {
+            let _ = reply.send(super::results_commit::publication_for_attempt(
+                connection,
+                &attempt_id,
+            ));
         }
     }
 }

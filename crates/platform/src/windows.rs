@@ -712,9 +712,6 @@ fn validate_volume_by_handle(file: &File) -> Result<(), PlatformError> {
 /// and other providers), whatever its folder name. The nearest existing
 /// ancestor is queried so a root can be refused before it is created.
 fn refuse_cloud_sync_root(path: &Path) -> Result<(), PlatformError> {
-    use windows_sys::Win32::Foundation::{
-        ERROR_CLOUD_FILE_NOT_UNDER_SYNC_ROOT, ERROR_INVALID_FUNCTION, ERROR_NOT_SUPPORTED,
-    };
     use windows_sys::Win32::Storage::CloudFilters::{
         CF_SYNC_ROOT_INFO_BASIC, CfGetSyncRootInfoByPath,
     };
@@ -736,23 +733,24 @@ fn refuse_cloud_sync_root(path: &Path) -> Result<(), PlatformError> {
             &mut returned,
         )
     };
-    classify_sync_root_status(
-        status,
-        &[
-            ERROR_CLOUD_FILE_NOT_UNDER_SYNC_ROOT,
-            // Observed 2026-11-23 on a volume with no cloud filter attached.
-            ERROR_INVALID_FUNCTION,
-            ERROR_NOT_SUPPORTED,
-        ],
-    )
+    classify_sync_root_status(status)
 }
 
-/// Success means "inside a sync root". Only the listed Win32 codes mean
+/// The only `CfGetSyncRootInfoByPath` failures that mean "not a sync root",
+/// as recorded in the DS-G04 decision (observed 2026-11-23):
+/// ERROR_CLOUD_FILE_NOT_UNDER_SYNC_ROOT for an ordinary folder and
+/// ERROR_INVALID_FUNCTION on a volume with no cloud filter attached.
+const NOT_A_SYNC_ROOT: [u32; 2] = [
+    windows_sys::Win32::Foundation::ERROR_CLOUD_FILE_NOT_UNDER_SYNC_ROOT,
+    windows_sys::Win32::Foundation::ERROR_INVALID_FUNCTION,
+];
+
+/// Success means "inside a sync root". Only the recorded Win32 codes mean
 /// "not a sync root"; any other failure is refused rather than assumed safe.
-fn classify_sync_root_status(status: i32, not_sync_root: &[u32]) -> Result<(), PlatformError> {
+fn classify_sync_root_status(status: i32) -> Result<(), PlatformError> {
     const FACILITY_WIN32: u32 = 0x8007_0000;
     let code = status as u32;
-    if code & 0xFFFF_0000 == FACILITY_WIN32 && not_sync_root.contains(&(code & 0xFFFF)) {
+    if code & 0xFFFF_0000 == FACILITY_WIN32 && NOT_A_SYNC_ROOT.contains(&(code & 0xFFFF)) {
         Ok(())
     } else {
         Err(PlatformError::UnsupportedRoot)
@@ -957,8 +955,32 @@ pub(crate) fn file_identity(file: &File) -> Result<FileIdentity, PlatformError> 
 /// no-follow open of the selected path reaches. A rename-and-replace of the
 /// root or any ancestor after open fails this check. The fresh chain is
 /// returned for callers that keep it open; it does not block renames.
+///
+/// A selected root that no longer exists is `UnsafeRoot`, never `NotFound`:
+/// callers read `NotFound` as "this entry is absent" (for example to release
+/// a storage charge), which a moved root must not imply.
 pub(crate) fn verify_root_identity(root: &OwnedRoot) -> Result<Vec<File>, PlatformError> {
-    verify_root_identity_against(root.path(), root.windows_root_handle())
+    verify_root_identity_against(root.path(), root.windows_root_handle()).map_err(root_missing)
+}
+
+fn root_missing(error: PlatformError) -> PlatformError {
+    if error == PlatformError::NotFound {
+        PlatformError::UnsafeRoot
+    } else {
+        error
+    }
+}
+
+/// Path-based opens report a moved root the same way as an absent entry.
+/// `NotFound` passes through only once the root is confirmed in place.
+fn confirm_absent<T>(
+    root: &OwnedRoot,
+    result: Result<T, PlatformError>,
+) -> Result<T, PlatformError> {
+    if matches!(result, Err(PlatformError::NotFound)) {
+        drop(verify_root_identity(root)?);
+    }
+    result
 }
 
 fn verify_root_identity_against(path: &Path, retained: &File) -> Result<Vec<File>, PlatformError> {
@@ -979,7 +1001,7 @@ fn verify_root_identity_against(path: &Path, retained: &File) -> Result<Vec<File
 /// verified identity, then a flush of the root directory itself.
 pub(crate) fn durable_preflight(root: &OwnedRoot) -> Result<(), PlatformError> {
     let _held = verify_root_identity(root)?;
-    let flushed = flush_owned_directory(root.path())?;
+    let flushed = flush_owned_directory(root.path()).map_err(root_missing)?;
     if file_identity(&flushed)? != file_identity(root.windows_root_handle())? {
         return Err(PlatformError::UnsafeRoot);
     }
@@ -1160,11 +1182,11 @@ pub(crate) fn remove_input_durable(
     path: &RelativePath,
 ) -> Result<(), PlatformError> {
     durable_preflight(root)?;
-    match remove_file(root, path) {
+    match confirm_absent(root, remove_file(root, path)) {
         Ok(()) | Err(PlatformError::NotFound) => {}
         Err(error) => return Err(error),
     }
-    flush_owned_chain(root, path)?;
+    confirm_absent(root, flush_owned_chain(root, path))?;
     drop(verify_root_identity(root)?);
     Ok(())
 }
@@ -1175,6 +1197,19 @@ pub(crate) fn remove_input_durable(
 /// ReplaceIfExists = FALSE, so links and directories move as themselves.
 /// Callers validate the feature/quarantine pairing and entry name first.
 pub(crate) fn quarantine_owned_entry(
+    root: &OwnedRoot,
+    source_directory: &RelativePath,
+    entry_name: &std::ffi::OsStr,
+    destination: &RelativePath,
+) -> Result<(), PlatformError> {
+    // The engine reads NotFound as "already gone"; a moved root is not that.
+    confirm_absent(
+        root,
+        quarantine_entry(root, source_directory, entry_name, destination),
+    )
+}
+
+fn quarantine_entry(
     root: &OwnedRoot,
     source_directory: &RelativePath,
     entry_name: &std::ffi::OsStr,

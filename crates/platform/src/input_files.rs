@@ -454,7 +454,7 @@ impl PrivateInputWriter {
         self.write_chunk_using(bytes, |file, bytes| file.write_all(bytes))
     }
 
-    fn write_chunk_using(
+    pub(crate) fn write_chunk_using(
         &mut self,
         bytes: &[u8],
         write: impl FnOnce(&mut File, &[u8]) -> std::io::Result<()>,

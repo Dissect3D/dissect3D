@@ -123,14 +123,17 @@ impl OwnedRoot {
         published: &RelativePath,
         bytes: &[u8],
     ) -> Result<DurableArtifact, PlatformError> {
-        self.prepare_artifact_with_checkpoint(staging, published, bytes, |_| Ok(()))
+        self.prepare_artifact_with(staging, published, bytes, std::io::Write::write_all, |_| {
+            Ok(())
+        })
     }
 
-    fn prepare_artifact_with_checkpoint(
+    fn prepare_artifact_with(
         &self,
         staging: &RelativePath,
         published: &RelativePath,
         bytes: &[u8],
+        mut write: impl FnMut(&mut File, &[u8]) -> std::io::Result<()>,
         checkpoint: impl FnMut(crate::input_files::PublicationStep) -> Result<(), PlatformError>,
     ) -> Result<DurableArtifact, PlatformError> {
         self.check_durable_mutation_support()?;
@@ -139,7 +142,7 @@ impl OwnedRoot {
         }
         let mut writer = self.begin_input(staging)?;
         for chunk in bytes.chunks(PREPARE_CHUNK_BYTES) {
-            writer.write_chunk(chunk)?;
+            writer.write_chunk_using(chunk, &mut write)?;
         }
         Ok(DurableArtifact {
             file: writer.finish_with_checkpoint(published, checkpoint)?,
@@ -408,15 +411,20 @@ mod tests {
             let staging = RelativePath::parse("results/staging/art_x.part").unwrap();
             let published = RelativePath::parse("results/objects/art_x").unwrap();
             let mut reached = false;
-            let result =
-                root.prepare_artifact_with_checkpoint(&staging, &published, b"bytes", |step| {
+            let result = root.prepare_artifact_with(
+                &staging,
+                &published,
+                b"bytes",
+                std::io::Write::write_all,
+                |step| {
                     if step == fault {
                         reached = true;
                         Err(PlatformError::Io)
                     } else {
                         Ok(())
                     }
-                });
+                },
+            );
             assert!(reached, "{fault:?} not reached");
             assert!(matches!(result, Err(PlatformError::Io)), "{fault:?}");
             let staged_exists = root.path().join(staging.as_path()).exists();
@@ -434,5 +442,46 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn disk_full_while_writing_issues_no_witness_and_never_reaches_the_final_name() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = OwnedRoot::create_private(&temp.path().join("engine"), RootPurpose::EngineData)
+            .unwrap();
+        let staging = RelativePath::parse("results/staging/art_x.part").unwrap();
+        let published = RelativePath::parse("results/objects/art_x").unwrap();
+        // Two chunks: the first lands, the second hits a full volume after a
+        // partial write (what write_all reports for ENOSPC/ERROR_DISK_FULL).
+        let bytes = vec![b'v'; super::PREPARE_CHUNK_BYTES + 10];
+        let mut calls = 0;
+        let mut checkpoints = 0;
+        let result = root.prepare_artifact_with(
+            &staging,
+            &published,
+            &bytes,
+            |file, chunk| {
+                calls += 1;
+                if calls == 2 {
+                    std::io::Write::write_all(file, &chunk[..3])?;
+                    return Err(std::io::ErrorKind::StorageFull.into());
+                }
+                std::io::Write::write_all(file, chunk)
+            },
+            |_| {
+                checkpoints += 1;
+                Ok(())
+            },
+        );
+        assert!(matches!(result, Err(PlatformError::Io)));
+        assert_eq!(checkpoints, 0, "no barrier step after a failed write");
+        assert!(!root.path().join(published.as_path()).exists());
+        // The partial staged bytes stay for reference-aware reclamation.
+        assert_eq!(
+            std::fs::metadata(root.path().join(staging.as_path()))
+                .unwrap()
+                .len(),
+            super::PREPARE_CHUNK_BYTES as u64 + 3
+        );
     }
 }

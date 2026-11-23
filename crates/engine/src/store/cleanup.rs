@@ -38,7 +38,11 @@ impl From<&DispatchRecord> for AttemptRef {
 /// or one PID disappearing is not cleanup. It keeps the witness's native
 /// identity; release requires it to equal the identity recorded at launch
 /// (`launch_identity`). WE-P07 adds restart-recovery evidence.
-#[derive(Debug)]
+///
+/// Cloning repeats the same established fact about the same identity; it
+/// mints nothing new. Publication needs it once for the commit and again
+/// for finalization when that commit is refused.
+#[derive(Clone, Debug)]
 pub(crate) struct CleanupEvidence {
     identity: dissect3d_platform::WorkerIdentity,
 }

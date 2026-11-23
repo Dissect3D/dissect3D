@@ -16,6 +16,9 @@ use std::time::Duration;
 struct Ledger {
     db: Mutex<Connection>,
     fail_lookups: bool,
+    /// Rename the root folder away when the turn claims its batch: after the
+    /// turn's preflight, before any removal.
+    move_root_on_claim: Option<(std::path::PathBuf, std::path::PathBuf)>,
 }
 
 impl Ledger {
@@ -35,6 +38,9 @@ impl ResultLedger for Ledger {
         results::abandon(&mut self.db(), result_id)
     }
     fn claim_reclaim(&self) -> Result<ReclaimBatch, CoreError> {
+        if let Some((from, to)) = &self.move_root_on_claim {
+            fs::rename(from, to).unwrap();
+        }
         results::claim_reclaim(&mut self.db())
     }
     fn confirm_reclaimed(&self, objects: Vec<String>) -> Result<u64, CoreError> {
@@ -73,6 +79,7 @@ fn env() -> Env {
         ledger: Ledger {
             db: Mutex::new(db),
             fail_lookups: false,
+            move_root_on_claim: None,
         },
         candidate,
         job: dispatch.job_id.as_str().to_owned(),
@@ -414,3 +421,98 @@ fn a_root_failing_its_durable_check_refuses_before_charging_or_writing() {
     assert!(!selected.join("results").exists());
     assert!(!moved.join("results").exists());
 }
+
+#[test]
+fn a_root_moved_during_a_reclaim_turn_never_releases_bytes_it_did_not_delete() {
+    let mut env = env();
+    prepare_publication(&env.ledger, &env.root, &env.candidate, soon()).unwrap();
+    let charged = env.usage().private_bytes;
+    env.set_job_state("failed");
+    let selected = env.root.path().to_path_buf();
+    let moved = env.parent.path().join("moved-engine");
+    env.ledger.move_root_on_claim = Some((selected, moved.clone()));
+    let outcome = reclaim_turn(&env.ledger, &env.root);
+    let remaining = match fs::read_dir(moved.join("results/objects")) {
+        Ok(entries) => entries.count(),
+        Err(_) => 0,
+    };
+    // Released charge must mean durably deleted bytes; a missing root is not
+    // an absent entry.
+    let released = charged - env.usage().private_bytes;
+    if remaining > 0 {
+        assert_eq!(
+            released, 0,
+            "charge released for {remaining} surviving files"
+        );
+        assert!(matches!(outcome, Err(PublicationError::Storage)));
+    }
+    // Path-based Windows removal cannot reach the moved folder at all.
+    #[cfg(windows)]
+    {
+        assert_eq!(remaining, 2);
+        assert_eq!(env.allocation_state().as_deref(), Some("reclaiming"));
+    }
+}
+
+#[test]
+fn prepared_witnesses_become_exactly_the_commit_request_for_their_attempt() {
+    use crate::store::cleanup::{CleanupEvidence, test_identity};
+    let env = env();
+    let (dispatch, _, _) = fixture();
+    let prepared = prepare_publication(&env.ledger, &env.root, &env.candidate, soon()).unwrap();
+    let expected = prepared
+        .files()
+        .iter()
+        .map(|f| {
+            (
+                f.object_name().to_owned(),
+                f.role(),
+                f.byte_length(),
+                f.sha256(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let (result_id, publication_id, at) = (
+        prepared.result_id().to_owned(),
+        prepared.publication_id().to_owned(),
+        prepared.published_at_ms(),
+    );
+    let evidence = || CleanupEvidence::for_test(test_identity(&dispatch.session_id, "commit"));
+    let commit = prepared.into_commit(&dispatch, evidence()).unwrap();
+    assert_eq!(commit.attempt.attempt_id, dispatch.attempt_id);
+    assert_eq!(commit.attempt.session_id, dispatch.session_id);
+    assert_eq!(commit.attempt.grant_id, dispatch.grant_id);
+    assert_eq!(
+        (commit.result_id, commit.publication_id),
+        (result_id, publication_id)
+    );
+    assert_eq!(
+        (commit.manifest_version.as_str(), commit.published_at_ms),
+        ("1.0", at)
+    );
+    assert_eq!(
+        commit
+            .files
+            .iter()
+            .map(|f| (f.object_name.clone(), f.role, f.byte_length, f.sha256))
+            .collect::<Vec<_>>(),
+        expected
+    );
+    // Witnesses of one attempt cannot be committed for another.
+    let other = prepare_publication(&env.ledger, &env.root, &env.candidate, soon());
+    assert!(other.is_err(), "one allocation per attempt");
+    let mut foreign = dispatch.clone();
+    foreign.attempt_id = format!("att_{}", "e".repeat(32));
+    let env2 = self::env();
+    let prepared = prepare_publication(&env2.ledger, &env2.root, &env2.candidate, soon()).unwrap();
+    assert!(matches!(
+        prepared.into_commit(&foreign, evidence()),
+        Err(PublicationError::Stale)
+    ));
+}
+
+#[path = "storage_fault_tests.rs"]
+mod faults;
+
+#[path = "service_tests.rs"]
+mod service;

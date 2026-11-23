@@ -100,6 +100,17 @@ fn each_typed_end_finalizes_running_work_with_its_safe_outcome_and_releases_on_c
             "interrupted",
             "engine_shutdown",
         ),
+        // Publication refusals after confirmed cleanup (decision 2026-11-23).
+        (
+            AttemptEnd::ResultValidationFailed,
+            "failed",
+            "result_validation_failed",
+        ),
+        (
+            AttemptEnd::ResultStorageFailed,
+            "failed",
+            "result_storage_failed",
+        ),
     ]
     .into_iter()
     .enumerate()

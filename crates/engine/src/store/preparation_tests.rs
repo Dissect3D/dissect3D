@@ -1418,3 +1418,6 @@ mod launch_identity_tests;
 // 2026-11-20 RP-P02 result metadata through the Store actor.
 #[path = "results_actor_tests.rs"]
 mod results_actor_tests;
+// 2026-11-23 RP-P03 authoritative publication transaction.
+#[path = "results_commit_tests.rs"]
+mod results_commit_tests;

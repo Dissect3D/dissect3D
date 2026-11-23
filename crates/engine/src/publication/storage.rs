@@ -44,13 +44,35 @@ const MANIFEST_FILENAME: &str = "manifest.json";
 
 /// The Store operations publication storage relies on. `Store` is the
 /// production ledger; tests drive the same SQL through a seeded connection.
-pub(super) trait ResultLedger {
+pub(crate) trait ResultLedger {
     fn reserve(&self, request: PublicationReservation) -> Result<(), CoreError>;
     fn mark_prepared(&self, result_id: &str) -> Result<(), CoreError>;
     fn abandon(&self, result_id: &str) -> Result<(), CoreError>;
     fn claim_reclaim(&self) -> Result<ReclaimBatch, CoreError>;
     fn confirm_reclaimed(&self, objects: Vec<String>) -> Result<u64, CoreError>;
     fn known_objects(&self, names: Vec<String>) -> Result<Vec<String>, CoreError>;
+}
+
+/// Shared ledgers (an `Arc<Store>` moved onto a blocking thread).
+impl<L: ResultLedger + ?Sized> ResultLedger for Arc<L> {
+    fn reserve(&self, request: PublicationReservation) -> Result<(), CoreError> {
+        (**self).reserve(request)
+    }
+    fn mark_prepared(&self, result_id: &str) -> Result<(), CoreError> {
+        (**self).mark_prepared(result_id)
+    }
+    fn abandon(&self, result_id: &str) -> Result<(), CoreError> {
+        (**self).abandon(result_id)
+    }
+    fn claim_reclaim(&self) -> Result<ReclaimBatch, CoreError> {
+        (**self).claim_reclaim()
+    }
+    fn confirm_reclaimed(&self, objects: Vec<String>) -> Result<u64, CoreError> {
+        (**self).confirm_reclaimed(objects)
+    }
+    fn known_objects(&self, names: Vec<String>) -> Result<Vec<String>, CoreError> {
+        (**self).known_objects(names)
+    }
 }
 
 impl ResultLedger for crate::Store {
@@ -162,11 +184,53 @@ impl PreparedPublication {
     pub(crate) fn files(&self) -> &[PreparedFile] {
         &self.files
     }
+
+    /// The authoritative commit request for these durable witnesses, bound
+    /// to the attempt that produced them and its native cleanup witness.
+    /// This is the only production constructor of a `PublicationCommit`.
+    pub(crate) fn into_commit(
+        self,
+        dispatch: &crate::store::execution::DispatchRecord,
+        cleanup: crate::store::cleanup::CleanupEvidence,
+    ) -> Result<crate::store::results_commit::PublicationCommit, PublicationError> {
+        if dispatch.job_id != self.job_id || dispatch.attempt_id != self.attempt_id {
+            return Err(PublicationError::Stale);
+        }
+        Ok(crate::store::results_commit::PublicationCommit {
+            attempt: crate::store::cleanup::AttemptRef::from(dispatch),
+            cleanup,
+            result_id: self.result_id,
+            publication_id: self.publication_id,
+            manifest_version: self.manifest_version.to_owned(),
+            published_at_ms: self.published_at_ms,
+            files: self
+                .files
+                .into_iter()
+                .map(|file| crate::store::results_commit::CommittedFile {
+                    object_name: file.object_name,
+                    role: file.role,
+                    byte_length: file.byte_length,
+                    sha256: file.sha256,
+                })
+                .collect(),
+        })
+    }
 }
 
 fn new_id(prefix: &str) -> Result<String, PublicationError> {
     crate::store::random_id(prefix).map_err(|_| PublicationError::Storage)
 }
+
+/// Points inside preparation where tests inject native faults (RP-P02/7).
+/// Production passes a hook that does nothing.
+pub(super) enum PrepareStep<'a> {
+    /// Before one file's durable write.
+    Write(FileRole),
+    /// After one file's durable write, holding the bytes read back from it.
+    ReadBack(FileRole, &'a mut Vec<u8>),
+}
+
+type PrepareHook<'h> = dyn FnMut(PrepareStep<'_>) -> Result<(), PlatformError> + 'h;
 
 /// Durably prepare one validated candidate and its canonical manifest.
 pub(super) fn prepare_publication(
@@ -174,6 +238,61 @@ pub(super) fn prepare_publication(
     root: &OwnedRoot,
     candidate: &ValidatedCandidate,
     deadline: Instant,
+) -> Result<PreparedPublication, PublicationError> {
+    prepare_publication_with(ledger, root, candidate, deadline, &mut |_| Ok(()))
+}
+
+/// Prepare on a blocking thread. The caller may stop waiting (it is aborted,
+/// or its deadline passes) without cancelling anything: the blocking task
+/// owns the ledger, root and candidate, and its allocation stays `preparing`
+/// (never reclaimed while this session is active) until the native work
+/// returns and records `prepared` or `failed` itself. Giving up therefore
+/// frees no space and makes no content unreferenced (reference: the input
+/// upload budget's ownership of non-cancellable native work).
+pub(super) async fn prepare_publication_blocking<L>(
+    ledger: L,
+    root: Arc<OwnedRoot>,
+    candidate: ValidatedCandidate,
+    deadline: Instant,
+) -> Result<PreparedPublication, PublicationError>
+where
+    L: ResultLedger + Send + 'static,
+{
+    prepare_blocking_with(ledger, root, candidate, deadline, |_| Ok(())).await
+}
+
+async fn prepare_blocking_with<L, H>(
+    ledger: L,
+    root: Arc<OwnedRoot>,
+    candidate: ValidatedCandidate,
+    deadline: Instant,
+    mut hook: H,
+) -> Result<PreparedPublication, PublicationError>
+where
+    L: ResultLedger + Send + 'static,
+    H: FnMut(PrepareStep<'_>) -> Result<(), PlatformError> + Send + 'static,
+{
+    budget(deadline)?;
+    let task = tokio::task::spawn_blocking(move || {
+        prepare_publication_with(&ledger, &root, &candidate, deadline, &mut hook)
+    });
+    let prepared = tokio::time::timeout_at(deadline.into(), task)
+        .await
+        .map_err(|_| PublicationError::Deadline)?
+        .map_err(|_| PublicationError::Storage)??;
+    // Tokio may poll a finished task before its timer. A completion seen
+    // after expiry is not a usable witness; its files stay prepared and
+    // charged until reclamation.
+    budget(deadline)?;
+    Ok(prepared)
+}
+
+fn prepare_publication_with(
+    ledger: &impl ResultLedger,
+    root: &OwnedRoot,
+    candidate: &ValidatedCandidate,
+    deadline: Instant,
+    hook: &mut PrepareHook<'_>,
 ) -> Result<PreparedPublication, PublicationError> {
     budget(deadline)?;
     root.check_durable_mutation_support().map_err(storage)?;
@@ -236,7 +355,7 @@ pub(super) fn prepare_publication(
         let mut prepared = Vec::with_capacity(files.len());
         for (file, bytes) in files {
             budget(deadline)?;
-            let durable = prepare_file(root, &file, &bytes, deadline)?;
+            let durable = prepare_file(root, &file, &bytes, deadline, hook)?;
             prepared.push(PreparedFile {
                 object_name: file.object_name,
                 role: file.role,
@@ -274,7 +393,9 @@ fn prepare_file(
     file: &ReservedFile,
     bytes: &[u8],
     deadline: Instant,
+    hook: &mut PrepareHook<'_>,
 ) -> Result<DurableArtifact, PublicationError> {
+    hook(PrepareStep::Write(file.role)).map_err(storage)?;
     let object = under(OBJECTS_DIR, &file.object_name)?;
     let durable = root
         .prepare_artifact(&under(STAGING_DIR, &file.object_name)?, &object, bytes)
@@ -287,6 +408,7 @@ fn prepare_file(
         .take(file.byte_length.saturating_add(1))
         .read_to_end(&mut stored)
         .map_err(|_| PublicationError::Storage)?;
+    hook(PrepareStep::ReadBack(file.role, &mut stored)).map_err(storage)?;
     if durable.length() != file.byte_length
         || stored.len() as u64 != file.byte_length
         || digest(&stored, deadline)? != file.sha256
