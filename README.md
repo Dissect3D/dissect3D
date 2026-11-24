@@ -7,10 +7,49 @@ images into 3D assets and processing existing meshes into parts. The goal is to
 prepare models once, run them on your own hardware, and use the same jobs and
 results from a terminal, a desktop application, Blender, or Unity.
 
-**Status: early design; no runnable application yet.** The project has established
-its core requirements and engine direction. The engine, clients, installers, and
-model adapters have not been implemented. Everything described below is intended
-behavior unless explicitly identified as available today.
+**Status: bounded Rust core service and CLI implemented; acceptance incomplete.**
+Available operations include local configuration, engine start/status/info/stop,
+auth setup/status/revoke, and read-only model/runtime/task support discovery.
+`auth setup --submission-access` opts a new empty CLI profile into four queued-
+submission grants; it does not upgrade an existing profile. Bounded durable
+queued submission, exact-request recovery and creator-private list/show are
+implemented. The normal production catalog is empty, so it supplies no prepared
+support for new jobs. Explicitly prepared CPU test support exercises those paths
+in a separate maintainer host.
+Discovery describes declared support, not installed or validated inference.
+Production model preparation, inference, worker execution, published results, graphical clients,
+plugins, and installers remain unimplemented.
+
+The **WE-P01 checkpoint** adds execution protocol/types, strict decoding, client
+negotiation, canonical-v2 request identity and compatibility handling. Dispatch is
+inactive; worker supervision and publication remain future work. See the
+[checkpoint and verification record](patompong-docs/implement-plan/worker-execution/checkpoint.md)
+for exact contents, recorded evidence and open gates. Recorded tests and explicit
+test support do not establish accepted platform or model support.
+
+The current working tree continues worker execution on feature schema v7. Private lifecycle,
+execution authorization and shared v1/v2 acceptance/replay seams are implemented;
+bounded submission preparation runs outside the Store SQL actor. Private execution
+snapshots expose current lifecycle facts, and a private Store/service exact linked retry
+seam exists with its public route inactive. A private creator-scoped execution page
+and retained-history accounting tests are in place. A private Store cleanup-witness
+transition records attempt cleanup and releases reservations only on confirmed
+termination, and per-job event history is bounded. Restart keeps a pending user
+cancellation until termination evidence arrives. WE-P04's first checkpoint adds a
+private bounded worker-protocol codec, session legality, a supervisor core tested
+only with an in-memory fake worker, and Store failure finalization; real process
+fixtures and native containment are the next WE-P04 task. RP-P01 supplies pure
+validation and read types; native capture and publication remain future work.
+These private seams do not activate dispatch or establish platform acceptance.
+
+WE-P02 adds native worker ownership and cleanup primitives for controlled Windows
+and Linux processes; they are not connected to dispatch. Linux launch ownership
+acknowledgements now run in normal builds as well as fault-injection builds.
+Windows durable recovery
+records and capture/submission/job service composition remain unavailable pending
+ordinary-user namespace guarantees. See the [current native repair QA](patompong-docs/implement-plan/worker-execution/qa.md).
+The macOS guardian now has a conservative implementation and cross-target checks;
+forked-descendant closure and native macOS verification remain incomplete.
 
 [Why Dissect3D?](#why-dissect3d) · [Workflows](#intended-workflows) ·
 [Models](#target-models) · [Architecture](#architecture) ·
@@ -132,11 +171,14 @@ native inference libraries outside Blender and Unity.
 Selected engine foundations are **Rust**, **HTTP/JSON** with polling and resumable
 **Server-Sent Events (SSE)**, and **SQLite** for local metadata. Large inputs,
 weights, and meshes live outside the database. Public access is restricted to
-loopback with per-client authorization. These are design decisions; their
-implementation and validation are pending.
+loopback with per-client authorization. The bounded core implements service control, authentication, and SQLite metadata;
+broader execution and resumable events remain planned.
 
 Client languages and frameworks, runtime provisioning tools, installer technology,
-exact API schemas, and source-directory layout remain open.
+broader API schemas, and future component layouts remain open.
+
+For the current source layout (crates, engine modules, allowed dependency
+directions, and where tests and fixtures live), see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Platform direction
 
@@ -145,7 +187,7 @@ requirements.
 
 | Area | Target | Current evidence |
 | --- | --- | --- |
-| CLI and engine installation and operation | Bounded Windows, macOS, and Linux targets, independently of Desktop | No application verification yet |
+| CLI and engine installation and operation | Bounded Windows, macOS, and Linux targets, independently of Desktop | Bounded core evidence; full acceptance pending |
 | Initial model-runtime preparation and inference | Explicitly tested Windows + NVIDIA CUDA profiles | No model or hardware profile validated yet |
 | Ordinary-user setup | Native core binaries; explicit preparation of managed Python and compatible prebuilt inference dependencies | Installers and runtime packages are not implemented |
 
@@ -162,22 +204,59 @@ Inference on macOS, Linux, AMD, Apple accelerators, or CPU remains undecided.
 
 ## Getting started today
 
-There is no Dissect3D installation, build, or inference command to run yet. Start
-with this README to understand the project, and [AGENTS.md](AGENTS.md) for repository
-conventions and guidance for coding agents. Dedicated public documentation will
-be added as the project develops.
+Developer prerequisites are Rust 1.99.1 with rustfmt and Clippy (pinned in
+`rust-toolchain.toml`), a native linker/C toolchain (MSVC Build Tools and Windows
+SDK on Windows), and Python 3.11+ for supplementary contract runners. Cargo needs
+registry dependencies cached or network access on the first build. OpenSSL-backed
+Python TLS verification is required by the public consumer. These are developer
+prerequisites, not model-runtime or ordinary-user installation requirements.
 
-The public repository's current project files are:
-
-```text
-README.md       Project purpose, intended behavior, architecture, and status
-AGENTS.md       Repository guidance for coding agents and contributors
-LICENSE         MIT license
-.gitignore      Repository exclusions
+```sh
+cargo build --workspace --locked
+python -B patompong-docs/tests/core-service/verify_inputs.py
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
 ```
 
-The architecture above describes logical components; it does not imply that
-engine, client, adapter, or test directories already exist.
+On macOS/Linux, build the fixture examples and explicitly identify the test
+binaries before running the full workspace suite (use your Cargo target directory
+if customized):
+
+```sh
+cargo build -p dissect3d-engine --features test-support --examples --locked
+export DISSECT3D_TEST_ENGINE="$PWD/target/debug/dissect3d-engine"
+export DISSECT3D_TEST_CLI="$PWD/target/debug/dissect3d"
+export DISSECT3D_TEST_DISCOVERY_ENGINE="$PWD/target/debug/examples/discovery_test_host"
+export DISSECT3D_TEST_SUBMISSION_ENGINE="$PWD/target/debug/examples/submission_test_host"
+export DISSECT3D_TEST_SUBMISSION_TOOL="$PWD/target/debug/examples/submission_fixture_tool"
+cargo test --workspace --all-targets --locked -- --test-threads=1
+```
+
+The verification runners use one harness test thread. Individual concurrency
+scenarios still execute their own concurrent operations.
+
+On Windows, Cargo and containing launcher Job Objects prevent the detached engine
+from using the required breakaway lifetime. Run the full suite from an independent
+PowerShell terminal outside such a Job Object:
+
+```powershell
+./patompong-docs/tests/core-service/run-windows-tests.ps1 -EvidenceDirectory target/core-verification
+```
+
+The runner refuses an unsuitable host. Do not weaken engine lifetime or security
+to make it pass. Its optional privileged filesystem fixture requires an appropriate
+host and is separate from ordinary verification. See the
+[core contract verification](patompong-docs/tests/core-service/verification.md),
+[QA record](patompong-docs/implement-plan/core-service/qa.md), and
+[discovery verification](patompong-docs/tests/support-discovery/verification.md).
+After building, run supplementary configuration checks with
+`python -B patompong-docs/tests/core-service/test_config_concurrency.py` (set
+`DISSECT3D_TEST_CLI` to the built binary on non-Windows hosts).
+
+The workspace contains API, platform, connection, engine, and CLI crates.
+Use `target/debug/dissect3d --help` (`.exe` on Windows) for implemented commands.
+Core verification is incomplete, including CS-N01-CS-N05 deferred manual/fault
+criteria. There is no supported installer or validated inference profile yet.
 
 ## Contributing
 
@@ -191,6 +270,8 @@ engine or client contracts.
 - **Investigate a model:** identify the upstream revision, required conditioning,
   complete dependencies and assets, licenses, platform constraints, and a
   reproducible validation procedure. Separate upstream evidence from project tests.
+- **Change the code:** start with [ARCHITECTURE.md](ARCHITECTURE.md) for where
+  things live and which module may depend on which.
 - **Submit a pull request:** keep the scope focused, explain the resulting
   behavior, and report what was checked and what remains unverified. Update the
   relevant documentation when behavior or accepted direction changes.

@@ -12,3 +12,8 @@ version = "0.1.0-dev"
 unsafe_op_in_unsafe_fn = "deny"
 unused_must_use = "deny"
 
+
+# Debug test workers hash their own large unoptimized binary before `hello`;
+# optimized sha2 keeps that well inside the 10 s handshake bound (WE-P06/3).
+[profile.dev.package.sha2]
+opt-level = 3

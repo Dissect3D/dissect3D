@@ -60,7 +60,7 @@ fn prepared_store() -> (Arc<Shared>, PreparedExecutionFixture) {
 }
 
 /// Accept an r2 job through the real admission path with `parameters`.
-fn accept_r2(
+pub(super) fn accept_r2(
     f: &Fixture,
     fixture: &PreparedExecutionFixture,
     key: &str,

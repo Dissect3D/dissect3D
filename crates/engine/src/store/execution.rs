@@ -323,21 +323,22 @@ fn stop_intent(
     attempt: &super::cleanup::AttemptRef,
 ) -> Result<crate::execution::types::StopIntent, CoreError> {
     use crate::execution::types::StopIntent;
-    let state: Option<String> = sql(connection
+    let facts: Option<(String, String)> = sql(connection
         .query_row(
-            "SELECT e.state FROM job_execution e JOIN job_attempts a USING(job_id)
+            "SELECT e.state,e.phase FROM job_execution e JOIN job_attempts a USING(job_id)
              WHERE e.job_id=?1 AND a.attempt_id=?2 AND a.session_id=?3",
             rusqlite::params![
                 attempt.job_id.as_str(),
                 attempt.attempt_id,
                 attempt.session_id
             ],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional())?;
-    match state.as_deref() {
-        Some("running") => Ok(StopIntent::Continue),
-        Some("cancel_requested") => Ok(StopIntent::UserCancel),
+    match facts.as_ref().map(|(s, p)| (s.as_str(), p.as_str())) {
+        Some(("running", SHUTDOWN_PHASE)) => Ok(StopIntent::EngineShutdown),
+        Some(("running", _)) => Ok(StopIntent::Continue),
+        Some(("cancel_requested", _)) => Ok(StopIntent::UserCancel),
         _ => Err(CoreError::Conflict),
     }
 }
@@ -576,28 +577,65 @@ pub(super) fn record_event_within(
     Ok(())
 }
 
-/// Restart reconciliation: only `running` work becomes `interrupted`. Durable
-/// user cancellation stays `cancel_requested` with its holds and awaits
-/// termination evidence, which `cleanup::record_cleanup` turns into `canceled`
-/// (WE-005, ENG-031; ENG-004 "unless durable user cancellation already won").
-pub(super) fn interrupt_active(tx: &Transaction<'_>) -> Result<(), CoreError> {
+/// The phase of running work that carries durable engine-shutdown stop intent
+/// (WE-P07/3). No supervisor observation writes it, and observations are
+/// refused once the barrier committed, so it stays until the outcome.
+pub(super) const SHUTDOWN_PHASE: &str = "engine_stopping";
+
+/// Running jobs, bounded by the nonterminal queue capacity.
+fn running_jobs(tx: &Transaction<'_>) -> Result<Vec<(String, String)>, CoreError> {
     let mut statement = sql(tx.prepare(
-        "SELECT job_id FROM job_execution
+        "SELECT job_id,phase FROM job_execution
          WHERE state='running' ORDER BY job_id LIMIT 129",
     ))?;
-    let jobs = sql(statement.query_map([], |r| r.get::<_, String>(0)))?
+    let jobs = sql(statement.query_map([], |r| Ok((r.get(0)?, r.get(1)?))))?
         .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|_| CoreError::StoreUnavailable)?;
     if jobs.len() > 128 {
         return Err(CoreError::InvalidStore);
     }
-    for job in jobs {
+    Ok(jobs)
+}
+
+/// WE-P07/3: inside the shutdown barrier transaction, mark every running
+/// attempt with durable engine-shutdown stop intent, one revision and event
+/// each. `cancel_requested` is not running, so an earlier user cancellation
+/// keeps winning; queued jobs stay queued. The caller commits or rolls back
+/// the marks together with the barrier.
+pub(super) fn mark_shutdown_intent(tx: &Transaction<'_>) -> Result<(), CoreError> {
+    for (job, phase) in running_jobs(tx)? {
+        if phase == SHUTDOWN_PHASE {
+            continue;
+        }
+        sql(tx.execute(
+            "UPDATE job_execution
+             SET phase=?2,snapshot_revision=snapshot_revision+1,updated_at_ms=?3
+             WHERE job_id=?1",
+            rusqlite::params![job, SHUTDOWN_PHASE, now_ms()?],
+        ))?;
+        record_event(tx, &job)?;
+    }
+    Ok(())
+}
+
+/// Restart reconciliation: only `running` work becomes `interrupted`, as an
+/// engine shutdown when the barrier had already marked it. Durable
+/// user cancellation stays `cancel_requested` with its holds and awaits
+/// termination evidence, which `cleanup::record_cleanup` turns into `canceled`
+/// (WE-005, ENG-031; ENG-004 "unless durable user cancellation already won").
+pub(super) fn interrupt_active(tx: &Transaction<'_>) -> Result<(), CoreError> {
+    for (job, phase) in running_jobs(tx)? {
+        let outcome = if phase == SHUTDOWN_PHASE {
+            "engine_shutdown"
+        } else {
+            "engine_restarted"
+        };
         sql(tx.execute(
             "UPDATE job_execution
              SET state='interrupted',phase='interrupted',snapshot_revision=snapshot_revision+1,
-                 outcome_code='engine_restarted',updated_at_ms=?2
+                 outcome_code=?3,updated_at_ms=?2
              WHERE job_id=?1",
-            rusqlite::params![job, now_ms()?],
+            rusqlite::params![job, now_ms()?, outcome],
         ))?;
         record_event(tx, &job)?;
     }

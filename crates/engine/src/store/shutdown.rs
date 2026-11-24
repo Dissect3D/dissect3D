@@ -1,5 +1,6 @@
 //! Durable shutdown operations: request, signal, progress, completion and
-//! operation reads.
+//! operation reads. Both barriers also mark running attempts with durable
+//! engine-shutdown stop intent in the same transaction (WE-P07/3).
 
 use super::*;
 
@@ -135,6 +136,9 @@ pub(super) fn request_shutdown(
             ],
         )
         .map_err(|_| CoreError::StoreUnavailable)?;
+    // WE-P07/3: the barrier and every running attempt's stop intent commit
+    // together, so publication sees either neither or both.
+    execution::mark_shutdown_intent(&transaction)?;
     if fail_before_commit {
         return Err(CoreError::StoreUnavailable);
     }
@@ -185,6 +189,7 @@ pub(super) fn signal_shutdown(
             rusqlite::params![operation_id.as_str(), instance_id.as_str(), timestamp],
         )
         .map_err(|_| CoreError::StoreUnavailable)?;
+    execution::mark_shutdown_intent(&transaction)?;
     transaction
         .commit()
         .map_err(|_| CoreError::StoreUnavailable)?;

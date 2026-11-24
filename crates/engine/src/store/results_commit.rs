@@ -237,6 +237,9 @@ pub(super) fn commit_publication(
         }
         _ => return Ok(CommitOutcome::Refused(CommitRefusal::NotRunning)),
     }
+    // The barrier commits each running attempt's durable stop intent and the
+    // actor sets `stopping` in the same turn, so for this instance the flag
+    // and the marks agree; after restart no attempt is running (WE-P07/3).
     if stopping {
         return Ok(CommitOutcome::Refused(CommitRefusal::ShutdownBarrier));
     }

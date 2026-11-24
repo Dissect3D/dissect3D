@@ -1448,3 +1448,9 @@ mod recovery_tests;
 // 2026-11-24 WE-P07/3-4 through real engine processes.
 #[path = "execution_restart_tests.rs"]
 mod execution_restart_tests;
+// 2026-11-24 WE-P07/3 durable engine-shutdown stop intent.
+#[path = "shutdown_intent_tests.rs"]
+mod shutdown_intent_tests;
+// 2026-11-24 WE-P07/4 engine death at named execution points.
+#[path = "execution_kill_tests.rs"]
+mod execution_kill_tests;

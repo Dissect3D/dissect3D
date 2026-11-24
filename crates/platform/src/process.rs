@@ -410,16 +410,29 @@ fn compare_start_marker(
     }
 }
 
+/// A failed `/proc/PID/stat` read. ENOENT (no entry) and ESRCH (the task was
+/// reaped between open and read) both definitively mean no such process;
+/// every other error stays a failure.
+#[cfg(target_os = "linux")]
+fn proc_stat_error(error: &std::io::Error) -> PlatformError {
+    if error.kind() == std::io::ErrorKind::NotFound
+        || error.raw_os_error() == Some(rustix::io::Errno::SRCH.raw_os_error())
+    {
+        PlatformError::NotFound
+    } else {
+        PlatformError::Io
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "process_regressions.rs"]
+mod process_regressions;
+
 pub(crate) fn process_start_marker(pid: u32) -> Result<String, PlatformError> {
     #[cfg(target_os = "linux")]
     {
-        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).map_err(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                PlatformError::NotFound
-            } else {
-                PlatformError::Io
-            }
-        })?;
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .map_err(|error| proc_stat_error(&error))?;
         let end_of_name = stat.rfind(')').ok_or(PlatformError::InvalidFile)?;
         let fields = stat[end_of_name + 1..]
             .split_whitespace()

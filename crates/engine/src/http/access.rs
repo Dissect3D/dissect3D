@@ -52,27 +52,13 @@ async fn limit_response(
     request: Request<Body>,
     next: Next,
 ) -> Response {
-    let commit_capable = request.method() == Method::POST && request.uri().path() == "/v1/jobs";
+    let commit_capable = commit_capable(request.method(), request.uri().path());
     let method = match *request.method() {
         Method::GET => "get",
         Method::POST => "post",
         _ => "other",
     };
-    let route = match request.uri().path() {
-        "/v1/info" => "info",
-        "/v1/auth/status" => "auth_status",
-        "/v1/auth/revoke" => "auth_revoke",
-        "/v1/operations" => "operation_create",
-        path if path.starts_with("/v1/operations/") => "operation_read",
-        "/v1/inputs" => "input_create",
-        "/v1/models" => "models_list",
-        path if path.starts_with("/v1/models/") => "models_show",
-        "/v1/runtimes" => "runtimes_list",
-        path if path.starts_with("/v1/runtimes/") => "runtimes_show",
-        "/v1/tasks" => "tasks_list",
-        path if path.starts_with("/v1/tasks/") => "tasks_show",
-        _ => "other",
-    };
+    let route = route_label(request.uri().path());
     let response = next.run(request).await;
     let limit = state.policy.control_response_bytes;
     let (parts, body) = response.into_parts();
@@ -195,10 +181,10 @@ async fn authorize(
     if is_upload && let Some(signal) = request.extensions().get::<UploadDeadlineSignal>() {
         signal.signal();
     }
-    // A commit-capable submission outlives a disconnected caller. Its outer
+    // A commit-capable job mutation outlives a disconnected caller. Its outer
     // connection deadline closes the transport; never fabricate a rejection
     // while the engine-owned blocking handoff can still commit.
-    if request.method() == Method::POST && request.uri().path() == "/v1/jobs" {
+    if commit_capable(request.method(), request.uri().path()) {
         return next.run(request).await;
     }
     match tokio::time::timeout(request_timeout, next.run(request)).await {
@@ -238,6 +224,46 @@ fn required_grant(method: &Method, path: &str) -> Option<&'static str> {
             Some("operation.show_own")
         }
         _ => None,
+    }
+}
+
+/// Job mutations that can commit durably before their reply: submission,
+/// cancellation and linked retry. Their outcome is never replaced by a
+/// fabricated rejection (WE-P06/5).
+fn commit_capable(method: &Method, path: &str) -> bool {
+    *method == Method::POST
+        && (path == "/v1/jobs" || matches!(job_control(path), Some("cancel" | "retry")))
+}
+
+/// The bounded diagnostic label of a request path; the method is recorded
+/// separately, so `jobs` covers both submission and listing.
+fn route_label(path: &str) -> &'static str {
+    match path {
+        "/v1/info" => "info",
+        "/v1/auth/status" => "auth_status",
+        "/v1/auth/revoke" => "auth_revoke",
+        "/v1/operations" => "operation_create",
+        path if path.starts_with("/v1/operations/") => "operation_read",
+        "/v1/inputs" => "input_create",
+        "/v1/models" => "models_list",
+        path if path.starts_with("/v1/models/") => "models_show",
+        "/v1/runtimes" => "runtimes_list",
+        path if path.starts_with("/v1/runtimes/") => "runtimes_show",
+        "/v1/tasks" => "tasks_list",
+        path if path.starts_with("/v1/tasks/") => "tasks_show",
+        "/v1/jobs" => "jobs",
+        path => match job_control(path) {
+            Some("cancel") => "job_cancel",
+            Some("retry") => "job_retry",
+            Some(_) => "other",
+            None if path
+                .strip_prefix("/v1/jobs/")
+                .is_some_and(|id| !id.is_empty() && !id.contains('/')) =>
+            {
+                "job_show"
+            }
+            None => "other",
+        },
     }
 }
 
@@ -712,6 +738,10 @@ fn hex_digit(value: u8) -> u8 {
         _ => b'a' + value - 10,
     }
 }
+
+#[cfg(test)]
+#[path = "access_regressions.rs"]
+mod access_regressions;
 
 #[cfg(test)]
 mod response_limit_tests {

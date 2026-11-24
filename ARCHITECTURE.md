@@ -52,7 +52,7 @@ dissect3d-engine ──▶ dissect3d-api, dissect3d-platform
 | Crate | Path | Role |
 | --- | --- | --- |
 | `dissect3d-api` | `crates/api/` | Shared wire types, public error codes and strict JSON decoding. The optional `client` feature adds the HTTP client (`Client`) that the CLI and tests use. It has no project dependencies. |
-| `dissect3d-platform` | `crates/platform/` | Operating-system boundary: owned root and files, durable writes, authority lease, private bootstrap IPC, process lifetime and worker containment. All `unsafe` and native flag handling lives here, in per-OS modules (`windows.rs`, `worker/linux.rs`, `worker/macos.rs`, ...). Also builds the `dissect3d-worker-guardian` helper binary. It has no project dependencies. |
+| `dissect3d-platform` | `crates/platform/` | Operating-system boundary: owned root and files, durable writes, authority lease, private bootstrap IPC, process lifetime, worker containment and restart reconciliation of a previous engine's worker by verified identity (`reconcile_survivors`). All `unsafe` and native flag handling lives here, in per-OS modules (`windows.rs`, `worker/linux.rs`, `worker/macos.rs`, ...). Also builds the `dissect3d-worker-guardian` helper binary. It has no project dependencies. |
 | `dissect3d-connection` | `crates/connection/` | Engine discovery validation, process identity checks and native readiness probes shared by the CLI and engine test hosts. |
 | `dissect3d-engine` | `crates/engine/` | The engine library and the `dissect3d-engine` binary: access control, HTTP service, durable store, submission, execution supervision and result publication. |
 | `dissect3d-cli` | `crates/cli/` | The `dissect3d` command-line client: argument parsing, profiles and configuration, connection setup and output rendering. |
@@ -81,14 +81,14 @@ its children live in `foo/`. Several modules are compiled on Unix only today
 | `credentials` | Credential and grant records passed into the store actor (`AuthContext`, `VerifiedEnrollment`, grant policies). Raw tokens never appear here. |
 | `http` | Loopback listener, TLS, bounded HTTP/1 parsing, Host/Origin policy, authentication and error mapping. Feature routes are in `http/{access,discovery,inputs,jobs}.rs`; `http/framing.rs` holds shared response framing. |
 | `tls` | Installation certificate authority and the per-run loopback HTTPS identity. |
-| `support` | The support catalog: declaration decoding and validation (`support/declarations.rs`), resolution, compatibility, observations and paginated discovery reads. |
+| `support` | The support catalog: declaration decoding and validation (`support/declarations.rs`), resolution, compatibility, observations and paginated discovery reads. Observations read their operational facts through `ObservationSource`: the Phase 2 values, or in the explicit execution host `support/live_facts.rs`, fed by the prepared profile and the controller's loaded workers. |
 | `submission` | Bounded admission, request equivalence, durable submission orchestration and the bounded OBJ fixture validator. |
 | `inputs` | Input upload capture and publication, budgets, policy limits and conservative recovery. |
 | `jobs` | Private job inspection. Polling reads retained snapshots only. |
-| `execution` | Worker supervision: attempt files, launcher, session legality, progress, the supervisor and the central dispatch turn (`scheduler`: FIFO among eligible queued jobs over the Store's reservation transaction). Dispatch is inactive: no service drives the turn yet. |
+| `execution` | Worker supervision: attempt files, launcher, session legality, progress, the supervisor and the central dispatch turn (`scheduler`: FIFO among eligible queued jobs over the Store's reservation transaction) and the `controller`, the single owner of turns that launches each committed attempt once and routes a candidate to `publication::service` and an ended attempt to finalization. `loaded` records the workers the controller holds loaded (load acknowledged until confirmed cleanup), `control` is job cancellation, `shutdown` the shared core shutdown deadline that caps every stop phase, and `recovery` the restart reconciliation of earlier instances' workers before dispatch. Only the explicit `test-support` execution host composes the controller and its negotiated routes; the normal engine keeps dispatch inactive. |
 | `worker_protocol` | The private engine–worker frame and message codec. |
 | `publication` | Validation of captured result candidates, private durable storage and publication policy limits. No route or dispatch uses it yet. |
-| `store` | The `Store` handle, the SQL actor thread, schema and migrations, and all durable records. `store.rs` holds the handle, its records and `CoreError`. `store/actor.rs` has the command enum and actor loop, `store/schema.rs` database open, migrations and recovery backups, `store/credentials.rs` and `store/shutdown.rs` those operations, and `store/ids.rs` id and time helpers. The other files in `store/` hold one record family each (`submission`, `jobs`, `retry`, `execution`, `finalize`, `cleanup`, `results`, `inputs`, ...). |
+| `store` | The `Store` handle, the SQL actor thread, schema and migrations, and all durable records. `store.rs` holds the handle, its records and `CoreError`. `store/actor.rs` has the command enum and actor loop, `store/schema.rs` database open, migrations and recovery backups, `store/credentials.rs` and `store/shutdown.rs` those operations, and `store/ids.rs` id and time helpers. The other files in `store/` hold one record family each (`submission`, `jobs`, `retry`, `execution`, `finalize`, `cleanup`, `recovery`, `results`, `inputs`, ...). |
 | `diagnostics` | Bounded startup diagnostics with fixed codes. No paths, request data or secrets. |
 | `domain` | Shared vocabulary below the store: `SubmissionError` and the enforced input-capture and publication storage limits. Depends only on `dissect3d-api`. The old paths (`submission::SubmissionError`, `inputs::policy`) re-export these items. |
 | `policy` | `CorePolicy`, the engine-wide bounds. |
@@ -141,13 +141,13 @@ by grepping `crate::<module>`:
 | From | To | Production edges |
 | --- | --- | --- |
 | bootstrap | credentials, store | |
-| execution | store, worker_protocol | |
+| execution | publication, store, submission, worker_protocol | `submission` for `SubmissionError` in `control` |
 | execution_fixture | execution, store, submission_fixture, support, worker_protocol | test-support only |
-| http | bootstrap, diagnostics, inputs, jobs, store, submission, submission_fixture, support, tls | |
+| http | bootstrap, diagnostics, execution, execution_fixture, inputs, jobs, store, submission, submission_fixture, support, tls | `execution_fixture` test-support only |
 | inputs | diagnostics, domain, store, submission | `submission` only for `#[cfg(test)]` hooks |
-| jobs | diagnostics, domain, store, submission | `submission` only for `#[cfg(test)]` hooks |
+| jobs | diagnostics, domain, execution, store, submission | `submission` only for `#[cfg(test)]` hooks; `execution` for the controller's queued blockers |
 | publication | domain, inputs, store, submission, worker_protocol | `inputs` only in a test; `submission::obj` OBJ parser |
-| startup | bootstrap, diagnostics, submission_fixture, support | |
+| startup | bootstrap, diagnostics, execution, execution_fixture, submission_fixture, support | `execution`/`execution_fixture` only in the test-support execution engine |
 | store | credentials, domain, execution, submission | see below |
 | submission | domain, inputs, jobs, store, submission_fixture, support | |
 | submission_fixture | submission, support | test-support only |

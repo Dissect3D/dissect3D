@@ -131,7 +131,7 @@ fn running(f: &Fixture, key: &str) -> AttemptRef {
     AttemptRef::from(&dispatch(f, &job))
 }
 /// A second concurrently running attempt, on its own exclusive resource.
-fn running_on(f: &Fixture, key: &str, resource: &str) -> AttemptRef {
+pub(super) fn running_on(f: &Fixture, key: &str, resource: &str) -> AttemptRef {
     let job = accept(f, key).job_id;
     let resolved: String = db(f)
         .query_row(
