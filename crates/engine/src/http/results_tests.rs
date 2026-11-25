@@ -940,3 +940,109 @@ async fn revocation_blocks_subsequent_requests_and_aborts_active_stream() {
         Some(ClientError::Rejected(ErrorCode::Unauthorized))
     );
 }
+
+#[tokio::test]
+async fn reclaim_block_surfaces_stale_storage_and_diagnostic_without_auto_repair() {
+    use std::os::unix::fs::symlink;
+
+    let host = TestHost::start().await;
+    host.enroll_execution(CLIENT_A, "enr_50000000000000000000000000000001", SECRET_A);
+    let client = host.client(CLIENT_A, SECRET_A);
+
+    // Baseline storage is healthy and current.
+    let healthy = client.storage().await.unwrap();
+    assert_eq!(
+        healthy.measurement.status,
+        StorageMeasurementStatus::Current
+    );
+    assert_eq!(healthy.usage.private_staging_bytes, Some(0));
+
+    // Seed a terminal failed job with a reclaiming allocation whose object is
+    // replaced by a planted symlink.
+    let job_id = "job_a0000000000000000000000000000001";
+    let res_id = "res_a0000000000000000000000000000001";
+    let pub_id = "pub_a0000000000000000000000000000001";
+    let art_id = "art_a0000000000000000000000000000001";
+    let att_id = "att_a0000000000000000000000000000001";
+    let db = rusqlite::Connection::open(host.path.join("metadata.sqlite3")).unwrap();
+    let instance_id: String = db
+        .query_row(
+            "SELECT instance_id FROM service_sessions WHERE termination='active'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    db.execute(
+        "INSERT INTO jobs
+         (job_id,client_id,acceptance_sequence,created_at_ms,resolved_json,storage_status)
+         VALUES(?1,?2,1,100,'{}','verified')",
+        rusqlite::params![job_id, CLIENT_A],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO job_execution
+         (job_id,state,phase,snapshot_revision,cleanup_status,updated_at_ms)
+         VALUES(?1,'failed','failed',2,'confirmed',200)",
+        [job_id],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO job_attempts
+         VALUES(?1,?2,?3,'ses_a0000000000000000000000000000001',1,150,200,'confirmed')",
+        rusqlite::params![att_id, job_id, instance_id],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO publication_allocations
+         VALUES(?1,?2,?3,?4,?5,'reclaiming',4096,1,1)",
+        rusqlite::params![res_id, pub_id, job_id, att_id, instance_id],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO result_files VALUES(?1,?2,'artifact','mesh.obj','application/octet-stream',4096,zeroblob(32))",
+        rusqlite::params![art_id, res_id],
+    )
+    .unwrap();
+    drop(db);
+
+    let objects_dir = host.path.join("results/objects");
+    host.root()
+        .ensure_private_directory(&RelativePath::parse("results/objects").unwrap())
+        .unwrap();
+    let outside = host.dir.as_ref().unwrap().path().join("outside-target.txt");
+    std::fs::write(&outside, b"must-not-be-deleted").unwrap();
+    let planted = objects_dir.join(art_id);
+    symlink(&outside, &planted).unwrap();
+
+    // Reclamation must fail closed: stop turn, keep charge, leave planted link
+    // and outside target untouched, and record bounded diagnostic.
+    let err = crate::publication::storage::reclaim_turn(host.store(), host.root()).unwrap_err();
+    assert_eq!(err, crate::publication::PublicationError::Storage);
+    assert!(planted.symlink_metadata().unwrap().file_type().is_symlink());
+    assert_eq!(std::fs::read(&outside).unwrap(), b"must-not-be-deleted");
+    assert!(crate::diagnostics::has_publication_reclaim_failure(
+        host.root()
+    ));
+
+    // GET /v1/storage surfaces the blocked state as `stale` with charged
+    // `private_staging_bytes > 0` and no automatic repair.
+    let blocked = client.storage().await.unwrap();
+    assert_eq!(blocked.measurement.status, StorageMeasurementStatus::Stale);
+    assert_eq!(blocked.usage.private_staging_bytes, Some(4096));
+    assert!(planted.symlink_metadata().unwrap().file_type().is_symlink());
+
+    // After manual operator removal of the planted link, a clean reclaim turn
+    // releases the charge and restores `current` measurement status.
+    std::fs::remove_file(&planted).unwrap();
+    let report = crate::publication::storage::reclaim_turn(host.store(), host.root()).unwrap();
+    assert_eq!(report.released_bytes, 4096);
+    assert!(!crate::diagnostics::has_publication_reclaim_failure(
+        host.root()
+    ));
+    let recovered = client.storage().await.unwrap();
+    assert_eq!(
+        recovered.measurement.status,
+        StorageMeasurementStatus::Current
+    );
+    assert_eq!(recovered.usage.private_staging_bytes, Some(0));
+}

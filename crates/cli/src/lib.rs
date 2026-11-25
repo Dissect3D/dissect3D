@@ -12,7 +12,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use args::{
-    Cli, Command, ConfigCommand, JobsCommand, ModelsCommand, RuntimesCommand, TasksCommand,
+    Cli, Command, ConfigCommand, JobsCommand, ModelsCommand, ResultsCommand, RuntimesCommand,
+    StorageCommand, TasksCommand,
 };
 use clap::{Parser, error::ErrorKind};
 use config::{ConfigEnvironment, ConfigFile, ConfigProblem, default_config_path, resolve_config};
@@ -268,6 +269,106 @@ pub fn run() -> i32 {
                 }
             }
         }
+        Some(Command::Results { command }) => match command {
+            ResultsCommand::List { limit, cursor } => {
+                match commands::results::list(limit, cursor, &config, &config_path, client_limits) {
+                    Ok(raw) => {
+                        if output::render_checked(
+                            &CommandOutcome::success_raw("results list", raw),
+                            json_output,
+                        )
+                        .is_ok()
+                        {
+                            0
+                        } else {
+                            19
+                        }
+                    }
+                    Err(error) => run_connected_command::<serde_json::Value>(
+                        "results list",
+                        Err(error),
+                        json_output,
+                    ),
+                }
+            }
+            ResultsCommand::Show { result_id } => {
+                match commands::results::show(result_id, &config, &config_path, client_limits) {
+                    Ok(raw) => {
+                        if output::render_checked(
+                            &CommandOutcome::success_raw("results show", raw),
+                            json_output,
+                        )
+                        .is_ok()
+                        {
+                            0
+                        } else {
+                            19
+                        }
+                    }
+                    Err(error) => run_connected_command::<serde_json::Value>(
+                        "results show",
+                        Err(error),
+                        json_output,
+                    ),
+                }
+            }
+            ResultsCommand::Download { result_id, output } => {
+                match commands::results::download(
+                    result_id,
+                    output,
+                    &config,
+                    &config_path,
+                    client_limits,
+                ) {
+                    Ok(report) => {
+                        let raw = match serde_json::value::to_raw_value(&report) {
+                            Ok(raw) => raw,
+                            Err(_) => return 16,
+                        };
+                        if output::render_checked(
+                            &CommandOutcome::success_raw("results download", raw),
+                            json_output,
+                        )
+                        .is_err()
+                        {
+                            eprintln!(
+                                "local_output_write_failed: downloaded result {} (job {}) with {} saved file(s), but stdout could not be written",
+                                report.result_id,
+                                report.job_id,
+                                report.files.len()
+                            );
+                            return 16;
+                        }
+                        0
+                    }
+                    Err(error) => run_connected_command::<serde_json::Value>(
+                        "results download",
+                        Err(error),
+                        json_output,
+                    ),
+                }
+            }
+        },
+        Some(Command::Storage {
+            command: StorageCommand::Show,
+        }) => match commands::results::storage_show(&config, &config_path, client_limits) {
+            Ok(success) => {
+                if output::render_checked(
+                    &CommandOutcome::success_raw("storage show", success.data)
+                        .with_warnings(success.warnings),
+                    json_output,
+                )
+                .is_ok()
+                {
+                    0
+                } else {
+                    19
+                }
+            }
+            Err(error) => {
+                run_connected_command::<serde_json::Value>("storage show", Err(error), json_output)
+            }
+        },
         Some(Command::Run(_)) => {
             unreachable!("Stage 3 commands are returned by the preflight gate")
         }

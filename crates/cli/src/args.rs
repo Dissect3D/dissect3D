@@ -72,6 +72,16 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: JobsCommand,
     },
+    /// Inspect and safely download committed results.
+    Results {
+        #[command(subcommand)]
+        command: ResultsCommand,
+    },
+    /// Inspect creator-scoped storage usage and engine capacity constraints.
+    Storage {
+        #[command(subcommand)]
+        command: StorageCommand,
+    },
     /// Submit a durable job without waiting for execution.
     Run(RunArgs),
 }
@@ -81,6 +91,9 @@ pub(crate) struct RunArgs {
     /// Submit the job and return its durable job ID.
     #[arg(long)]
     pub(crate) detach: bool,
+    /// Save completed foreground outputs to an explicit local directory.
+    #[arg(long, value_name = "DIR", conflicts_with = "detach")]
+    pub(crate) output: Option<std::path::PathBuf>,
     #[command(flatten)]
     pub(crate) definition: JobDefinitionArgs,
 }
@@ -131,6 +144,31 @@ pub(crate) enum JobsCommand {
     },
     /// Inspect one accepted job.
     Show { job_id: String },
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum ResultsCommand {
+    /// List this credential's committed results.
+    List {
+        #[arg(long)]
+        limit: Option<u8>,
+        #[arg(long)]
+        cursor: Option<String>,
+    },
+    /// Show the exact immutable manifest for one committed result.
+    Show { result_id: String },
+    /// Verify and save one committed result's files and manifest into DIR.
+    Download {
+        result_id: String,
+        #[arg(long, value_name = "DIR")]
+        output: std::path::PathBuf,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum StorageCommand {
+    /// Show creator-scoped storage usage, limits, and measurement status.
+    Show,
 }
 
 #[derive(Debug, Subcommand)]

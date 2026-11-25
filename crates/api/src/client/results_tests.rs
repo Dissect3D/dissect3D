@@ -132,3 +132,35 @@ fn unsupported_manifest_feature_detection_distinguishes_incompatibility() {
     ));
     assert!(!has_unsupported_manifest_feature(b"not-json"));
 }
+
+#[test]
+fn optional_single_header_rejects_duplicate_and_non_utf8_values() {
+    use reqwest::header::{HeaderMap, HeaderValue};
+    let mut headers = HeaderMap::new();
+    assert_eq!(
+        optional_single_header_str(&headers, "x-content-sha256"),
+        Ok(None)
+    );
+
+    headers.insert("x-content-sha256", HeaderValue::from_static("abc"));
+    assert_eq!(
+        optional_single_header_str(&headers, "x-content-sha256"),
+        Ok(Some("abc"))
+    );
+
+    headers.append("x-content-sha256", HeaderValue::from_static("def"));
+    assert_eq!(
+        optional_single_header_str(&headers, "x-content-sha256"),
+        Err(ClientError::InvalidResponse)
+    );
+
+    let mut non_utf8 = HeaderMap::new();
+    non_utf8.insert(
+        "x-content-sha256",
+        HeaderValue::from_bytes(&[0xff, 0xfe]).unwrap(),
+    );
+    assert_eq!(
+        optional_single_header_str(&non_utf8, "x-content-sha256"),
+        Err(ClientError::InvalidResponse)
+    );
+}

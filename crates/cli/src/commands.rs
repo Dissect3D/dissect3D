@@ -3,6 +3,7 @@
 
 pub(crate) mod discovery;
 pub(crate) mod jobs;
+pub(crate) mod results;
 pub(crate) mod submission;
 
 use crate::args::{AuthCommand, EngineCommand};

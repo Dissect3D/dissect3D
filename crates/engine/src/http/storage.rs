@@ -33,11 +33,12 @@ async fn show(
     let result = tokio::task::spawn_blocking(move || {
         let usage = store.creator_storage_usage(authorized.context);
         let available_space = root.available_space_bytes().ok();
-        (usage, available_space)
+        let reclaim_blocked = crate::diagnostics::has_publication_reclaim_failure(&root);
+        (usage, available_space, reclaim_blocked)
     })
     .await;
-    let (usage_result, available_space) = match result {
-        Ok(pair) => pair,
+    let (usage_result, available_space, reclaim_blocked) = match result {
+        Ok(triple) => triple,
         Err(_) => {
             return access::error_response(
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -52,7 +53,7 @@ async fn show(
     }
     let snapshot = match usage_result {
         Ok(usage) => {
-            let status = if available_space.is_some() {
+            let status = if available_space.is_some() && !reclaim_blocked {
                 StorageMeasurementStatus::Current
             } else {
                 StorageMeasurementStatus::Stale

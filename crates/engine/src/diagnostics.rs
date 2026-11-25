@@ -12,6 +12,7 @@ use std::sync::Mutex;
 const DIAGNOSTICS_FILE: &str = "run/diagnostics.json";
 const MAX_DIAGNOSTICS_BYTES: usize = 16_384;
 const MAX_DIAGNOSTICS_RECORDS: usize = 64;
+const PUBLICATION_RECLAIM_FILE: &str = "run/publication-reclaim.json";
 const REQUEST_LOG_FILE: &str = "run/requests.json";
 const MAX_REQUEST_LOG_BYTES: usize = 1_048_576;
 const MAX_REQUEST_LOG_FILES: usize = 3;
@@ -237,6 +238,46 @@ pub(crate) fn record_job_recovery_failure(root: &OwnedRoot) {
     if let Ok(bytes) = serde_json::to_vec(&record) {
         let _ = root.write_atomic(&path, &bytes);
     }
+}
+
+/// Keep the latest publication reclamation block in a bounded, fixed-category
+/// record. Never stores paths or OS text and never triggers automatic repair
+/// (user decision 2026-11-23).
+pub(crate) fn record_publication_reclaim_failure(root: &OwnedRoot, code: &'static str) {
+    if !matches!(code, "reclamation_blocked" | "storage_unavailable") {
+        return;
+    }
+    let Ok(path) = RelativePath::parse(PUBLICATION_RECLAIM_FILE) else {
+        return;
+    };
+    let record = serde_json::json!({
+        "timestamp_ms": timestamp_ms(),
+        "phase": "publication_reclaim",
+        "code": code,
+    });
+    if let Ok(bytes) = serde_json::to_vec(&record) {
+        let _ = root.write_atomic(&path, &bytes);
+    }
+}
+
+/// Clear the publication reclamation block diagnostic after a clean turn.
+pub(crate) fn clear_publication_reclaim_failure(root: &OwnedRoot) {
+    let Ok(path) = RelativePath::parse(PUBLICATION_RECLAIM_FILE) else {
+        return;
+    };
+    let _ = root.remove_file(&path);
+}
+
+/// Return whether a fail-closed publication reclamation block is recorded.
+///
+/// Fails closed: any existing or unreadable diagnostic record (including
+/// corrupt bytes) is treated as blocked; only `NotFound` clears the state.
+#[cfg(unix)]
+pub(crate) fn has_publication_reclaim_failure(root: &OwnedRoot) -> bool {
+    let Ok(path) = RelativePath::parse(PUBLICATION_RECLAIM_FILE) else {
+        return false;
+    };
+    !matches!(root.read_file(&path, 1024), Err(PlatformError::NotFound))
 }
 
 #[cfg(test)]

@@ -29,6 +29,13 @@ pub struct VerifiedManifest {
     pub sha256: ContentDigest,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StreamLifecycle {
+    Open,
+    Eof,
+    Failed(ClientError),
+}
+
 /// Bounded, backpressure-aware stream of one published artifact's bytes.
 ///
 /// Each [`next_chunk`](Self::next_chunk) call yields at most 64 KiB, enforces
@@ -45,7 +52,7 @@ pub struct ArtifactStream {
     chunk_timeout: Duration,
     hasher: Sha256,
     pending: VecDeque<Vec<u8>>,
-    finished: bool,
+    lifecycle: StreamLifecycle,
 }
 
 impl ArtifactStream {
@@ -71,29 +78,34 @@ impl ArtifactStream {
         if let Some(chunk) = self.pending.pop_front() {
             return Ok(Some(chunk));
         }
-        if self.finished {
-            return Ok(None);
+        match self.lifecycle {
+            StreamLifecycle::Open => {}
+            StreamLifecycle::Eof => return Ok(None),
+            StreamLifecycle::Failed(error) => return Err(error),
         }
         loop {
-            let next = tokio::time::timeout(self.chunk_timeout, self.response.chunk())
-                .await
-                .map_err(|_| ClientError::Transport)?
-                .map_err(|_| ClientError::Transport)?;
+            let next = match tokio::time::timeout(self.chunk_timeout, self.response.chunk()).await {
+                Ok(Ok(chunk)) => chunk,
+                Ok(Err(_)) | Err(_) => {
+                    self.lifecycle = StreamLifecycle::Failed(ClientError::Transport);
+                    return Err(ClientError::Transport);
+                }
+            };
             match next {
                 Some(chunk) => {
                     if chunk.is_empty() {
                         continue;
                     }
-                    let next_total = self
-                        .received
-                        .checked_add(chunk.len() as u64)
-                        .ok_or(ClientError::TransferLimit)?;
+                    let Some(next_total) = self.received.checked_add(chunk.len() as u64) else {
+                        self.lifecycle = StreamLifecycle::Failed(ClientError::TransferLimit);
+                        return Err(ClientError::TransferLimit);
+                    };
                     if next_total > self.max_bytes {
-                        self.finished = true;
+                        self.lifecycle = StreamLifecycle::Failed(ClientError::TransferLimit);
                         return Err(ClientError::TransferLimit);
                     }
                     if next_total > self.content_length {
-                        self.finished = true;
+                        self.lifecycle = StreamLifecycle::Failed(ClientError::InvalidResponse);
                         return Err(ClientError::InvalidResponse);
                     }
                     self.received = next_total;
@@ -104,15 +116,17 @@ impl ArtifactStream {
                     return Ok(self.pending.pop_front());
                 }
                 None => {
-                    self.finished = true;
                     if self.received != self.content_length {
+                        self.lifecycle = StreamLifecycle::Failed(ClientError::InvalidResponse);
                         return Err(ClientError::InvalidResponse);
                     }
                     let digest: [u8; 32] = self.hasher.clone().finalize().into();
                     let actual = format_sha256(&digest);
                     if actual != self.sha256.as_str() {
+                        self.lifecycle = StreamLifecycle::Failed(ClientError::InvalidResponse);
                         return Err(ClientError::InvalidResponse);
                     }
+                    self.lifecycle = StreamLifecycle::Eof;
                     return Ok(None);
                 }
             }
@@ -177,7 +191,7 @@ impl Client {
         if !media.eq_ignore_ascii_case("application/json") {
             return Err(ClientError::InvalidResponse);
         }
-        if let Some(raw_len) = single_header_str(&headers, CONTENT_LENGTH.as_str()) {
+        if let Some(raw_len) = optional_single_header_str(&headers, CONTENT_LENGTH.as_str())? {
             let declared: usize = raw_len.parse().map_err(|_| ClientError::InvalidResponse)?;
             if declared != raw_bytes.len() {
                 return Err(ClientError::InvalidResponse);
@@ -186,7 +200,7 @@ impl Client {
         let digest: [u8; 32] = Sha256::digest(&raw_bytes).into();
         let sha256 = ContentDigest::parse(format_sha256(&digest))
             .map_err(|_| ClientError::InvalidResponse)?;
-        if let Some(header_digest) = single_header_str(&headers, X_CONTENT_SHA256) {
+        if let Some(header_digest) = optional_single_header_str(&headers, X_CONTENT_SHA256)? {
             let expected =
                 ContentDigest::parse(header_digest).map_err(|_| ClientError::InvalidResponse)?;
             if expected != sha256 {
@@ -225,16 +239,24 @@ impl Client {
         self.require_result_publication_capability("artifacts.read")
             .await?;
         let path = format!("/v1/artifacts/{artifact_id}");
-        let response = self
-            .upload_http
-            .get(format!("{}{}", self.base_url, path))
-            .header(AUTHORIZATION, self.authorization()?)
-            .send()
-            .await
-            .map_err(|_| ClientError::Transport)?;
+        let response = tokio::time::timeout(
+            self.limits.request_timeout,
+            self.upload_http
+                .get(format!("{}{}", self.base_url, path))
+                .header(AUTHORIZATION, self.authorization()?)
+                .send(),
+        )
+        .await
+        .map_err(|_| ClientError::Transport)?
+        .map_err(|_| ClientError::Transport)?;
         let status = response.status();
         if status != reqwest::StatusCode::OK {
-            let body = read_bounded(response, self.limits.max_response_bytes).await?;
+            let body = tokio::time::timeout(
+                self.limits.request_timeout,
+                read_bounded(response, self.limits.max_response_bytes),
+            )
+            .await
+            .map_err(|_| ClientError::Transport)??;
             let error: ApiError = decode_json(&body).map_err(|_| ClientError::InvalidResponse)?;
             if error.api_version != API_VERSION {
                 return Err(ClientError::Incompatible);
@@ -279,7 +301,7 @@ impl Client {
             chunk_timeout: self.limits.request_timeout,
             hasher: Sha256::new(),
             pending: VecDeque::new(),
-            finished: false,
+            lifecycle: StreamLifecycle::Open,
         })
     }
 
@@ -374,6 +396,26 @@ fn single_header_str<'a>(headers: &'a reqwest::header::HeaderMap, name: &str) ->
         return None;
     }
     first.to_str().ok()
+}
+
+/// Distinguish an absent header (`Ok(None)`) from a duplicate or non-UTF-8
+/// header (`Err(ClientError::InvalidResponse)`) so malformed headers never
+/// silently bypass verification.
+fn optional_single_header_str<'a>(
+    headers: &'a reqwest::header::HeaderMap,
+    name: &str,
+) -> Result<Option<&'a str>, ClientError> {
+    let mut values = headers.get_all(name).iter();
+    let Some(first) = values.next() else {
+        return Ok(None);
+    };
+    if values.next().is_some() {
+        return Err(ClientError::InvalidResponse);
+    }
+    first
+        .to_str()
+        .map(Some)
+        .map_err(|_| ClientError::InvalidResponse)
 }
 
 fn parse_attachment_disposition(value: &str) -> Result<Option<String>, ClientError> {

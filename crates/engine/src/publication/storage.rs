@@ -454,8 +454,10 @@ pub(crate) fn reclaim_turn(
         ledger.confirm_reclaimed(removed).map_err(from_store)?
     };
     if let Some(error) = failure {
+        crate::diagnostics::record_publication_reclaim_failure(root, "reclamation_blocked");
         return Err(error);
     }
+    crate::diagnostics::clear_publication_reclaim_failure(root);
     Ok(ReclaimReport {
         deleted,
         released_bytes: batch.released_bytes.saturating_add(released),

@@ -9,10 +9,9 @@ use super::UploadDeadlineSignal;
 use super::{AuthorizedRequest, BODY_TIMEOUT, MAX_BODY_BYTES, ServiceState, engine_info};
 use axum::body::{Body, to_bytes};
 use axum::extract::{Extension, Path, Request, State};
-use axum::http::header::{
-    ACCEPT_ENCODING, AUTHORIZATION, CONTENT_ENCODING, CONTENT_TYPE, HOST, ORIGIN, RANGE,
-    TRANSFER_ENCODING,
-};
+#[cfg(unix)]
+use axum::http::header::{ACCEPT_ENCODING, CONTENT_ENCODING, RANGE, TRANSFER_ENCODING};
+use axum::http::header::{AUTHORIZATION, CONTENT_TYPE, HOST, ORIGIN};
 use axum::http::{HeaderMap, Method, StatusCode, Version};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
