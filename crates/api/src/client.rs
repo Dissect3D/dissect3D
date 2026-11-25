@@ -33,9 +33,11 @@ mod execution_tests;
 
 mod core_service;
 mod discovery;
+mod results;
 mod submission;
 #[cfg(test)]
 use discovery::*;
+pub use results::{ArtifactStream, VerifiedManifest};
 use submission::*;
 
 const API_VERSION: &str = "1.0";

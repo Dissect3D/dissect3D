@@ -49,3 +49,35 @@ fn job_routes_have_their_own_diagnostic_labels() {
     assert_eq!(route_label(&format!("/v1/jobs/{id}/other")), "other");
     assert_eq!(route_label("/v1/unknown"), "other");
 }
+
+#[test]
+fn result_and_storage_routes_have_grants_and_diagnostic_labels() {
+    let res = "res_0123456789abcdef0123456789abcdef";
+    let art = "art_0123456789abcdef0123456789abcdef";
+    assert_eq!(
+        required_grant(&Method::GET, "/v1/results"),
+        Some("results.list")
+    );
+    assert_eq!(
+        required_grant(&Method::GET, &format!("/v1/results/{res}/manifest")),
+        Some("results.show")
+    );
+    assert_eq!(
+        required_grant(&Method::GET, &format!("/v1/artifacts/{art}")),
+        Some("artifacts.read")
+    );
+    assert_eq!(
+        required_grant(&Method::GET, "/v1/storage"),
+        Some("storage.show")
+    );
+    assert_eq!(route_label("/v1/results"), "results_list");
+    assert_eq!(
+        route_label(&format!("/v1/results/{res}/manifest")),
+        "result_manifest"
+    );
+    assert_eq!(
+        route_label(&format!("/v1/artifacts/{art}")),
+        "artifact_read"
+    );
+    assert_eq!(route_label("/v1/storage"), "storage_show");
+}

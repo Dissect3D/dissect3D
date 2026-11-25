@@ -687,6 +687,7 @@ fn rejected_error(
         ErrorCode::CleanupUnconfirmed => "cleanup_unconfirmed",
         ErrorCode::JobNotTerminal => "job_not_terminal",
         ErrorCode::RetryPrerequisiteUnavailable => "retry_prerequisite_unavailable",
+        ErrorCode::ArtifactUnavailable => "artifact_unavailable",
     };
     let exit = match code {
         ErrorCode::Unauthorized

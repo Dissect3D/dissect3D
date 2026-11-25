@@ -85,6 +85,8 @@ pub(crate) mod results;
     reason = "WE-P06 drives the publication commit; publication stays inactive"
 )]
 pub(crate) mod results_commit;
+#[cfg(unix)]
+pub(crate) mod results_reads;
 mod results_schema;
 use execution_schema::add_execution_tables;
 use results_schema::add_result_tables;

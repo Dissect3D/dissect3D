@@ -17,7 +17,10 @@ mod submission;
 mod types;
 
 #[cfg(feature = "client")]
-pub use client::{Client, ClientError, ClientLimits, ConnectionMaterial, SubmissionClientError};
+pub use client::{
+    ArtifactStream, Client, ClientError, ClientLimits, ConnectionMaterial, SubmissionClientError,
+    VerifiedManifest,
+};
 pub use decode::{DecodeError, decode_json};
 mod declaration_json;
 pub use declaration_json::{DeclarationNumber, DeclarationValue};

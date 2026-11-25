@@ -17,6 +17,12 @@ pub struct ResultSummary {
     pub published_at_ms: u64,
     pub availability: ResultAvailability,
 }
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ResultsQuery {
+    pub limit: Option<u8>,
+    pub cursor: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResultPage {

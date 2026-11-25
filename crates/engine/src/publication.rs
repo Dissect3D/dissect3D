@@ -283,6 +283,49 @@ pub(crate) mod capture;
 pub(crate) mod policy;
 pub(crate) mod service;
 pub(crate) mod storage;
+
+/// The `result_publication` capability advertised by `/v1/info` (`RP-004`).
+pub(crate) fn capability() -> dissect3d_api::ResultPublicationCapability {
+    use crate::domain::publication_policy::{
+        ARTIFACT_BYTES_PER_ATTEMPT_MAX, ARTIFACT_FILES_PER_ATTEMPT_MAX, PRIVATE_BYTES_MAX,
+        PUBLISHED_BYTES_MAX, RESULT_RECORDS_MAX, STORAGE_FREE_RESERVE_BYTES,
+    };
+    let limits = [
+        ("manifest_bytes_max", MANIFEST_BYTES_MAX as u64),
+        (
+            "artifact_bytes_per_attempt_max",
+            ARTIFACT_BYTES_PER_ATTEMPT_MAX,
+        ),
+        (
+            "artifact_files_per_attempt_max",
+            ARTIFACT_FILES_PER_ATTEMPT_MAX as u64,
+        ),
+        ("result_private_bytes_max", PRIVATE_BYTES_MAX),
+        ("result_published_bytes_max", PUBLISHED_BYTES_MAX),
+        ("result_records_max", RESULT_RECORDS_MAX),
+        ("storage_free_reserve_bytes", STORAGE_FREE_RESERVE_BYTES),
+        ("result_page_default", 20),
+        ("result_page_max", 100),
+        ("artifact_stream_chunk_bytes", 65_536),
+    ]
+    .into_iter()
+    .map(|(key, value)| (key.to_owned(), value))
+    .collect();
+    dissect3d_api::ResultPublicationCapability {
+        contract_version: "rp-0.1".to_owned(),
+        operations: [
+            "results.list",
+            "results.show",
+            "artifacts.read",
+            "storage.show",
+        ]
+        .map(str::to_owned)
+        .to_vec(),
+        limits,
+        required_features: vec![RESULT_FEATURE.to_owned()],
+    }
+}
+
 #[cfg(test)]
 #[path = "publication_tests.rs"]
 mod tests;

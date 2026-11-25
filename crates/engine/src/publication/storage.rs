@@ -503,6 +503,32 @@ pub(crate) fn read_committed(
     Ok(bytes)
 }
 
+/// Verify all committed files of one result for `GET /v1/results` availability
+/// reporting (`RP-003`, `RP-004`, `RP-S09`). Integrity faults take precedence
+/// over missing files; nothing is mutated or regenerated.
+pub(crate) fn check_result_availability(
+    root: &OwnedRoot,
+    files: &[crate::store::results_commit::CommittedFile],
+) -> dissect3d_api::ResultAvailability {
+    use dissect3d_api::ResultAvailability;
+    if files.is_empty() {
+        return ResultAvailability::IntegrityFault;
+    }
+    let mut missing = false;
+    for file in files {
+        match read_committed(root, file) {
+            Ok(_) => {}
+            Err(ArtifactFault::Unavailable) => missing = true,
+            Err(ArtifactFault::Integrity) => return ResultAvailability::IntegrityFault,
+        }
+    }
+    if missing {
+        ResultAvailability::Unavailable
+    } else {
+        ResultAvailability::Available
+    }
+}
+
 fn remove_everywhere(root: &OwnedRoot, name: &str) -> Result<(), PublicationError> {
     if !generated_name(name, "art_") && !generated_name(name, "pub_") {
         return Err(PublicationError::Storage);

@@ -110,6 +110,9 @@ pub struct EngineInfo {
     /// Optional queued-submission capability, absent on older or inactive engines.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub submission: Option<SubmissionCapability>,
+    /// Optional result-publication capability, absent on older or inactive engines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_publication: Option<crate::ResultPublicationCapability>,
 }
 
 /// Versioned, optional Stage 3 capability advertised only by an active composition.

@@ -51,6 +51,7 @@ pub enum ErrorCode {
     CleanupUnconfirmed,
     JobNotTerminal,
     RetryPrerequisiteUnavailable,
+    ArtifactUnavailable,
 }
 
 /// Bounded public error details. Fields contain categories, never source strings.

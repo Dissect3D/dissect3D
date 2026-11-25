@@ -12,6 +12,10 @@ mod framing;
 mod inputs;
 #[cfg(unix)]
 mod jobs;
+#[cfg(unix)]
+mod results;
+#[cfg(unix)]
+mod storage;
 
 #[cfg(feature = "test-support")]
 use crate::submission_fixture::PreparedReadiness;
@@ -549,6 +553,7 @@ async fn engine_info(
             authorization_grant: "engine.info".to_owned(),
         }),
         submission,
+        result_publication: None,
     }
 }
 

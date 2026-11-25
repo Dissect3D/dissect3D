@@ -9,7 +9,10 @@ use super::UploadDeadlineSignal;
 use super::{AuthorizedRequest, BODY_TIMEOUT, MAX_BODY_BYTES, ServiceState, engine_info};
 use axum::body::{Body, to_bytes};
 use axum::extract::{Extension, Path, Request, State};
-use axum::http::header::{AUTHORIZATION, CONTENT_TYPE, HOST, ORIGIN};
+use axum::http::header::{
+    ACCEPT_ENCODING, AUTHORIZATION, CONTENT_ENCODING, CONTENT_TYPE, HOST, ORIGIN, RANGE,
+    TRANSFER_ENCODING,
+};
 use axum::http::{HeaderMap, Method, StatusCode, Version};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -35,7 +38,9 @@ pub(super) fn router(state: Arc<ServiceState>) -> Router {
     #[cfg(unix)]
     let router = router
         .merge(super::inputs::routes())
-        .merge(super::jobs::routes());
+        .merge(super::jobs::routes())
+        .merge(super::results::routes())
+        .merge(super::storage::routes());
     router
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
@@ -59,7 +64,28 @@ async fn limit_response(
         _ => "other",
     };
     let route = route_label(request.uri().path());
+    let is_artifact_stream =
+        *request.method() == Method::GET && artifact_path(request.uri().path());
     let response = next.run(request).await;
+    if is_artifact_stream && response.status() == StatusCode::OK {
+        if let Ok(permit) = state.diagnostic_permit.clone().try_acquire_owned() {
+            let root = state.diagnostic_root.clone();
+            let status = response.status().as_u16();
+            let correlation = correlation_id();
+            let _diagnostic_write = tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                crate::diagnostics::record_http_request(
+                    &root,
+                    correlation,
+                    method,
+                    route,
+                    status,
+                    None,
+                );
+            });
+        }
+        return response;
+    }
     let limit = state.policy.control_response_bytes;
     let (parts, body) = response.into_parts();
     match to_bytes(body, limit).await {
@@ -216,6 +242,10 @@ fn required_grant(method: &Method, path: &str) -> Option<&'static str> {
         (&Method::POST, path) if job_control(path) == Some("cancel") => Some("jobs.cancel"),
         (&Method::POST, path) if job_control(path) == Some("retry") => Some("jobs.retry"),
         (&Method::GET, path) if path.starts_with("/v1/jobs/") => Some("jobs.show"),
+        (&Method::GET, "/v1/results") => Some("results.list"),
+        (&Method::GET, path) if result_manifest_path(path) => Some("results.show"),
+        (&Method::GET, path) if artifact_path(path) => Some("artifacts.read"),
+        (&Method::GET, "/v1/storage") => Some("storage.show"),
         (&Method::GET, path)
             if path
                 .strip_prefix("/v1/operations/")
@@ -252,6 +282,10 @@ fn route_label(path: &str) -> &'static str {
         "/v1/tasks" => "tasks_list",
         path if path.starts_with("/v1/tasks/") => "tasks_show",
         "/v1/jobs" => "jobs",
+        "/v1/results" => "results_list",
+        "/v1/storage" => "storage_show",
+        path if result_manifest_path(path) => "result_manifest",
+        path if artifact_path(path) => "artifact_read",
         path => match job_control(path) {
             Some("cancel") => "job_cancel",
             Some("retry") => "job_retry",
@@ -271,6 +305,36 @@ fn route_label(path: &str) -> &'static str {
 fn job_control(path: &str) -> Option<&str> {
     let (id, action) = path.strip_prefix("/v1/jobs/")?.split_once('/')?;
     (!id.is_empty() && !action.contains('/')).then_some(action)
+}
+
+fn result_manifest_path(path: &str) -> bool {
+    path.strip_prefix("/v1/results/")
+        .and_then(|rest| rest.split_once('/'))
+        .is_some_and(|(id, suffix)| !id.is_empty() && suffix == "manifest")
+}
+
+fn artifact_path(path: &str) -> bool {
+    path.strip_prefix("/v1/artifacts/")
+        .is_some_and(|id| !id.is_empty() && !id.contains('/'))
+}
+
+#[cfg(unix)]
+pub(super) fn has_unsupported_read_headers(headers: &HeaderMap) -> bool {
+    if headers.get_all(RANGE).iter().next().is_some()
+        || headers.get_all(TRANSFER_ENCODING).iter().next().is_some()
+        || headers.get_all(CONTENT_ENCODING).iter().next().is_some()
+    {
+        return true;
+    }
+    for value in headers.get_all(ACCEPT_ENCODING) {
+        let Ok(text) = value.to_str() else {
+            return true;
+        };
+        if !text.trim().eq_ignore_ascii_case("identity") {
+            return true;
+        }
+    }
+    false
 }
 
 fn exact_single_header(headers: &HeaderMap, name: axum::http::HeaderName, expected: &[u8]) -> bool {
@@ -346,11 +410,20 @@ async fn info(
         {
             let capability = crate::submission::service::capability();
             info.supported_operations.extend(
-                ["jobs.submit", "jobs.list", "jobs.show"]
-                    .into_iter()
-                    .map(str::to_owned),
+                [
+                    "jobs.submit",
+                    "jobs.list",
+                    "jobs.show",
+                    "results.list",
+                    "results.show",
+                    "artifacts.read",
+                    "storage.show",
+                ]
+                .into_iter()
+                .map(str::to_owned),
             );
             info.submission = Some(capability);
+            info.result_publication = Some(crate::publication::capability());
         }
         info
     };
@@ -712,6 +785,7 @@ fn error_message(code: ErrorCode) -> &'static str {
         ErrorCode::CleanupUnconfirmed => "Worker cleanup is unconfirmed",
         ErrorCode::JobNotTerminal => "The source job is not terminal",
         ErrorCode::RetryPrerequisiteUnavailable => "A retry prerequisite is unavailable",
+        ErrorCode::ArtifactUnavailable => "Published artifact is unavailable",
     }
 }
 

@@ -6,6 +6,8 @@ use super::*;
 pub(super) enum Command {
     #[cfg(unix)]
     ExecutionRead(execution_reads::ReadCommand),
+    #[cfg(unix)]
+    ResultRead(results_reads::ResultReadCommand),
     #[allow(dead_code, reason = "private execution consumers follow in WE-P04/06")]
     Execution(execution::ExecutionCommand),
     #[allow(dead_code, reason = "private result consumers follow in RP-P03/WE-P06")]
@@ -188,6 +190,7 @@ impl Command {
             | Command::Snapshot(..)
             | Command::ShowOperation(..)
             | Command::ExecutionRead(_)
+            | Command::ResultRead(_)
             | Command::ReadSubmission(..)
             | Command::ReadRetry(..)
             | Command::ShowJob(..)
@@ -267,6 +270,10 @@ pub(super) fn actor(
         match command {
             #[cfg(unix)]
             Command::ExecutionRead(command) => {
+                command.handle(&connection, policy.control_response_bytes)
+            }
+            #[cfg(unix)]
+            Command::ResultRead(command) => {
                 command.handle(&connection, policy.control_response_bytes)
             }
             #[cfg(all(test, unix, feature = "test-support"))]
