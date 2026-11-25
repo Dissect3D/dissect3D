@@ -50,6 +50,14 @@ const INPUT_UPLOAD_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const INPUT_UPLOAD_TOTAL_TIMEOUT: Duration = Duration::from_secs(600);
 const SAFE_READ_RETRY_DELAY: Duration = Duration::from_millis(100);
 
+/// Default engine connect timeout in milliseconds (`CT-CLI-SURFACE` §2
+/// `connect_timeout_ms`, range 100..30,000). Clients without their own
+/// preference resolution use it through [`ClientLimits::default`].
+pub const DEFAULT_CONNECT_TIMEOUT_MS: u64 = 1_000;
+/// Default per-request read timeout in milliseconds (`CT-CLI-SURFACE` §2
+/// `read_timeout_ms`, range 100..60,000).
+pub const DEFAULT_READ_TIMEOUT_MS: u64 = 5_000;
+
 /// Trust and identity material obtained from protected engine discovery.
 pub struct ConnectionMaterial {
     base_url: String,
@@ -95,8 +103,8 @@ pub struct ClientLimits {
 impl Default for ClientLimits {
     fn default() -> Self {
         Self {
-            connect_timeout: Duration::from_secs(2),
-            request_timeout: Duration::from_secs(5),
+            connect_timeout: Duration::from_millis(DEFAULT_CONNECT_TIMEOUT_MS),
+            request_timeout: Duration::from_millis(DEFAULT_READ_TIMEOUT_MS),
             max_response_bytes: MAX_CLIENT_RESPONSE_BYTES,
             read_attempts: 1,
         }
@@ -153,7 +161,7 @@ impl Client {
     pub fn new(material: ConnectionMaterial, limits: ClientLimits) -> Result<Self, ClientError> {
         if !valid_loopback_url(&material.base_url)
             || material.trust_anchor_der.is_empty()
-            || material.trust_anchor_der.len() > 65_536
+            || material.trust_anchor_der.len() > crate::MAX_TRUST_ANCHOR_DER_BYTES
             || limits.connect_timeout.is_zero()
             || limits.request_timeout.is_zero()
             || limits.max_response_bytes == 0

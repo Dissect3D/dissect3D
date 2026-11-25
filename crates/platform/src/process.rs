@@ -105,9 +105,7 @@ impl ProcessWatcher {
         }
         #[cfg(target_os = "linux")]
         {
-            let raw_pid = i32::try_from(identity.pid).map_err(|_| PlatformError::InvalidPath)?;
-            let pid = rustix::process::Pid::from_raw(raw_pid).ok_or(PlatformError::InvalidPath)?;
-            let handle = open_linux_process(pid)?;
+            let handle = open_linux_process(identity)?;
             if !process_matches(identity)? {
                 return Err(PlatformError::NotFound);
             }
@@ -276,14 +274,33 @@ impl ProcessWatcher {
 }
 
 #[cfg(target_os = "linux")]
-fn open_linux_process(pid: rustix::process::Pid) -> Result<std::os::fd::OwnedFd, PlatformError> {
-    rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty()).map_err(|error| {
-        if error == rustix::io::Errno::SRCH {
-            PlatformError::NotFound
-        } else {
-            PlatformError::Io
-        }
-    })
+fn open_linux_process(identity: &ProcessIdentity) -> Result<std::os::fd::OwnedFd, PlatformError> {
+    let raw_pid = i32::try_from(identity.pid).map_err(|_| PlatformError::InvalidPath)?;
+    let pid = rustix::process::Pid::from_raw(raw_pid).ok_or(PlatformError::InvalidPath)?;
+    rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty())
+        .map_err(|error| pidfd_open_error(error, identity))
+}
+
+/// A failed `pidfd_open`. ESRCH definitively means no such process. EINVAL
+/// means the PID number is allocated but no thread-group leader holds it,
+/// which has two causes with opposite meanings:
+/// - `/proc/PID` names another task (the number was reused, for example by a
+///   non-leader thread): the recorded process is gone, so `NotFound`;
+/// - `/proc/PID` is absent because the recorded leader was reaped while its
+///   process group or session still pins the number: members of that group
+///   may still be running, so cleanup is not established and it stays `Io`.
+///
+/// Every other error stays a failure (WE-P07 restart evidence, fail closed).
+#[cfg(target_os = "linux")]
+fn pidfd_open_error(error: rustix::io::Errno, identity: &ProcessIdentity) -> PlatformError {
+    match error {
+        rustix::io::Errno::SRCH => PlatformError::NotFound,
+        rustix::io::Errno::INVAL => match process_start_marker(identity.pid) {
+            Ok(marker) if marker != identity.start_marker => PlatformError::NotFound,
+            Ok(_) | Err(_) => PlatformError::Io,
+        },
+        _ => PlatformError::Io,
+    }
 }
 
 /// Return a start marker for the running engine or CLI process.
@@ -494,10 +511,13 @@ mod tests {
     #[test]
     fn process_disappearance_during_registration_establishes_exit() {
         let mut child = std::process::Command::new("/bin/true").spawn().unwrap();
-        let pid = rustix::process::Pid::from_raw(child.id() as i32).unwrap();
+        let identity = super::ProcessIdentity {
+            pid: child.id(),
+            start_marker: super::process_start_marker(child.id()).unwrap(),
+        };
         child.wait().unwrap();
         assert!(matches!(
-            super::open_linux_process(pid),
+            super::open_linux_process(&identity),
             Err(PlatformError::NotFound)
         ));
     }

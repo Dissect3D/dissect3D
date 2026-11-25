@@ -235,6 +235,15 @@ pub enum BootstrapAddress {
     WindowsPipe { name: String },
 }
 
+/// Largest protected discovery record (`run/endpoint.json`) a client reads or
+/// the engine publishes: `CSC-006` / `CT-CLI-SURFACE` §2 local state limit.
+pub const MAX_DISCOVERY_BYTES: usize = 16_384;
+
+/// Largest pinned trust anchor accepted from discovery. The DER travels
+/// inside the discovery record, so it can never exceed that record's ceiling;
+/// no separate contract cap exists (`CT-ACCESS` §1).
+pub const MAX_TRUST_ANCHOR_DER_BYTES: usize = MAX_DISCOVERY_BYTES;
+
 /// Protected, nonsecret descriptor published after all service listeners are ready.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

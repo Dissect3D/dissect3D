@@ -5,7 +5,9 @@
 //! listeners are bound and the HTTPS accept loop acknowledges readiness.
 
 use crate::{BootstrapServeError, CorePolicy, HttpError, HttpServer, Store};
-use dissect3d_api::{BootstrapAddress, DiscoveryRecord, ProcessReference, decode_json};
+use dissect3d_api::{
+    BootstrapAddress, DiscoveryRecord, MAX_DISCOVERY_BYTES, ProcessReference, decode_json,
+};
 use dissect3d_platform::{
     AuthorityLease, BootstrapEndpoint, BootstrapListener, OwnedRoot, PlatformError, RelativePath,
     RootPurpose, current_process_identity,
@@ -328,6 +330,10 @@ async fn run_engine_inner(
         trust_anchor_sha256: ca_sha256.to_vec(),
     };
     let encoded = serde_json::to_vec(&discovery).map_err(|_| StartupError::Discovery)?;
+    // Never publish a record that clients must refuse to read (CSC-006).
+    if encoded.len() > MAX_DISCOVERY_BYTES {
+        return Err(StartupError::Discovery);
+    }
     let discovery_path =
         RelativePath::parse(DISCOVERY_FILE).map_err(|_| StartupError::Discovery)?;
 
@@ -483,7 +489,7 @@ fn retire_discovery(
     discovery_path: &RelativePath,
     discovery: &DiscoveryRecord,
 ) {
-    if let Ok(bytes) = service_root.read_file(discovery_path, 65_536)
+    if let Ok(bytes) = service_root.read_file(discovery_path, MAX_DISCOVERY_BYTES)
         && let Ok(published) = decode_json::<DiscoveryRecord>(&bytes)
         && published.instance_id == discovery.instance_id
         && published.process.pid == discovery.process.pid

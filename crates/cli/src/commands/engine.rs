@@ -113,10 +113,7 @@ pub(super) fn stop(
                     Ok(false)
                 )
             {
-                pending.state = "complete".to_owned();
-                profile
-                    .save_pending_stop(&pending)
-                    .map_err(|_| pending_stop_storage_error(&pending, true))?;
+                record_confirmed_exit(&mut pending, |record| profile.save_pending_stop(record))?;
                 return Ok(pending_stop_data(&pending, true));
             }
             if let Some(pending) = saved_pending.as_ref()
@@ -233,10 +230,7 @@ pub(super) fn stop(
             ));
         }
         Err(error) if matches!(process_watcher.wait(observation_timeout), Ok(true)) => {
-            pending.state = "complete".to_owned();
-            profile
-                .save_pending_stop(&pending)
-                .map_err(|_| pending_stop_storage_error(&pending, false))?;
+            record_confirmed_exit(&mut pending, |record| profile.save_pending_stop(record))?;
             return shutdown_transport_result(pending, error, true);
         }
         Err(error) => return shutdown_transport_result(pending, error, false),
@@ -267,11 +261,20 @@ pub(super) fn stop(
     if !exited {
         return Err(unconfirmed_stop_with_receipt(operation_id, operation));
     }
-    pending.state = "complete".to_owned();
-    profile.save_pending_stop(&pending).map_err(|_| {
-        shutdown_receipt_storage_error(operation_id.clone(), operation.clone(), true)
-    })?;
+    record_confirmed_exit(&mut pending, |record| profile.save_pending_stop(record))?;
     Ok(pending_stop_data(&pending, true))
+}
+
+/// Mark the stop complete once process exit is confirmed and persist it. Every
+/// confirmed-exit path goes through here, so a local save failure still
+/// reports `process_exit_confirmed: true` (`CSC-005`: process exit and receipt
+/// are reported separately; `CS-S15`).
+pub(super) fn record_confirmed_exit(
+    pending: &mut PendingStop,
+    save: impl FnOnce(&PendingStop) -> Result<(), ConnectionError>,
+) -> Result<(), CommandError> {
+    pending.state = "complete".to_owned();
+    save(pending).map_err(|_| pending_stop_storage_error(pending, true))
 }
 
 fn pending_stop_data(pending: &PendingStop, process_exit_confirmed: bool) -> serde_json::Value {
@@ -313,7 +316,20 @@ fn pending_stop_storage_error(pending: &PendingStop, process_exit_confirmed: boo
             serde_json::to_value(receipt).unwrap_or(serde_json::Value::Null),
             process_exit_confirmed,
         ),
-        _ => CommandError::connection(ConnectionError::Storage),
+        // No receipt is known: acceptance stays unknown, but the observed
+        // process outcome and the unsaved record are still reported.
+        _ => {
+            let mut error = CommandError::connection(ConnectionError::Storage);
+            error.context = Some(Box::new(CommandErrorContext {
+                data: Some(serde_json::json!({
+                    "process_exit_confirmed": process_exit_confirmed,
+                    "receipt_confirmed": false,
+                    "pending_record_saved": false
+                })),
+                ..Default::default()
+            }));
+            error
+        }
     }
 }
 
@@ -389,3 +405,7 @@ fn new_stop_key() -> Result<IdempotencyKey, CommandError> {
     bytes.fill(0);
     IdempotencyKey::parse(key).map_err(|_| invalid_error())
 }
+
+#[cfg(test)]
+#[path = "stop_regressions.rs"]
+mod stop_regressions;

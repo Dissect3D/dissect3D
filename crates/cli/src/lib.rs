@@ -146,10 +146,14 @@ pub fn run() -> i32 {
     let json_output = cli.json || preferences.output.value == "json";
     let client_limits = dissect3d_api::ClientLimits {
         connect_timeout: Duration::from_millis(
-            preferences.numeric("connect_timeout_ms").unwrap_or(1_000),
+            preferences
+                .numeric("connect_timeout_ms")
+                .unwrap_or(dissect3d_api::DEFAULT_CONNECT_TIMEOUT_MS),
         ),
         request_timeout: Duration::from_millis(
-            preferences.numeric("read_timeout_ms").unwrap_or(5_000),
+            preferences
+                .numeric("read_timeout_ms")
+                .unwrap_or(dissect3d_api::DEFAULT_READ_TIMEOUT_MS),
         ),
         read_attempts: preferences.numeric("read_attempts").unwrap_or(1) as u8,
         ..Default::default()

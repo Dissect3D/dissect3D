@@ -4,7 +4,9 @@
 //! discovery, verifies process identity, and probes the platform bootstrap
 //! channel before returning an authority. API transport remains in `dissect3d-api`.
 
-use dissect3d_api::{BootstrapAddress, DiscoveryRecord, decode_json};
+use dissect3d_api::{
+    BootstrapAddress, DiscoveryRecord, MAX_DISCOVERY_BYTES, MAX_TRUST_ANCHOR_DER_BYTES, decode_json,
+};
 use dissect3d_platform::{
     BootstrapEndpoint, OwnedRoot, PlatformError, RelativePath, connect_bootstrap,
     current_owner_identity, process_matches,
@@ -39,13 +41,13 @@ pub fn verify_engine(
 ) -> Result<VerifiedEngine, ReadinessError> {
     let path = RelativePath::parse(DESCRIPTOR).map_err(|_| ReadinessError::InvalidDiscovery)?;
     let bytes = root
-        .read_file(&path, 65_536)
+        .read_file(&path, MAX_DISCOVERY_BYTES)
         .map_err(|_| ReadinessError::Unavailable)?;
     let discovery: DiscoveryRecord =
         decode_json(&bytes).map_err(|_| ReadinessError::InvalidDiscovery)?;
     if discovery.discovery_version != "1.0"
         || discovery.trust_anchor_der.is_empty()
-        || discovery.trust_anchor_der.len() > 65_536
+        || discovery.trust_anchor_der.len() > MAX_TRUST_ANCHOR_DER_BYTES
         || discovery.trust_anchor_sha256.len() != 32
         || !valid_base_url(&discovery.base_url)
     {

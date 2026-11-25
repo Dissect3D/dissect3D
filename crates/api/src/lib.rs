@@ -18,8 +18,8 @@ mod types;
 
 #[cfg(feature = "client")]
 pub use client::{
-    ArtifactStream, Client, ClientError, ClientLimits, ConnectionMaterial, SubmissionClientError,
-    VerifiedManifest,
+    ArtifactStream, Client, ClientError, ClientLimits, ConnectionMaterial,
+    DEFAULT_CONNECT_TIMEOUT_MS, DEFAULT_READ_TIMEOUT_MS, SubmissionClientError, VerifiedManifest,
 };
 pub use decode::{DecodeError, decode_json};
 mod declaration_json;
@@ -45,7 +45,8 @@ pub use types::SubmissionCapability;
 pub use types::{
     AuthRevokeRequest, AuthStatus, BootstrapAddress, ClientId, CorrelationId, DiscoveryRecord,
     EngineInfo, EnginePhase, EnrollmentId, EnrollmentReceipt, IdempotencyKey, InstallationId,
-    InstanceId, OperationId, OperationReceipt, OperationSnapshot, OperationState, OperationTarget,
-    PlatformInfo, ProcessReference, RevocationReceipt, SecretToken, ShutdownOptions,
-    ShutdownRequest, TimestampMs, TokenDigest, ValidationError,
+    InstanceId, MAX_DISCOVERY_BYTES, MAX_TRUST_ANCHOR_DER_BYTES, OperationId, OperationReceipt,
+    OperationSnapshot, OperationState, OperationTarget, PlatformInfo, ProcessReference,
+    RevocationReceipt, SecretToken, ShutdownOptions, ShutdownRequest, TimestampMs, TokenDigest,
+    ValidationError,
 };
