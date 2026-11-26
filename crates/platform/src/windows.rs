@@ -217,8 +217,17 @@ pub(crate) fn process_owner_identity(pid: u32) -> Result<OwnerIdentity, Platform
 }
 
 pub(crate) fn process_start_marker(pid: u32) -> Result<String, PlatformError> {
-    use windows_sys::Win32::Foundation::FILETIME;
-    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    use windows_sys::Win32::Foundation::{FILETIME, WAIT_OBJECT_0, WAIT_TIMEOUT};
+    use windows_sys::Win32::System::Threading::{
+        GetProcessTimes, PROCESS_SYNCHRONIZE, WaitForSingleObject,
+    };
+    let process = unsafe {
+        OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+            0,
+            pid,
+        )
+    };
     if process.is_null() {
         return Err(process_query_error());
     }
@@ -230,7 +239,7 @@ pub(crate) fn process_start_marker(pid: u32) -> Result<String, PlatformError> {
     let mut user = FILETIME::default();
     // SAFETY: process is live and each FILETIME pointer is a writable output.
     if unsafe {
-        windows_sys::Win32::System::Threading::GetProcessTimes(
+        GetProcessTimes(
             process.as_raw_handle(),
             &mut created,
             &mut exited,
@@ -240,6 +249,16 @@ pub(crate) fn process_start_marker(pid: u32) -> Result<String, PlatformError> {
     } == 0
     {
         return Err(process_query_error());
+    }
+    // Windows keeps an exited process object (and its creation time) alive
+    // while any external handle remains open. A signaled process handle
+    // definitively establishes exit, including for exit code STILL_ACTIVE (259),
+    // without relying on GetProcessTimes's undefined pre-exit lpExitTime.
+    // SAFETY: zero-timeout wait on a live owned handle opened with SYNCHRONIZE.
+    match unsafe { WaitForSingleObject(process.as_raw_handle(), 0) } {
+        WAIT_OBJECT_0 => return Err(PlatformError::NotFound),
+        WAIT_TIMEOUT => {}
+        _ => return Err(PlatformError::Io),
     }
     let ticks = (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime);
     Ok(format!("windows-start-{ticks:016x}"))
