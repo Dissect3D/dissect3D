@@ -17,40 +17,34 @@ implemented. The normal production catalog is empty, so it supplies no prepared
 support for new jobs. Explicitly prepared CPU test support exercises those paths
 in a separate maintainer host.
 Discovery describes declared support, not installed or validated inference.
-Production model preparation, inference, worker execution, published results, graphical clients,
-plugins, and installers remain unimplemented.
+Production model preparation, inference, production worker execution and result publication,
+graphical clients, plugins, and installers remain unimplemented.
 
-The **WE-P01 checkpoint** adds execution protocol/types, strict decoding, client
-negotiation, canonical-v2 request identity and compatibility handling. Dispatch is
-inactive; worker supervision and publication remain future work. The maintainers'
-feature records hold exact contents, recorded evidence and open gates; they are
-not needed to build or verify the code. Recorded tests and explicit test support
-do not establish accepted platform or model support.
+Worker execution and result publication exist as engine code that only an
+explicit maintainer test host runs. The maintainers' feature records hold exact
+contents, recorded evidence and open gates; they are not needed to build or
+verify the code. Recorded tests and explicit test support do not establish
+accepted platform or model support.
 
-The current working tree continues worker execution on feature schema v7. Private lifecycle,
-execution authorization and shared v1/v2 acceptance/replay seams are implemented;
-bounded submission preparation runs outside the Store SQL actor. Private execution
-snapshots expose current lifecycle facts, and a private Store/service exact linked retry
-seam exists with its public route inactive. A private creator-scoped execution page
-and retained-history accounting tests are in place. A private Store cleanup-witness
-transition records attempt cleanup and releases reservations only on confirmed
-termination, and per-job event history is bounded. Restart keeps a pending user
-cancellation until termination evidence arrives. WE-P04's first checkpoint adds a
-private bounded worker-protocol codec, session legality, a supervisor core tested
-only with an in-memory fake worker, and Store failure finalization; real process
-fixtures and native containment are the next WE-P04 task. RP-P01 supplies pure
-validation and read types; native capture and publication remain future work.
-These private seams do not activate dispatch or establish platform acceptance.
+- **Normal engine.** Dispatch is inactive: no worker runs and nothing is
+  published. On Unix it serves read-only committed-result list/show, manifest,
+  artifact and storage reads over an empty result store, and the CLI has
+  `results` and `storage` commands for them.
+- **Unix test-support execution host.** A FIFO scheduler and controller launch a
+  controlled CPU fixture worker under native process-tree containment, supervise
+  it through a bounded private protocol, confirm cleanup, then validate and
+  publish its output. Cancellation, linked retry, shutdown and restart
+  reconciliation are implemented there. The store uses feature schema v8.
+- **Windows.** Native worker containment and durable file primitives exist and
+  are tested, but input capture, submission, job, execution and publication
+  services are not composed in the Windows engine until ordinary-user namespace
+  guarantees and Windows parity work are complete.
+- **macOS.** Worker trees that never fork reach confirmed cleanup in native
+  tests; a tree that forks is reported as unconfirmed until forked-descendant
+  closure is implemented.
 
-WE-P02 adds native worker ownership and cleanup primitives for controlled Windows
-and Linux processes; they are not connected to dispatch. Linux launch ownership
-acknowledgements now run in normal builds as well as fault-injection builds.
-Windows durable recovery
-records and capture/submission/job service composition remain unavailable pending
-ordinary-user namespace guarantees.
-The macOS guardian has a conservative implementation: worker trees that never
-fork reach confirmed cleanup in native macOS tests, while any tree that forks is
-reported as unconfirmed until forked-descendant closure (WE-P02) is implemented.
+Foreground `run`, `jobs watch|wait|cancel|retry` and a first complete job through
+the real CLI remain future work.
 
 [Why Dissect3D?](#why-dissect3d) · [Workflows](#intended-workflows) ·
 [Models](#target-models) · [Architecture](#architecture) ·
@@ -242,7 +236,9 @@ byte-protected integration tests with the hashes recorded in
 commands the scripts print, for example `cargo test --workspace --all-targets
 --locked -- --test-threads=1` after `cargo build -p dissect3d-engine --features
 test-support --examples --locked` and the `DISSECT3D_TEST_*` exports in
-`scripts/verify-unix.sh`. Individual concurrency scenarios still execute their
+`scripts/verify-unix.sh`. On Windows, a graph run through `cargo test` executes
+inside Cargo's Job Object, so the detached-engine tests cannot pass there; use
+`scripts/verify-windows.ps1`, which runs the test binaries directly. Individual concurrency scenarios still execute their
 own concurrent operations.
 
 The workspace contains API, platform, connection, engine, and CLI crates.

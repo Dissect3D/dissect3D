@@ -7,13 +7,17 @@
       "tests/worker-execution/revisions/we-rp-0.1/accepted-inventory.json"
     ],
     "revisions_changed_entries": 0,
-    "copied": "2026-11-26, copied from the record; not recomputed from the working tree"
+    "copied": "2026-11-26, copied from the record; not recomputed from the working tree",
+    "additions": {
+      "crates/cli/src/commands/exit_rule_regressions.rs": "CR-CS-01 (CSD-05), accepted 2026-11-27; SHA-256 of the CRLF form of the bytes committed in cdba375, computed 2026-11-27"
+    }
   },
   "line_endings": "SHA-256 of the CRLF bytes that .gitattributes (text eol=crlf) checks out on every OS",
   "files": {
     "crates/api/tests/decode.rs": "3eb6b3bfcd2c19ba877d9ac0da59465a62d9bcfeed3218eef75063bf296074b7",
     "crates/api/tests/discovery.rs": "9f21adde274f83137d4842af97fa038c6fe0d7574e94405642b313a4f3e3d7f1",
     "crates/api/tests/types.rs": "3bf9b63a5f62355884adc791bf6a3f02d814184ecc307f1cdf0bcf12201c80e8",
+    "crates/cli/src/commands/exit_rule_regressions.rs": "7655aedef9e5f8ae37016c60357a1c14dc86f0b1a0b848069634027fa9399aec",
     "crates/cli/tests/audit_limits.rs": "8f44a26c60c0bed39f9bd1463b6c8de5b8b929c6a086c73f74fc57c0a55f9031",
     "crates/cli/tests/core_service.rs": "8bad2bce4fab3f0aeeed17b71e076b7524b5fa9dd1c44842396fd7614c9eb221",
     "crates/cli/tests/core_service_windows.rs": "ce35582cf41dc9386ba64cd8b22ac3be6071beff9f65439f40bfb053894d5d15",

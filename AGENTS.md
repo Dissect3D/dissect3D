@@ -4,10 +4,13 @@
 
 Dissect3D has a Rust core-service implementation with native platform,
 connection/readiness, authenticated API, SQLite engine, and connected CLI
-packages. Current core acceptance is incomplete; the README status and the
-maintainers' feature records list passed evidence and explicit native/non-native
-gates. Model/runtime management,
-workers, jobs, Desktop, plugins, and installers are not implemented.
+packages, read-only support discovery, and bounded durable queued
+submission/recovery/list/show. Current core acceptance is incomplete; the README
+status and the maintainers' feature records list passed evidence and explicit
+native/non-native gates. Worker supervision and result publication run only in an
+explicit Unix test-support host; the normal engine keeps dispatch inactive and
+publishes nothing. Production model/runtime management and inference, Desktop,
+plugins, and installers are not implemented.
 
 1. Read [README.md](README.md) for the project and current state.
 2. Read [ARCHITECTURE.md](ARCHITECTURE.md) for the crate map, allowed
@@ -88,20 +91,3 @@ support separately.
   to verify overview documentation.
 - At handoff, state what changed, what was checked, what remains open, and any
   unverified external or hardware acceptance criteria.
-
-<!-- personal-toolkit:begin -->
-## Patompong portable workflow defaults
-
-Read [.agents/PREFERENCES.md](.agents/PREFERENCES.md) and
-[the workflow menu](.agents/workflows/INDEX.md).
-At each new session, ask which workflow or lone skill to use unless the opening
-request already names one. Keep that selection throughout the session until the
-user changes it. Use only [the small workflow menu](.agents/workflows/INDEX.md)
-to offer choices; read no full catalog or skill bodies for that question.
-After selection, read the selected workflow and the skills/references it needs;
-skills follow their relevant dependencies themselves. Read
-[the full catalog](.agents/CATALOG.md) only for user-requested skill browsing,
-selection help, tree details, or catalog maintenance.
-Follow applicable project requirements and higher-priority instructions; explain
-material conflicts. Keep project notes and credentials outside the portable folder.
-<!-- personal-toolkit:end -->

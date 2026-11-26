@@ -10,15 +10,15 @@ Dissect3D implements a bounded Rust core service, authenticated local API,
 SQLite metadata, connected CLI, and read-only support discovery. Overall core
 acceptance remains incomplete. Bounded durable queued submission/recovery/list/show
 is implemented, with no prepared production support in the normal empty catalog.
-WE-P01 adds protocol/types, strict decoding, client negotiation, canonical-v2 and
-compatibility handling; dispatch remains inactive. Production model preparation,
-inference, worker execution, published results, graphical clients, and installers
-remain unimplemented. The maintainers' feature contracts, plans, progress and
+Worker supervision, cancellation, retry, restart reconciliation and result
+publication run only in the explicit Unix test-support execution host; the normal
+engine keeps dispatch inactive and publishes nothing, and on Unix serves read-only
+result and storage routes. Production model preparation, inference, production
+execution and publication, graphical clients, and installers remain unimplemented. The maintainers' feature contracts, plans, progress and
 evidence live in a separate private `patompong-docs` checkout; when present, read
 `patompong-docs/features/<feature>/{contract.md,plan.md,state.json,log.md}` for
-scoped work. It is not required to build, test or verify the code. The current
-working tree continues worker execution with dispatch inactive in the normal
-engine; README states the current status.
+scoped work. It is not required to build, test or verify the code. README states
+the current status.
 Explicit test support and recorded checks do not establish accepted platform support.
 
 - Start with the user's requested outcome and inspect the files relevant to it.
@@ -117,9 +117,9 @@ constraints above.
   result saving have different promises. Preserve them when defining exact contracts.
   The planned command name is `dissect3d`; accepted groups include `run`, `engine`,
   `models`, `runtimes`, `tasks`, `operations`, `jobs`, `results`, `storage`, `config`,
-  `auth`, and `diagnostics`. Bounded core, read-only discovery and queued submission,
-  recovery/list/show are implemented; execution/watch/wait/cancel/retry and results
-  remain future work. Foreground run interruption
+  `auth`, and `diagnostics`. Bounded core, read-only discovery, queued submission,
+  recovery/list/show and `results`/`storage` reads are implemented; foreground `run`,
+  `jobs watch|wait|cancel|retry` and CLI execution access remain future work. Foreground run interruption
   requests cancellation; stopping observation alone does not cancel accepted work.
 - Desktop's initial scope is management, monitoring, and 3D preview. Editing,
   model-driven modifications, and automatic conversion need separate requirements.

@@ -62,7 +62,7 @@ Feature flags:
 | Flag | Crate | Meaning |
 | --- | --- | --- |
 | `client` | `dissect3d-api` | Compiles the HTTP client and its transport dependencies. |
-| `test-support` | `dissect3d-engine` | Compiles the explicit test hosts and fixtures (`submission_fixture`, `execution_fixture`, the `examples/` binaries). Never part of a normal engine build. |
+| `test-support` | `dissect3d-engine` | Compiles the explicit test hosts and fixtures (`submission_fixture`, `execution_fixture`, the `examples/` binaries; `execution_fixture` also compiles in plain `cargo test`). Never part of a normal engine build. |
 | `native-test-hooks` | `dissect3d-platform` | Exposes the `native_test_hooks` fault-injection seam. Absent from normal builds. |
 
 Both `main.rs` files only set up the process and call a library entry point.
@@ -72,7 +72,8 @@ Behaviour lives in named library modules.
 
 All paths are relative to `crates/engine/src/`. A module `foo` is `foo.rs`, and
 its children live in `foo/`. Several modules are compiled on Unix only today
-(`inputs`, `jobs`, most of `submission` and the input/job parts of `store`).
+(`inputs`, `jobs`, most of `submission`, the input/job parts of `store`,
+`http/{inputs,jobs,results,storage}` and `execution::control`).
 
 | Module | Responsibility |
 | --- | --- |
@@ -87,12 +88,12 @@ its children live in `foo/`. Several modules are compiled on Unix only today
 | `jobs` | Private job inspection. Polling reads retained snapshots only. |
 | `execution` | Worker supervision: attempt files, launcher, session legality, progress, the supervisor and the central dispatch turn (`scheduler`: FIFO among eligible queued jobs over the Store's reservation transaction) and the `controller`, the single owner of turns that launches each committed attempt once and routes a candidate to `publication::service` and an ended attempt to finalization. `loaded` records the workers the controller holds loaded (load acknowledged until confirmed cleanup), `control` is job cancellation, `shutdown` the shared core shutdown deadline that caps every stop phase, and `recovery` the restart reconciliation of earlier instances' workers before dispatch. Only the explicit `test-support` execution host composes the controller and its negotiated routes; the normal engine keeps dispatch inactive. |
 | `worker_protocol` | The private engine–worker frame and message codec. |
-| `publication` | Validation of captured result candidates, private durable storage and publication policy limits. No route or dispatch uses it yet. |
+| `publication` | Validation of captured result candidates, private durable storage, publication policy limits, the publish service and committed-result reads. On Unix the normal engine mounts the read-only result and storage routes over it (`http/results.rs`, `http/storage.rs`). Only the Unix `test-support` execution host runs the `controller` that calls `publication::service::publish`, so normal builds publish nothing. |
 | `store` | The `Store` handle, the SQL actor thread, schema and migrations, and all durable records. `store.rs` holds the handle, its records and `CoreError`. `store/actor.rs` has the command enum and actor loop, `store/schema.rs` database open, migrations and recovery backups, `store/credentials.rs` and `store/shutdown.rs` those operations, and `store/ids.rs` id and time helpers. The other files in `store/` hold one record family each (`submission`, `jobs`, `retry`, `execution`, `finalize`, `cleanup`, `recovery`, `results`, `inputs`, ...). |
 | `diagnostics` | Bounded startup diagnostics with fixed codes. No paths, request data or secrets. |
 | `domain` | Shared vocabulary below the store: `SubmissionError` and the enforced input-capture and publication storage limits. Depends only on `dissect3d-api`. The old paths (`submission::SubmissionError`, `inputs::policy`) re-export these items. |
 | `policy` | `CorePolicy`, the engine-wide bounds. |
-| `submission_fixture`, `execution_fixture` | `test-support` only. Explicit prepared test support and a fixture worker, used by the `examples/` test hosts. |
+| `submission_fixture`, `execution_fixture` | `test-support` only (`execution_fixture` also in plain `cargo test`). Explicit prepared test support and a fixture worker, used by the `examples/` test hosts. |
 
 Public surface: `lib.rs` re-exports a small set of names (`Store`, `CoreError`,
 `StoreIdentity`, `HttpServer`, `CorePolicy`, `AuthContext`, `run_engine`, and the
@@ -143,7 +144,7 @@ by grepping `crate::<module>`:
 | bootstrap | credentials, store | |
 | execution | publication, store, submission, worker_protocol | `submission` for `SubmissionError` in `control` |
 | execution_fixture | execution, store, submission_fixture, support, worker_protocol | test-support only |
-| http | bootstrap, diagnostics, execution, execution_fixture, inputs, jobs, store, submission, submission_fixture, support, tls | `execution_fixture` test-support only |
+| http | bootstrap, diagnostics, domain, execution, execution_fixture, inputs, jobs, publication, store, submission, submission_fixture, support, tls | `execution_fixture` test-support only |
 | inputs | diagnostics, domain, store, submission | `submission` only for `#[cfg(test)]` hooks |
 | jobs | diagnostics, domain, execution, store, submission | `submission` only for `#[cfg(test)]` hooks; `execution` for the controller's queued blockers |
 | publication | domain, inputs, store, submission, worker_protocol | `inputs` only in a test; `submission::obj` OBJ parser |
@@ -177,10 +178,10 @@ by grepping `crate::<module>`:
 | Unit tests | Next to the code | Put substantial tests in a sibling `<name>_tests.rs` included from the parent with `#[cfg(test)] #[path = "<name>_tests.rs"] mod tests;` (or as a named child module). Keep inline `mod tests` blocks small. Including a file as `mod tests` keeps the test path (`module::tests::name`) stable when it moves out of the parent file. |
 | Defect regressions | Next to the code | A separate `<topic>_regressions.rs` per fixed defect group, added without rewriting older tests. |
 | Integration tests | `crates/<crate>/tests/*.rs` | One Cargo test target per file. Verification catalogues refer to these target names, so do not rename them or move them between crates. |
-| Protected tests | `crates/*/tests/` | Some integration test files are byte-protected (listed in [.gitattributes](.gitattributes), hashes recorded in `scripts/protected-inputs.json`). Do not edit them. Add new tests in new files. |
+| Protected tests | `crates/*/tests/`, `crates/cli/src/commands/exit_rule_regressions.rs` | Some test files are byte-protected (hashes recorded in `scripts/protected-inputs.json`; the integration tests are also pinned to CRLF in [.gitattributes](.gitattributes)). Do not edit them. Add new tests in new files. |
 | Data fixtures | `crates/<crate>/tests/fixtures/` | Each folder has a `PROVENANCE.md`. Bytes are hashed or embedded, so line endings are fixed by `.gitattributes`. |
-| Test hosts | `crates/engine/examples/` | `discovery_test_host`, `selection_test_host`, `submission_test_host`, `submission_fixture_tool`, `execution_fixture_worker` and `execution_fixture_tool`. They need `--features test-support`. |
-| Fixture modules | `crates/engine/src/submission_fixture.rs`, `crates/engine/src/execution_fixture.rs` | Prepared CPU test support and a fixture worker. `test-support` only. |
+| Test hosts | `crates/engine/examples/` | `discovery_test_host`, `selection_test_host`, `submission_test_host`, `submission_fixture_tool`, `execution_test_host`, `execution_fixture_worker` and `execution_fixture_tool`. They need `--features test-support`. |
+| Fixture modules | `crates/engine/src/submission_fixture.rs`, `crates/engine/src/execution_fixture.rs` | Prepared CPU test support and a fixture worker. `test-support` only (`execution_fixture` also in plain `cargo test`). |
 | Native fault seams | `crates/platform/src/native_test_hooks.rs` | Behind `native-test-hooks`. |
 | Child processes in engine tests | `crates/engine/src/submission/process_harness.rs` | Engine tests spawn children with `std::process`. The engine does not enable tokio's `process` feature: its process-wide SIGCHLD reaper makes the macOS worker launch refuse (`tests/child_exit_disposition.rs` guards production startup). |
 | Verification runners | `scripts/` | `verify-unix.sh` (Linux, WSL2, macOS) and `verify-windows.ps1` run every graph in one non-interactive command; `verify_protected_inputs.py` checks the protected-test hashes. |
