@@ -13,15 +13,12 @@ is implemented, with no prepared production support in the normal empty catalog.
 WE-P01 adds protocol/types, strict decoding, client negotiation, canonical-v2 and
 compatibility handling; dispatch remains inactive. Production model preparation,
 inference, worker execution, published results, graphical clients, and installers
-remain unimplemented. Read the
-[core-service plan](patompong-docs/implement-plan/core-service/plan.md) and
-[QA](patompong-docs/implement-plan/core-service/qa.md) for scoped work.
-The [WE-P01 checkpoint](patompong-docs/implement-plan/worker-execution/checkpoint.md)
-records the WE-P01 publication contents and its verification at that time. The
-current working tree continues worker execution (WE-P04 first checkpoint) on feature
-schema v7 with dispatch inactive; README and the
-[worker-execution progress](patompong-docs/implement-plan/worker-execution/progress.md)
-name the next task (WE-P04 real process fixtures). RP-P01 continues at its documented seams.
+remain unimplemented. The maintainers' feature contracts, plans, progress and
+evidence live in a separate private `patompong-docs` checkout; when present, read
+`patompong-docs/features/<feature>/{contract.md,plan.md,state.json,log.md}` for
+scoped work. It is not required to build, test or verify the code. The current
+working tree continues worker execution with dispatch inactive in the normal
+engine; README states the current status.
 Explicit test support and recorded checks do not establish accepted platform support.
 
 - Start with the user's requested outcome and inspect the files relevant to it.
@@ -169,7 +166,8 @@ Use the developer commands in [README](README.md#getting-started-today): locked
 workspace build/tests, formatting, and strict Clippy. On Windows use the documented
 independent-host runner outside a launcher Job Object for detached-engine tests;
 never relax lifetime/security behavior to satisfy a runner. Preserve protected
-contract/test bytes and check the core-service and discovery manifests. Add defect
+contract/test bytes; `scripts/verify_protected_inputs.py` checks the recorded
+hashes in `scripts/protected-inputs.json`. Add defect
 regressions separately. Keep CS-N01-CS-N05 deferred until their criteria are run.
 Do not install GPU runtimes or download weights to verify core documentation.
 Report executed checks separately from blocked and unexecuted acceptance gates.

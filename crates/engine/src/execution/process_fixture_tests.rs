@@ -3,7 +3,7 @@
 //! its separate diagnostics pipe. The worker is this test binary re-executed
 //! with a private mode; it is not a provider or the WE-P05 r2 worker.
 //!
-//! On Linux the platform guardian must already be built next to this binary
+//! On Linux and macOS the platform guardian must already be built next to this binary
 //! (`cargo build -p dissect3d-platform --bins`); a missing guardian fails the
 //! test rather than skipping it.
 use super::fake_worker::{LedgerMode, TestLedger, line};
@@ -236,7 +236,7 @@ impl Fixture {
             (MODE_ENV.into(), mode.into()),
             (ROOT_ENV.into(), self.root.path().as_os_str().into()),
         ];
-        #[cfg(target_os = "linux")]
+        #[cfg(unix)]
         {
             let guardian = std::env::current_exe()
                 .unwrap()
@@ -387,15 +387,39 @@ async fn worker_environment_is_exactly_the_scoped_launch_list() {
     let mut names: Vec<_> = names.lines().map(str::to_uppercase).collect();
     names.sort();
     // No ambient PATH, profile, proxy, credential or engine variables.
-    assert_eq!(
-        names,
-        [
-            "D3D_FIXTURE_ROOT",
-            "D3D_PROCESS_FIXTURE",
-            "DISSECT3D_WORKER_CONTROL",
-            "DISSECT3D_WORKER_INPUTS",
-            "DISSECT3D_WORKER_SESSION",
-        ]
+    // This fixture worker is the test binary, which links CoreFoundation (via
+    // reqwest's platform verifier). CoreFoundation sets this one variable in
+    // its own process at load, even from an empty environment; the guardian
+    // links no CoreFoundation and forwards only the scoped list.
+    let self_set = cfg!(target_os = "macos").then_some("__CF_USER_TEXT_ENCODING");
+    let expected: Vec<&str> = [
+        "D3D_FIXTURE_ROOT",
+        "D3D_PROCESS_FIXTURE",
+        "DISSECT3D_WORKER_CONTROL",
+        "DISSECT3D_WORKER_INPUTS",
+        "DISSECT3D_WORKER_SESSION",
+    ]
+    .into_iter()
+    .chain(self_set)
+    .collect();
+    assert_eq!(names, expected);
+}
+
+/// Cleanup of a "blocked" tree, whose worker forked a grandchild. Linux and
+/// Windows confirm closure of the whole tree. The conservative Darwin guardian
+/// has no NOTE_TRACK and never confirms closure of a tree that forked, so
+/// macOS asserts that fail-closed outcome until forked-descendant closure
+/// lands (WE-P02). Callers still require the grandchild to be gone.
+fn assert_forked_tree_cleanup(cleanup: &AttemptCleanup) {
+    #[cfg(target_os = "macos")]
+    assert!(
+        matches!(cleanup, AttemptCleanup::Fault("cleanup_ownership_lost")),
+        "{cleanup:?}"
+    );
+    #[cfg(not(target_os = "macos"))]
+    assert!(
+        matches!(cleanup, AttemptCleanup::Confirmed(_)),
+        "{cleanup:?}"
     );
 }
 
@@ -414,10 +438,7 @@ async fn blocked_native_control_is_terminated_externally_on_cancel() {
     .await;
     let (end, cleanup) = ended(&exit);
     assert_eq!(end, AttemptEnd::Stopped(StopIntent::UserCancel));
-    assert!(
-        matches!(cleanup, AttemptCleanup::Confirmed(_)),
-        "{cleanup:?}"
-    );
+    assert_forked_tree_cleanup(cleanup);
     // No worker cooperation: the whole real tree is gone.
     assert!(fixture.gone("worker"));
     assert!(fixture.gone("grandchild"));
@@ -431,10 +452,7 @@ async fn blocked_worker_past_the_attempt_deadline_is_a_typed_failure() {
     let exit = run(&fixture, &record, "blocked", process_limits(), None).await;
     let (end, cleanup) = ended(&exit);
     assert_eq!(end, AttemptEnd::DeadlineExceeded);
-    assert!(
-        matches!(cleanup, AttemptCleanup::Confirmed(_)),
-        "{cleanup:?}"
-    );
+    assert_forked_tree_cleanup(cleanup);
     assert!(categories(&exit).contains(&"execution_deadline_exceeded"));
     assert!(fixture.gone("grandchild"));
 }

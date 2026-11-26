@@ -16,8 +16,8 @@
 /crates/cli/tests/fixtures/PROVENANCE.md text eol=crlf
 /crates/cli/tests/fixtures/illustrative-acceptance.json text eol=crlf
 
-# Protected source tests: the core-service and support-discovery manifests hash
-# their original CRLF bytes (patompong-docs/tests/core-service/verify_inputs.py).
+# Protected source tests: their original CRLF bytes are recorded in
+# scripts/protected-inputs.json and checked by scripts/verify_protected_inputs.py.
 /crates/api/tests/decode.rs text eol=crlf
 /crates/api/tests/discovery.rs text eol=crlf
 /crates/api/tests/types.rs text eol=crlf

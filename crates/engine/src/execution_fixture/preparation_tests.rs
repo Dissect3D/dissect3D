@@ -22,7 +22,7 @@ const ENTRY: &str = "execution::r2_worker_tests::r2_worker_entry";
 const MESH: &[u8] = include_bytes!("../../tests/fixtures/submission/tetrahedron.obj");
 
 fn guardian() -> Option<PathBuf> {
-    if cfg!(target_os = "linux") {
+    if cfg!(unix) {
         let path = std::env::current_exe()
             .unwrap()
             .parent()

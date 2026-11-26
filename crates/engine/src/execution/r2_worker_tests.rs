@@ -6,7 +6,7 @@
 //! failure, input mismatch and malformed private messages.
 //!
 //! This exercises supervision and the worker only: no dispatch, validation,
-//! capture or publication. On Linux the guardian must already be built
+//! capture or publication. On Unix the guardian must already be built
 //! (`cargo build -p dissect3d-platform --bins`).
 use super::attempt_files::{AttemptHandles, AttemptInput, prepare_attempt_files};
 use super::fake_worker::{LedgerMode, TestLedger};
@@ -61,7 +61,7 @@ fn command(fault: Option<&str>) -> WorkerCommand {
     if let Some(fault) = fault {
         command.environment.push((FAULT_ENV.into(), fault.into()));
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     {
         let guardian = std::env::current_exe()
             .unwrap()

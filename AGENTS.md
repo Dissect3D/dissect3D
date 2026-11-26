@@ -1,159 +1,107 @@
-# Dissect3D repository guidance
+# Dissect3D agent guidance
 
-These instructions apply throughout the repository unless a more specific
-AGENTS.md supplies additional guidance for its directory. Read [README.md](README.md)
-first for the project's purpose, intended workflows, architecture, and current state.
+## Project state and reading order
 
-## Current state and starting work
+Dissect3D has a Rust core-service implementation with native platform,
+connection/readiness, authenticated API, SQLite engine, and connected CLI
+packages. Current core acceptance is incomplete; the README status and the
+maintainers' feature records list passed evidence and explicit native/non-native
+gates. Model/runtime management,
+workers, jobs, Desktop, plugins, and installers are not implemented.
 
-Dissect3D is at the requirements and architecture stage. There is no implemented
-engine, client, installer, model adapter, build system, or runtime test suite.
-Established direction describes what to build; it is not evidence of working
-software or supported hardware.
+1. Read [README.md](README.md) for the project and current state.
+2. Read [ARCHITECTURE.md](ARCHITECTURE.md) for the crate map, allowed
+   dependency directions and test locations.
+3. Verify with the single per-OS command in
+   [README](README.md#getting-started-today) (`scripts/verify-unix.sh` or
+   `scripts/verify-windows.ps1`); protected tests are listed in
+   `scripts/protected-inputs.json`.
+4. The maintainers' requirements, contracts, plans and evidence live in a
+   separate private `patompong-docs` checkout. When it is present, read
+   `patompong-docs/docs/engineering.md`, `docs/roadmap.md` and the matching
+   `features/<feature>/{contract.md,plan.md,state.json,log.md}`. It is not
+   required to build, test or verify the code.
+5. Inspect matching code and tests. Read only the selected workflow and the
+   skill dependencies needed for the session.
 
-- Start with the user's requested outcome and inspect the files relevant to it.
-  Read additional tracked specifications and scoped instructions when they exist.
-- Use normal coding-agent behavior by default. Do not require a workflow-selection
-  question or a personal toolkit. Follow a workflow or skill when the user selects it.
-- Keep public guidance usable from a clean clone. Untracked notes, ignored folders,
-  personal preferences, and private documentation must not be prerequisites.
-- User instructions and confirmed requirements govern. Identify material conflicts
-  between documentation, implementation, and upstream behavior before dependent work.
-  Distinguish accepted decisions, proposals, implemented behavior, and verified support.
-- Keep changes focused. Preserve unrelated user work and do not scaffold an
-  application, choose a first model, or expand scope as a side effect of a
-  documentation or research task.
+User instructions and confirmed requirements govern. If documents, code, or
+upstream behavior disagree, identify the conflict before dependent work. Describe
+implemented behavior, accepted direction, architectural proposals, and unverified
+support separately.
 
-## Architecture to preserve
+## Established project direction
 
-The following are accepted design constraints; implementation is pending.
+- Follow Ollama's local-service approach: one local engine serves CLI, Desktop,
+  Blender, and Unity clients through a common API.
+- The engine owns the shared model inventory, runtime preparation, hardware and
+  resource management, accepted jobs, and generated artifacts.
+- Keep model execution in supervised workers and dependencies in managed,
+  compatible environments, outside Blender and Unity host environments.
+- Use a common adapter lifecycle with declared task capabilities. Preserve each
+  model's required inputs and upstream pipeline behavior.
+- Distinguish a model family, a task, a pipeline, model assets, and a runtime
+  profile. The Hunyuan target is mesh-input part processing; Hunyuan3D-Part is a
+  candidate implementation for segmentation and completion.
+- Windows with NVIDIA CUDA is the initial inference target. Managed Python and
+  compatible prebuilt dependencies are the intended ordinary-user setup.
+- Desktop is intended for preview. Editing and model-driven modifications need
+  later requirements before inclusion.
+- Quantization is a per-model, per-runtime capability. Precision changes,
+  offloading, and mesh simplification are separate concepts.
+- Keep delivery priorities open. The overview checklist does not authorize a
+  first model, a client order, a technology stack, or an implementation schedule.
 
-| Boundary | Constraint |
-| --- | --- |
-| Engine authority | One per-OS-user Rust engine owns support resolution, model inventory, runtime preparation, readiness, durable jobs, resource reservations, and published results |
-| Clients | CLI, Desktop, Blender, and Unity use the common public engine contract; clients and workers never access the engine database directly |
-| Public API | HTTP/JSON control operations, polling sufficient for correct monitoring, and resumable SSE; transfer large inputs and artifacts separately |
-| Persistence | SQLite behind an engine persistence interface; large inputs, weights, and meshes are external files |
-| Execution | Supervised worker processes execute model adapters and upstream pipelines; Python/native inference dependencies stay in managed environments outside client hosts |
-| Local access | Loopback-only service with revocable per-client credentials and consistent authorization for control, events, and artifacts; enforce browser-origin and Host policies |
+## Documentation ownership and continuity
 
-Logical engine modules do not imply separate services or a predetermined source
-tree. Rust libraries, client languages/frameworks, worker transport, provisioning
-tools, installer technology, and exact schemas remain unselected. Rust orchestrates
-workers; it is not a claim of faster GPU inference.
+- Keep project requirements and system context under `patompong-docs/docs/`.
+  Keep portable workflow/toolkit content under `.agents/` reusable and free of
+  project notes, model files, credentials, and generated output.
+- README owns the short project introduction and navigation. Requirements own
+  scope and observable expectations; system documents explain architecture;
+  the glossary owns vocabulary. Link to the governing source instead of copying
+  whole specifications into several files.
+- Use stable feature slugs and requirement identifiers. Preserve them during
+  updates; record material changes to accepted scope and affected artifacts.
+- Maintain concise status, acceptance evidence, unresolved decisions, and next
+  session context in the documents being changed. Do not invent confirmation,
+  benchmark results, support claims, or a completed implementation.
+- Detailed protocols, schemas, executable tests, and implementation plans belong
+  to their separately selected workflows. Create their directories when those
+  artifacts are actually needed.
+- Root README and agent guidance are explicitly assigned project files. Keep
+  their references aligned when governing requirements change.
 
-## Behavioral constraints
+## Evidence and verification
 
-### Models and preparation
+- Check primary upstream sources when model or dependency behavior matters.
+  Record the inspected revision when available, otherwise the date and the
+  limitation of a mutable source. The pasted concept is context, not proof.
+- A model is a target until its adapter, assets, runtime, hardware profile, and
+  declared tasks are integrated and validated. An upstream Linux demonstration
+  does not establish Windows support.
+- No model has a confirmed project memory floor or quantized variant. Do not
+  turn the pasted 8 GB suggestion into a support promise.
+- For documentation changes, verify local links, vocabulary, identifiers,
+  status, and consistency. Report these as documentation checks.
+- Select meaningful runtime tests when implementation work exists. Do not
+  install GPU runtimes, download weights, or create application scaffolding just
+  to verify overview documentation.
+- At handoff, state what changed, what was checked, what remains open, and any
+  unverified external or hardware acceptance criteria.
 
-- Distinguish a model family, exact implementation, task, pipeline, adapter,
-  assets, runtime profile, variant, and tested support profile. Required masks,
-  part counts, mesh conditioning, and output differences survive the common adapter
-  boundary. Reject unsupported options instead of ignoring them.
-- Preserve upstream preprocessing, inference, and postprocessing where practical.
-  Record intentional modifications. Engine job scheduling and a pipeline's sampling
-  scheduler are different responsibilities.
-- OmniPart targets image-plus-part-mask generation; PartCrafter targets
-  image-plus-part-count generation. The Hunyuan target is existing-mesh part
-  segmentation/completion, with Hunyuan3D-Part as the candidate implementation.
-  None is currently integrated or validated.
-- Capture exact adapter, executed source, asset, runtime, and variant revisions.
-  Released support definitions and activated environments are immutable. Managed
-  profiles may use recorded forks, patches, and maintainer-built prebuilt components.
-- Preparation is an explicit engine-owned operation. Ordinary users should not
-  need system Python or local source compilation. Stage and verify replacements
-  before activation; failed replacement preserves the prior installation.
-- Installed files, verified readiness, current execution eligibility, authorization,
-  and loaded-in-memory state are separate facts. A download or cache hit establishes
-  none of the other states by itself.
-- Prepared local execution works offline without hidden downloads, external
-  preprocessing/inference, or telemetry. Do not promise offline first-time setup.
+<!-- personal-toolkit:begin -->
+## Patompong portable workflow defaults
 
-### Jobs, resources, and results
-
-- Accept a job durably before execution, capturing resolved configuration and
-  complete immutable input snapshots. Client disconnection does not cancel it.
-  Support idempotent submission without claiming exactly-once GPU execution.
-- Cancellation records intent and establishes worker/process-tree cleanup before
-  treating resources as released. Restart preserves committed outcomes, rechecks
-  queued jobs, and marks uncommitted active attempts interrupted. Retry creates a
-  new linked job explicitly; never silently rerun uncertain execution.
-- Use bounded queues and FIFO ordering among eligible jobs. Keep reservations
-  central, including idle loaded allocations and coordinated multi-device needs.
-  One attempt per worker and, by default, one GPU attempt per device are the
-  accepted conservative policies. Worker reuse and greater concurrency need validation.
-- Validate mandatory geometry and structure before publishing success. File
-  existence, process exit, and nominal part count are insufficient. Partial results
-  require declared task semantics and explicit missing or invalid components.
-- Publish artifacts with versioned manifests covering integrity, part relationships,
-  transforms, coordinate conventions, units, materials, provenance, and validation.
-  Unknown metadata stays explicit. Do not assume a universal output format or converter.
-- Retain published results and captured inputs until explicit deletion or a
-  user-enabled retention policy. Protect shared and nonterminal references. Removing
-  model installations must not implicitly delete results.
-- Confine input/artifact references to their authorized boundaries. Keep credentials,
-  raw inputs, and unnecessary personal paths out of normal diagnostics. Process and
-  dependency isolation do not constitute a security sandbox.
-
-### Clients and platforms
-
-- CLI is an engine client, with human-readable and structured scripting output.
-  Foreground execution, detached submission, observation, cancellation, and local
-  result saving have different promises. Preserve them when defining exact contracts.
-  The planned command name is `dissect3d`; accepted groups include `run`, `engine`,
-  `models`, `runtimes`, `tasks`, `operations`, `jobs`, `results`, `storage`, `config`,
-  `auth`, and `diagnostics`. Commands are not implemented. Foreground run interruption
-  requests cancellation; stopping observation alone does not cancel accepted work.
-- Desktop's initial scope is management, monitoring, and 3D preview. Editing,
-  model-driven modifications, and automatic conversion need separate requirements.
-- CLI and engine target bounded Windows, macOS, and Linux core operation independently
-  of Desktop and inference dependencies. Initial preparation/inference targets tested
-  Windows/NVIDIA CUDA profiles only. The README records the initial core test targets;
-  none has completed application verification.
-- Treat quantization as a per-model, per-runtime capability. Precision, offloading,
-  sampling effort, and mesh simplification are distinct. No project memory floor,
-  universal Q4/Q8 option, or unmeasured performance guarantee exists.
-- Keep first-model selection, client order, delivery priorities, and milestones open.
-  Remote access, cloud/distributed inference, training, and a general-purpose editor
-  require explicit scope decisions.
-
-## Documentation and repository structure
-
-- README owns the public introduction, status, workflows, architecture summary,
-  navigation, and contribution entry points. AGENTS.md owns actionable repository
-  guidance. Both must be understandable without personal documentation.
-- Add detailed public documentation when its scope is selected. Link to tracked
-  governing documents once available; do not create empty documentation trees or
-  speculative source directories. Keep requirements, architecture, contracts, and
-  implementation plans distinct as those artifacts become necessary.
-- Preserve existing feature slugs and requirement identifiers in documents being
-  updated. Record material changes to accepted scope and reconcile affected public
-  summaries. Never invent user confirmation, benchmarks, or completed acceptance.
-- Use plain English and explain responsibilities and observable behavior. Label
-  planned components clearly. Installation commands, screenshots, support badges,
-  and runnable examples must correspond to actual project artifacts.
-- Keep credentials, model weights, managed environments, generated geometry, and
-  personal workflow files out of version control. Do not change the project's MIT
-  license or imply it grants rights to upstream assets.
-
-## Verification and handoff
-
-For documentation changes, check relative links and anchors against publishable
-repository files, terminology, status claims, identifiers where present, and
-consistency between README and agent guidance. Use `git diff --check` for tracked
-changes and check new files too. Report these as documentation checks.
-
-There are no build, lint, or runtime test commands yet. Do not install GPU runtimes,
-download weights, or add application scaffolding to verify documentation. Once
-implementation exists, follow its documented commands and run checks appropriate
-to the changed behavior. Never report unexecuted tests as passing.
-
-When model or dependency behavior matters, inspect primary upstream sources and
-record the revision, or inspection date with the limitations of a mutable source.
-A supported model requires validation of its adapter, assets, declared tasks,
-runtime, hardware, and output behavior together. Upstream Linux execution does
-not establish Windows support; project-managed patches may establish support only
-with evidence for the resulting configuration.
-
-At handoff, state what changed, what was checked, what remains open, and which
-external or hardware acceptance criteria remain unverified.
+Read [.agents/PREFERENCES.md](.agents/PREFERENCES.md) and
+[the workflow menu](.agents/workflows/INDEX.md).
+At each new session, ask which workflow or lone skill to use unless the opening
+request already names one. Keep that selection throughout the session until the
+user changes it. Use only [the small workflow menu](.agents/workflows/INDEX.md)
+to offer choices; read no full catalog or skill bodies for that question.
+After selection, read the selected workflow and the skills/references it needs;
+skills follow their relevant dependencies themselves. Read
+[the full catalog](.agents/CATALOG.md) only for user-requested skill browsing,
+selection help, tree details, or catalog maintenance.
+Follow applicable project requirements and higher-priority instructions; explain
+material conflicts. Keep project notes and credentials outside the portable folder.
+<!-- personal-toolkit:end -->

@@ -22,10 +22,10 @@ plugins, and installers remain unimplemented.
 
 The **WE-P01 checkpoint** adds execution protocol/types, strict decoding, client
 negotiation, canonical-v2 request identity and compatibility handling. Dispatch is
-inactive; worker supervision and publication remain future work. See the
-[checkpoint and verification record](patompong-docs/implement-plan/worker-execution/checkpoint.md)
-for exact contents, recorded evidence and open gates. Recorded tests and explicit
-test support do not establish accepted platform or model support.
+inactive; worker supervision and publication remain future work. The maintainers'
+feature records hold exact contents, recorded evidence and open gates; they are
+not needed to build or verify the code. Recorded tests and explicit test support
+do not establish accepted platform or model support.
 
 The current working tree continues worker execution on feature schema v7. Private lifecycle,
 execution authorization and shared v1/v2 acceptance/replay seams are implemented;
@@ -47,9 +47,10 @@ and Linux processes; they are not connected to dispatch. Linux launch ownership
 acknowledgements now run in normal builds as well as fault-injection builds.
 Windows durable recovery
 records and capture/submission/job service composition remain unavailable pending
-ordinary-user namespace guarantees. See the [current native repair QA](patompong-docs/implement-plan/worker-execution/qa.md).
-The macOS guardian now has a conservative implementation and cross-target checks;
-forked-descendant closure and native macOS verification remain incomplete.
+ordinary-user namespace guarantees.
+The macOS guardian has a conservative implementation: worker trees that never
+fork reach confirmed cleanup in native macOS tests, while any tree that forks is
+reported as unconfirmed until forked-descendant closure (WE-P02) is implemented.
 
 [Why Dissect3D?](#why-dissect3d) · [Workflows](#intended-workflows) ·
 [Models](#target-models) · [Architecture](#architecture) ·
@@ -206,52 +207,43 @@ Inference on macOS, Linux, AMD, Apple accelerators, or CPU remains undecided.
 
 Developer prerequisites are Rust 1.99.1 with rustfmt and Clippy (pinned in
 `rust-toolchain.toml`), a native linker/C toolchain (MSVC Build Tools and Windows
-SDK on Windows), and Python 3.11+ for supplementary contract runners. Cargo needs
+SDK on Windows), and Python 3 (standard library only) for the verification scripts. Cargo needs
 registry dependencies cached or network access on the first build. OpenSSL-backed
 Python TLS verification is required by the public consumer. These are developer
 prerequisites, not model-runtime or ordinary-user installation requirements.
 
+Each supported OS has one non-interactive verification command. It runs the
+protected-input check, formatting, the build, strict Clippy for the default,
+engine `test-support` and platform `native-test-hooks` graphs, and the matching
+three test graphs with one harness thread. Every step runs even after a
+failure; the command prints a pass/fail summary and exits non-zero if any step
+failed. Any engine or test host left running by a failed test is stopped and
+counted as a failure.
+
+On Linux (including WSL2) and macOS:
+
 ```sh
-cargo build --workspace --locked
-python -B patompong-docs/tests/core-service/verify_inputs.py
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --locked -- -D warnings
+scripts/verify-unix.sh
 ```
-
-On macOS/Linux, build the fixture examples and explicitly identify the test
-binaries before running the full workspace suite (use your Cargo target directory
-if customized):
-
-```sh
-cargo build -p dissect3d-engine --features test-support --examples --locked
-export DISSECT3D_TEST_ENGINE="$PWD/target/debug/dissect3d-engine"
-export DISSECT3D_TEST_CLI="$PWD/target/debug/dissect3d"
-export DISSECT3D_TEST_DISCOVERY_ENGINE="$PWD/target/debug/examples/discovery_test_host"
-export DISSECT3D_TEST_SUBMISSION_ENGINE="$PWD/target/debug/examples/submission_test_host"
-export DISSECT3D_TEST_SUBMISSION_TOOL="$PWD/target/debug/examples/submission_fixture_tool"
-cargo test --workspace --all-targets --locked -- --test-threads=1
-```
-
-The verification runners use one harness test thread. Individual concurrency
-scenarios still execute their own concurrent operations.
 
 On Windows, Cargo and containing launcher Job Objects prevent the detached engine
-from using the required breakaway lifetime. Run the full suite from an independent
-PowerShell terminal outside such a Job Object:
+from using the required breakaway lifetime. Run the script from an independent
+PowerShell terminal outside such a Job Object; it refuses an unsuitable host,
+compiles with Cargo and runs the reported test binaries directly:
 
 ```powershell
-./patompong-docs/tests/core-service/run-windows-tests.ps1 -EvidenceDirectory target/core-verification
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-windows.ps1
 ```
 
-The runner refuses an unsuitable host. Do not weaken engine lifetime or security
-to make it pass. Its optional privileged filesystem fixture requires an appropriate
-host and is separate from ordinary verification. See the
-[core contract verification](patompong-docs/tests/core-service/verification.md),
-[QA record](patompong-docs/implement-plan/core-service/qa.md), and
-[discovery verification](patompong-docs/tests/support-discovery/verification.md).
-After building, run supplementary configuration checks with
-`python -B patompong-docs/tests/core-service/test_config_concurrency.py` (set
-`DISSECT3D_TEST_CLI` to the built binary on non-Windows hosts).
+Do not weaken engine lifetime or security to make it pass. The protected-input
+check alone is `python scripts/verify_protected_inputs.py`; it compares the
+byte-protected integration tests with the hashes recorded in
+`scripts/protected-inputs.json`. Individual graphs can still be run with the
+commands the scripts print, for example `cargo test --workspace --all-targets
+--locked -- --test-threads=1` after `cargo build -p dissect3d-engine --features
+test-support --examples --locked` and the `DISSECT3D_TEST_*` exports in
+`scripts/verify-unix.sh`. Individual concurrency scenarios still execute their
+own concurrent operations.
 
 The workspace contains API, platform, connection, engine, and CLI crates.
 Use `target/debug/dissect3d --help` (`.exe` on Windows) for implemented commands.

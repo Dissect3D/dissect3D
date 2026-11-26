@@ -1,12 +1,17 @@
 //! WE-P07/4 restart reconciliation (user decision 2026-11-24): attempts of a
 //! dead engine instance, their recorded launch identities and real processes.
-use super::cleanup::{AttemptRef, test_identity};
+use super::cleanup::AttemptRef;
+#[cfg(target_os = "linux")]
+use super::cleanup::test_identity;
 use super::execution_page_tests::reopen;
+#[cfg(target_os = "linux")]
 use super::launch_identity::LaunchRecord;
 use super::launch_identity_tests::launched;
 use super::retry_tests::{accept, authorize, db, dispatch};
 use super::*;
 use crate::execution::recovery::{IDENTITY_UNRECORDED, RecoveryReport, reconcile};
+// The live-survivor cases read Linux `/proc` start markers directly.
+#[cfg(target_os = "linux")]
 use dissect3d_platform::{ProcessIdentity, WorkerIdentity, process_matches};
 
 /// (state, outcome, cleanup status, cleanup reason, held reservations)
@@ -27,6 +32,7 @@ fn facts(
 }
 
 /// The Linux start marker, in the platform's format (`linux-start-<ticks>`).
+#[cfg(target_os = "linux")]
 fn linux_identity(pid: u32) -> ProcessIdentity {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
     let fields: Vec<&str> = stat[stat.rfind(')').unwrap() + 1..]

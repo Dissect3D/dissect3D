@@ -1,13 +1,13 @@
 //! Controlled engine-process death on either side of the SQLite commit.
 //! Child mode exists only in this Rust test executable, never a product host.
 
+use super::process_harness::{Child, Command};
 use super::test_support::{Hooks, register};
 use dissect3d_platform::{AuthorityLease, OwnedRoot, RelativePath, RootPurpose};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::process::{Child, Command};
 
 const MARKER: &str = "run/private-commit-boundary";
 

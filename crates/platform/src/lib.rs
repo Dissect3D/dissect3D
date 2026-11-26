@@ -39,6 +39,8 @@ pub use process::{
     launch_engine, process_matches, wait_for_process_exit,
 };
 pub use root::{OwnedRoot, PlatformError, RootPurpose};
+#[cfg(unix)]
+pub use worker::child_exit_reaping_unclaimed;
 pub use worker::{
     CleanupConfirmed, CleanupFault, MAX_WORKER_INPUTS, SurvivorsAbsent, WORKER_CONTROL_ENV,
     WORKER_INPUTS_ENV, WorkerChannels, WorkerCommand, WorkerIdentity, WorkerProcess,

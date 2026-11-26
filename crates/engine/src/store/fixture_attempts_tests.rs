@@ -27,7 +27,7 @@ const BOUND: std::time::Duration = std::time::Duration::from_secs(120);
 const ENTRY: &str = "execution::r2_worker_tests::r2_worker_entry";
 
 pub(super) fn worker_launch() -> WorkerLaunch {
-    let guardian = cfg!(target_os = "linux").then(|| {
+    let guardian = cfg!(unix).then(|| {
         let path = std::env::current_exe()
             .unwrap()
             .parent()

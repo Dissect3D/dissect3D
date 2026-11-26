@@ -35,7 +35,16 @@ fn event(ident: usize, filter: i16, flags: u32) -> libc::kevent {
     value
 }
 
-fn drain(queue: &OwnedFd, wait: Option<Duration>, forked: &mut bool) -> Result<bool, ()> {
+/// Process events observed for the leader so far.
+#[derive(Default)]
+struct Observed {
+    /// Any fork by the leader: no closure witness can ever be produced.
+    forked: bool,
+    /// The leader's own exit was reported by the kernel.
+    exited: bool,
+}
+
+fn drain(queue: &OwnedFd, wait: Option<Duration>, seen: &mut Observed) -> Result<bool, ()> {
     let time = wait.map(|duration| libc::timespec {
         tv_sec: duration.as_secs() as libc::time_t,
         tv_nsec: duration.subsec_nanos() as libc::c_long,
@@ -63,7 +72,10 @@ fn drain(queue: &OwnedFd, wait: Option<Duration>, forked: &mut bool) -> Result<b
             return Err(());
         }
         if event.filter == libc::EVFILT_PROC && event.fflags & libc::NOTE_FORK != 0 {
-            *forked = true;
+            seen.forked = true;
+        }
+        if event.filter == libc::EVFILT_PROC && event.fflags & libc::NOTE_EXIT != 0 {
+            seen.exited = true;
         }
         if event.filter == libc::EVFILT_READ && event.ident == 0 {
             stop = true;
@@ -181,8 +193,8 @@ fn run() -> Result<bool, ()> {
     {
         return Err(());
     }
-    let mut forked = false;
-    let stopped = drain(&queue, Some(Duration::ZERO), &mut forked)?;
+    let mut seen = Observed::default();
+    let stopped = drain(&queue, Some(Duration::ZERO), &mut seen)?;
     let mut ready = false;
     if !stopped {
         // The direct child is still unreaped and suspended; its PID cannot have
@@ -193,23 +205,45 @@ fn run() -> Result<bool, ()> {
         ready = report(&format!("READY {} {}", identity.pid, identity.start_marker));
     }
     if ready {
-        while !drain(&queue, None, &mut forked)? {}
+        while !drain(&queue, None, &mut seen)? {}
     }
-    if unsafe { libc::kill(-pid, libc::SIGKILL) } != 0
-        && std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
-    {
-        return Err(());
-    }
+    // This timeout bounds observation only; it is never cleanup evidence.
     let deadline = Instant::now() + Duration::from_secs(5);
+    if unsafe { libc::kill(-pid, libc::SIGKILL) } != 0 {
+        match std::io::Error::last_os_error().raw_os_error() {
+            Some(libc::ESRCH) => {}
+            // Darwin reports EPERM, not ESRCH, when no group member can take a
+            // signal: every member is a zombie or already exiting. Without an
+            // observed fork the group is exactly the unreaped leader, so EPERM
+            // is accepted only once the kernel reports the leader's own exit
+            // (it may still be exiting) and a fresh drain still shows no
+            // fork; the waitpid below must then reap exactly this pid. Any
+            // other EPERM (a live member we may not signal) stays a fault.
+            Some(libc::EPERM) => loop {
+                drain(&queue, Some(Duration::ZERO), &mut seen)?;
+                if seen.forked {
+                    return Err(());
+                }
+                if seen.exited {
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    return Err(());
+                }
+                drain(&queue, Some(Duration::from_millis(5)), &mut seen)?;
+            },
+            _ => return Err(()),
+        }
+    }
     loop {
-        drain(&queue, Some(Duration::ZERO), &mut forked)?;
+        drain(&queue, Some(Duration::ZERO), &mut seen)?;
         let mut status = 0;
         let result = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
         if result == pid {
             group.unreaped = false;
             // Drain coalesced exit/fork observations before considering CLEAN.
-            drain(&queue, Some(Duration::ZERO), &mut forked)?;
-            return Ok(!forked);
+            drain(&queue, Some(Duration::ZERO), &mut seen)?;
+            return Ok(!seen.forked);
         }
         if result < 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
             // Ownership loss must also disable Drop's numeric group signal.
@@ -222,7 +256,7 @@ fn run() -> Result<bool, ()> {
             return Err(());
         }
         // This timeout bounds observation only; it is never cleanup evidence.
-        drain(&queue, Some(Duration::from_millis(5)), &mut forked)?;
+        drain(&queue, Some(Duration::from_millis(5)), &mut seen)?;
     }
 }
 

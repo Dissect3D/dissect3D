@@ -79,7 +79,7 @@ its children live in `foo/`. Several modules are compiled on Unix only today
 | `startup` | Engine entry: root and authority, metadata recovery, listeners, ready descriptor. Also the `test-support` test-engine entry points. |
 | `bootstrap` | Private same-owner enrollment over native IPC, before any HTTP credential exists. |
 | `credentials` | Credential and grant records passed into the store actor (`AuthContext`, `VerifiedEnrollment`, grant policies). Raw tokens never appear here. |
-| `http` | Loopback listener, TLS, bounded HTTP/1 parsing, Host/Origin policy, authentication and error mapping. Feature routes are in `http/{access,discovery,inputs,jobs}.rs`; `http/framing.rs` holds shared response framing. |
+| `http` | Loopback listener, TLS, bounded HTTP/1 parsing, Host/Origin policy, authentication and error mapping. Feature routes are in `http/{access,discovery,inputs,jobs,results,storage}.rs`; `http/framing.rs` holds shared response framing. |
 | `tls` | Installation certificate authority and the per-run loopback HTTPS identity. |
 | `support` | The support catalog: declaration decoding and validation (`support/declarations.rs`), resolution, compatibility, observations and paginated discovery reads. Observations read their operational facts through `ObservationSource`: the Phase 2 values, or in the explicit execution host `support/live_facts.rs`, fed by the prepared profile and the controller's loaded workers. |
 | `submission` | Bounded admission, request equivalence, durable submission orchestration and the bounded OBJ fixture validator. |
@@ -177,11 +177,13 @@ by grepping `crate::<module>`:
 | Unit tests | Next to the code | Put substantial tests in a sibling `<name>_tests.rs` included from the parent with `#[cfg(test)] #[path = "<name>_tests.rs"] mod tests;` (or as a named child module). Keep inline `mod tests` blocks small. Including a file as `mod tests` keeps the test path (`module::tests::name`) stable when it moves out of the parent file. |
 | Defect regressions | Next to the code | A separate `<topic>_regressions.rs` per fixed defect group, added without rewriting older tests. |
 | Integration tests | `crates/<crate>/tests/*.rs` | One Cargo test target per file. Verification catalogues refer to these target names, so do not rename them or move them between crates. |
-| Protected tests | `crates/*/tests/` | Some integration test files are byte-protected (listed in [.gitattributes](.gitattributes)). Do not edit them. Add new tests in new files. |
+| Protected tests | `crates/*/tests/` | Some integration test files are byte-protected (listed in [.gitattributes](.gitattributes), hashes recorded in `scripts/protected-inputs.json`). Do not edit them. Add new tests in new files. |
 | Data fixtures | `crates/<crate>/tests/fixtures/` | Each folder has a `PROVENANCE.md`. Bytes are hashed or embedded, so line endings are fixed by `.gitattributes`. |
 | Test hosts | `crates/engine/examples/` | `discovery_test_host`, `selection_test_host`, `submission_test_host`, `submission_fixture_tool`, `execution_fixture_worker` and `execution_fixture_tool`. They need `--features test-support`. |
 | Fixture modules | `crates/engine/src/submission_fixture.rs`, `crates/engine/src/execution_fixture.rs` | Prepared CPU test support and a fixture worker. `test-support` only. |
 | Native fault seams | `crates/platform/src/native_test_hooks.rs` | Behind `native-test-hooks`. |
+| Child processes in engine tests | `crates/engine/src/submission/process_harness.rs` | Engine tests spawn children with `std::process`. The engine does not enable tokio's `process` feature: its process-wide SIGCHLD reaper makes the macOS worker launch refuse (`tests/child_exit_disposition.rs` guards production startup). |
+| Verification runners | `scripts/` | `verify-unix.sh` (Linux, WSL2, macOS) and `verify-windows.ps1` run every graph in one non-interactive command; `verify_protected_inputs.py` checks the protected-test hashes. |
 
 Many integration tests launch real engine and CLI binaries. See
 [Getting started today](README.md#getting-started-today) for the environment

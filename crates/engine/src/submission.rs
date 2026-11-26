@@ -13,6 +13,8 @@ pub(crate) mod equivalence;
     allow(dead_code, reason = "input admission remains unavailable on Windows")
 )]
 pub(crate) mod obj;
+#[cfg(all(unix, test, feature = "test-support"))]
+mod process_harness;
 #[cfg(unix)]
 pub(crate) mod service;
 #[cfg(all(unix, test))]

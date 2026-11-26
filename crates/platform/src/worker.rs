@@ -283,6 +283,22 @@ impl WorkerProcess {
     }
 }
 
+/// Whether this process leaves child-exit reaping to direct `waitpid` callers:
+/// SIGCHLD at its default action and without `SA_NOCLDWAIT`. A process-wide
+/// SIGCHLD reaper (for example tokio's process driver) could reap the Darwin
+/// guardian and let its PID be reused, so the macOS worker launch refuses
+/// with [`PlatformError::LaunchRestricted`] whenever this is false.
+#[cfg(unix)]
+pub fn child_exit_reaping_unclaimed() -> Result<bool, PlatformError> {
+    // SAFETY: a null new action only reads the current disposition into the
+    // zeroed, writable `current` record.
+    let mut current: libc::sigaction = unsafe { std::mem::zeroed() };
+    if unsafe { libc::sigaction(libc::SIGCHLD, std::ptr::null(), &mut current) } != 0 {
+        return Err(PlatformError::Io);
+    }
+    Ok(current.sa_sigaction == libc::SIG_DFL && current.sa_flags & libc::SA_NOCLDWAIT == 0)
+}
+
 static CONTROL_TAKEN: AtomicBool = AtomicBool::new(false);
 static INPUTS_TAKEN: std::sync::Mutex<Vec<u64>> = std::sync::Mutex::new(Vec::new());
 

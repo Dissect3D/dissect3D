@@ -355,7 +355,10 @@ fn backup_sync_failure_aborts_migration_without_mutating_v2_store() {
     downgrade_to(&fixture, 2);
     let root = OwnedRoot::open(&fixture.root_path, RootPurpose::EngineData)
         .expect("reopen protected root");
-    let database_path = fixture.root_path.join(DATABASE_NAME);
+    // SQLite's no-follow open needs the root's native path (macOS `/var` alias).
+    let database_path = root.path_for_native_vfs(
+        &dissect3d_platform::RelativePath::parse(DATABASE_NAME).expect("database name"),
+    );
     let mut connection = open_internal_database(&database_path).expect("open v2 database");
     let sync_attempted = std::cell::Cell::new(false);
 
@@ -601,7 +604,9 @@ fn failed_upgrade_second_start_preserves_both_images_until_explicit_archive_and_
         let fixture = new_fixture();
         downgrade_to(&fixture, 2);
         let root = OwnedRoot::open(&fixture.root_path, RootPurpose::EngineData).unwrap();
-        let database_path = fixture.root_path.join(DATABASE_NAME);
+        // SQLite's no-follow open needs the root's native path (macOS `/var` alias).
+        let database_path = root
+            .path_for_native_vfs(&dissect3d_platform::RelativePath::parse(DATABASE_NAME).unwrap());
         let backup_path = fixture.root_path.join(UPGRADE_BACKUP);
         let mut connection = open_internal_database(&database_path).unwrap();
         configure_connection(&connection).unwrap();

@@ -53,11 +53,7 @@ impl Worker {
     > {
         // This client owns raw waitpid state. A competing SIGCHLD reaper could
         // consume the guardian and allow PID reuse before our reaper runs.
-        let mut disposition: libc::sigaction = unsafe { std::mem::zeroed() };
-        if unsafe { libc::sigaction(libc::SIGCHLD, std::ptr::null(), &mut disposition) } != 0
-            || disposition.sa_sigaction != libc::SIG_DFL
-            || disposition.sa_flags & libc::SA_NOCLDWAIT != 0
-        {
+        if !super::child_exit_reaping_unclaimed().map_err(|_| PlatformError::LaunchRestricted)? {
             return Err(PlatformError::LaunchRestricted);
         }
         let helper = command.guardian.ok_or(PlatformError::InvalidPath)?;

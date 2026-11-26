@@ -4,6 +4,7 @@
 #[path = "coordination_regressions.rs"]
 mod coordination_regressions;
 
+use super::process_harness::{Child, Command};
 use super::test_support::{Hooks, register};
 use crate::submission_fixture;
 use dissect3d_api::{
@@ -14,7 +15,6 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, atomic::Ordering};
 use std::time::Duration;
-use tokio::process::{Child, Command};
 
 struct Host {
     _parent: tempfile::TempDir,
