@@ -7,6 +7,7 @@ pub(super) fn setup(
     engine: &crate::connection::DiscoveredEngine,
     submission_access_requested: bool,
 ) -> Result<serde_json::Value, CommandError> {
+    let mut reused = false;
     let mut credential = match profile.load().map_err(CommandError::connection)? {
         Some(mut existing)
             if existing.installation_id == engine.discovery.installation_id
@@ -15,6 +16,7 @@ pub(super) fn setup(
             // Pending identity and secret are durable before transport. Reuse
             // them exactly so a lost receipt can only replay the same request.
             existing.instance_id = engine.discovery.instance_id.clone();
+            reused = true;
             existing
         }
         Some(existing)
@@ -46,9 +48,7 @@ pub(super) fn setup(
             .supports_submission_access()
             .map_err(CommandError::connection)?;
     }
-    profile
-        .save(&credential)
-        .map_err(CommandError::connection)?;
+    save_before_enroll(&credential, reused, |record| profile.save(record))?;
     let receipt = if credential.submission_access {
         engine.enroll_submission(&credential)
     } else {
@@ -60,6 +60,29 @@ pub(super) fn setup(
         .save(&credential)
         .map_err(|error| enrollment_error(error, &credential))?;
     serde_json::to_value(receipt).map_err(|_| invalid_error())
+}
+
+/// Save the pending credential before enrollment. A credential retained from
+/// an earlier attempt may already have been enrolled, so its save failure is
+/// "acceptance unknown" (`CSD-05`); a fresh one keeps the connection mapping.
+pub(super) fn save_before_enroll(
+    credential: &ProfileCredential,
+    reused: bool,
+    save: impl FnOnce(&ProfileCredential) -> Result<(), ConnectionError>,
+) -> Result<(), CommandError> {
+    save(credential).map_err(|error| {
+        if !reused {
+            return CommandError::connection(error);
+        }
+        CommandError::recovery_save_failure(
+            RequestAcceptance::Unknown,
+            "An earlier enrollment may have committed, but its pending credential could not be saved",
+            serde_json::json!({
+                "client_id": credential.client_id,
+                "enrollment_id": credential.enrollment_id
+            }),
+        )
+    })
 }
 
 fn new_credential(

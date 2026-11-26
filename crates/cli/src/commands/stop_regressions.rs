@@ -58,7 +58,8 @@ fn confirmed_exit_with_a_receipt_survives_a_failed_local_save() {
     let mut record = pending(Some(receipt()));
     let error =
         record_confirmed_exit(&mut record, failed_save).expect_err("the save failure is reported");
-    assert_eq!(error.category, "storage_error");
+    assert_eq!(error.category, "recovery_storage_failed");
+    assert_eq!(error.exit_code, 19);
     let context = error.context.as_ref().expect("receipt context");
     assert_eq!(context.accepted, Some(serde_json::Value::Bool(true)));
     assert_eq!(
@@ -75,7 +76,8 @@ fn confirmed_exit_without_a_receipt_survives_a_failed_local_save() {
     let mut record = pending(None);
     let error =
         record_confirmed_exit(&mut record, failed_save).expect_err("the save failure is reported");
-    assert_eq!(error.category, "storage_error");
+    assert_eq!(error.category, "recovery_storage_failed");
+    assert_eq!(error.exit_code, 19);
     let context = error.context.as_ref().expect("process outcome context");
     assert_eq!(context.accepted, None, "acceptance stays unknown");
     let data = error_data(&error);

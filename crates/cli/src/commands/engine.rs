@@ -196,10 +196,16 @@ pub(super) fn stop(
         state: "pending".to_owned(),
     };
     // Persist the target and key before sending the mutation request. A retry
-    // can then only recover this exact operation for this exact process.
+    // can then only recover this exact operation for this exact process. A
+    // reused record's key may already have reached the engine (`CSD-05`).
+    let record = if reusable.is_some() {
+        StopRecord::PossiblySent
+    } else {
+        StopRecord::Fresh
+    };
     profile
         .save_pending_stop(&pending)
-        .map_err(|_| pending_stop_storage_error(&pending, false))?;
+        .map_err(|_| stop_record_storage_error(&pending, record, false))?;
     let process_watcher = ProcessWatcher::new(&process).map_err(|_| {
         pending
             .receipt
@@ -274,7 +280,9 @@ pub(super) fn record_confirmed_exit(
     save: impl FnOnce(&PendingStop) -> Result<(), ConnectionError>,
 ) -> Result<(), CommandError> {
     pending.state = "complete".to_owned();
-    save(pending).map_err(|_| pending_stop_storage_error(pending, true))
+    // Exit is only observed after a request was sent or a retained record was
+    // reused, so acceptance is at least unknown.
+    save(pending).map_err(|_| stop_record_storage_error(pending, StopRecord::PossiblySent, true))
 }
 
 fn pending_stop_data(pending: &PendingStop, process_exit_confirmed: bool) -> serde_json::Value {
@@ -309,27 +317,35 @@ pub(super) fn shutdown_transport_result(
         }))
 }
 
-fn pending_stop_storage_error(pending: &PendingStop, process_exit_confirmed: bool) -> CommandError {
+/// Whether a pending stop record's key may already have reached the engine.
+pub(super) enum StopRecord {
+    /// Created by this invocation; no request with its key was sent yet.
+    Fresh,
+    /// The request was sent, or the record was retained from an earlier attempt.
+    PossiblySent,
+}
+
+pub(super) fn stop_record_storage_error(
+    pending: &PendingStop,
+    record: StopRecord,
+    process_exit_confirmed: bool,
+) -> CommandError {
     match (&pending.operation_id, &pending.receipt) {
         (Some(operation_id), Some(receipt)) => shutdown_receipt_storage_error(
             operation_id.as_str().to_owned(),
             serde_json::to_value(receipt).unwrap_or(serde_json::Value::Null),
             process_exit_confirmed,
         ),
-        // No receipt is known: acceptance stays unknown, but the observed
-        // process outcome and the unsaved record are still reported.
-        _ => {
-            let mut error = CommandError::connection(ConnectionError::Storage);
-            error.context = Some(Box::new(CommandErrorContext {
-                data: Some(serde_json::json!({
-                    "process_exit_confirmed": process_exit_confirmed,
-                    "receipt_confirmed": false,
-                    "pending_record_saved": false
-                })),
-                ..Default::default()
-            }));
-            error
-        }
+        // No receipt is known. The observed process outcome and the unsaved
+        // record are still reported.
+        _ => CommandError::recovery_save_failure(
+            match record {
+                StopRecord::Fresh => RequestAcceptance::NotSent,
+                StopRecord::PossiblySent => RequestAcceptance::Unknown,
+            },
+            "A shutdown request may have been accepted, but its recovery record could not be saved",
+            serde_json::json!({ "process_exit_confirmed": process_exit_confirmed }),
+        ),
     }
 }
 
@@ -374,21 +390,16 @@ pub(super) fn shutdown_receipt_storage_error(
     operation: serde_json::Value,
     process_exit_confirmed: bool,
 ) -> CommandError {
-    CommandError {
-        category: "storage_error",
-        message: "Shutdown was accepted, but its recovery record could not be updated",
-        exit_code: 6,
-        context: Some(Box::new(CommandErrorContext {
-            accepted: Some(serde_json::Value::Bool(true)),
+    CommandError::recovery_save_failure(
+        RequestAcceptance::Accepted {
             operation_id: Some(operation_id),
-            raw_data: None,
-            data: Some(serde_json::json!({
-                "operation": operation,
-                "process_exit_confirmed": process_exit_confirmed,
-                "pending_record_saved": false
-            })),
-        })),
-    }
+        },
+        "Shutdown was accepted, but its recovery record could not be updated",
+        serde_json::json!({
+            "operation": operation,
+            "process_exit_confirmed": process_exit_confirmed
+        }),
+    )
 }
 
 fn new_stop_key() -> Result<IdempotencyKey, CommandError> {
@@ -406,6 +417,17 @@ fn new_stop_key() -> Result<IdempotencyKey, CommandError> {
     IdempotencyKey::parse(key).map_err(|_| invalid_error())
 }
 
+/// Fresh-record form used by the protected S-CR01-4 guard: a record created
+/// by this invocation that fails to save before its request is sent.
+#[cfg(test)]
+fn pending_stop_storage_error(pending: &PendingStop, process_exit_confirmed: bool) -> CommandError {
+    stop_record_storage_error(pending, StopRecord::Fresh, process_exit_confirmed)
+}
+
 #[cfg(test)]
 #[path = "stop_regressions.rs"]
 mod stop_regressions;
+
+#[cfg(test)]
+#[path = "exit_rule_regressions.rs"]
+mod exit_rule_regressions;

@@ -21,6 +21,10 @@ mod engine;
 use auth::*;
 use engine::*;
 
+#[cfg(test)]
+#[path = "commands/recovery_save_regressions.rs"]
+mod recovery_save_regressions;
+
 pub(crate) struct CommandError {
     pub(crate) category: &'static str,
     pub(crate) message: &'static str,
@@ -103,6 +107,67 @@ impl CommandError {
             },
         }
     }
+
+    /// The single `CSD-05` / `CT-CLI-SURFACE §4` rule for a failed save of local
+    /// recovery state (a pending record, receipt or credential). Every command
+    /// builds that failure here, so the exit `6` / exit `19` boundary is decided
+    /// in one place:
+    ///
+    /// - [`RequestAcceptance::NotSent`]: nothing can have been accepted, exit
+    ///   `6` `storage_error`.
+    /// - [`RequestAcceptance::Unknown`] or [`RequestAcceptance::Accepted`]:
+    ///   exit `19` `recovery_storage_failed` with `message`, `accepted`
+    ///   (`true`, or `null` when unknown) and the known `operation_id`.
+    ///
+    /// `data` is an object of command-specific facts (receipt, identities,
+    /// process outcome); `receipt_confirmed` and `pending_record_saved: false`
+    /// are added to it.
+    pub(crate) fn recovery_save_failure(
+        acceptance: RequestAcceptance,
+        message: &'static str,
+        data: serde_json::Value,
+    ) -> Self {
+        let (mut error, accepted, operation_id) = match acceptance {
+            RequestAcceptance::NotSent => (Self::connection(ConnectionError::Storage), None, None),
+            RequestAcceptance::Unknown => (Self::recovery_storage_failed(message), None, None),
+            RequestAcceptance::Accepted { operation_id } => (
+                Self::recovery_storage_failed(message),
+                Some(serde_json::Value::Bool(true)),
+                operation_id,
+            ),
+        };
+        let mut data = data;
+        data["receipt_confirmed"] = serde_json::Value::Bool(accepted.is_some());
+        data["pending_record_saved"] = serde_json::Value::Bool(false);
+        error.context = Some(Box::new(CommandErrorContext {
+            accepted,
+            operation_id,
+            data: Some(data),
+            raw_data: None,
+        }));
+        error
+    }
+
+    fn recovery_storage_failed(message: &'static str) -> Self {
+        Self {
+            category: "recovery_storage_failed",
+            message,
+            exit_code: 19,
+            context: None,
+        }
+    }
+}
+
+/// What the engine may know about a request whose local recovery state could
+/// not be saved (`CSD-05`).
+pub(crate) enum RequestAcceptance {
+    /// No request carrying this record's key was ever sent.
+    NotSent,
+    /// A request was sent without a receipt, or a record from an earlier
+    /// attempt is being reused, so its key may already have reached the engine.
+    Unknown,
+    /// The engine returned a receipt.
+    Accepted { operation_id: Option<String> },
 }
 
 pub(crate) fn engine(
@@ -302,20 +367,43 @@ pub(crate) fn auth(
             let receipt = tokio_runtime()
                 .block_on(client.revoke_self())
                 .map_err(revocation_error)?;
-            let mut stored = profile
-                .load()
-                .map_err(CommandError::connection)?
-                .ok_or_else(unauthorized)?;
-            if stored.client_id == receipt.client_id
-                && stored.installation_id == engine.discovery.installation_id
-            {
-                stored.state = "revoked".to_owned();
-                stored.secret_hex.clear();
-                profile.save(&stored).map_err(CommandError::connection)?;
-            }
+            record_revocation(
+                &receipt,
+                &engine.discovery.installation_id,
+                || profile.load(),
+                |stored| profile.save(stored),
+            )?;
             serde_json::to_value(receipt).map_err(|_| invalid_error())
         }
     }
+}
+
+/// Persist an accepted revocation. The engine already committed it, so a
+/// failure to reload or save the profile is `recovery_storage_failed`
+/// (`CSD-05`), never a missing prerequisite.
+fn record_revocation(
+    receipt: &dissect3d_api::RevocationReceipt,
+    installation_id: &dissect3d_api::InstallationId,
+    load: impl FnOnce() -> Result<Option<ProfileCredential>, ConnectionError>,
+    save: impl FnOnce(&ProfileCredential) -> Result<(), ConnectionError>,
+) -> Result<(), CommandError> {
+    let unsaved = || {
+        CommandError::recovery_save_failure(
+            RequestAcceptance::Accepted { operation_id: None },
+            "Revocation was accepted, but the local profile could not be updated",
+            serde_json::json!({
+                "client_id": receipt.client_id,
+                "revocation": receipt
+            }),
+        )
+    };
+    let mut stored = load().map_err(|_| unsaved())?.ok_or_else(unauthorized)?;
+    if stored.client_id == receipt.client_id && &stored.installation_id == installation_id {
+        stored.state = "revoked".to_owned();
+        stored.secret_hex.clear();
+        save(&stored).map_err(|_| unsaved())?;
+    }
+    Ok(())
 }
 
 fn data_root(config: &ConfigFile, config_path: &Path) -> Option<PathBuf> {
