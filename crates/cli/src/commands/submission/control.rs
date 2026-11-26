@@ -15,6 +15,18 @@ enum SubmissionSendState {
     Accepted(Box<AcceptanceReceipt>),
 }
 
+/// Error data for a known acceptance: the lossless receipt plus the additive
+/// recovery-save facts (`CSD-04`/`CSD-05`) the error already reported.
+#[derive(serde::Serialize)]
+struct KnownAcceptance<'a> {
+    #[serde(flatten)]
+    success: &'a super::SubmissionSuccess,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    receipt_confirmed: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pending_record_saved: Option<bool>,
+}
+
 pub(super) struct SubmissionControl {
     interrupted: Arc<AtomicBool>,
     state: RefCell<SubmissionSendState>,
@@ -182,8 +194,19 @@ impl SubmissionControl {
             error.exit_code = 19;
             let context = error.context.get_or_insert_with(Default::default);
             context.accepted = Some(serde_json::Value::Bool(true));
-            context.data = None;
-            context.raw_data = serde_json::value::to_raw_value(&data).ok();
+            let facts = context.data.take();
+            let fact = |key: &str| {
+                facts
+                    .as_ref()
+                    .and_then(|data| data.get(key))
+                    .and_then(serde_json::Value::as_bool)
+            };
+            let known = KnownAcceptance {
+                success: &data,
+                receipt_confirmed: fact("receipt_confirmed"),
+                pending_record_saved: fact("pending_record_saved"),
+            };
+            context.raw_data = serde_json::value::to_raw_value(&known).ok();
         } else if matches!(*self.state.borrow(), SubmissionSendState::RecoveryUnknown)
             && error.category != "recovery_identity_mismatch"
         {
@@ -211,6 +234,7 @@ impl Drop for SubmissionControl {
 mod tests {
     include!("numeric_regressions.rs");
     include!("coordination_control_regressions.rs");
+    include!("receipt_save_regressions.rs");
     use super::*;
     fn control() -> SubmissionControl {
         SubmissionControl {

@@ -457,15 +457,20 @@ async fn send_record(
         receipt: receipt.clone(),
     };
     if records.save_receipt(record, receipt).is_err() {
-        return Err(failure(
-            "recovery_storage_failed",
-            "The job was accepted, but its local receipt could not be saved",
-            19,
-            Some(true),
-            None,
-        ));
+        return Err(unsaved_receipt_error(&data));
     }
     Ok(data)
+}
+
+/// The engine accepted the job but its local receipt could not be saved
+/// (`CSD-05`, `CT-CLI-SURFACE §4` row 19): the shared recovery-save rule with
+/// the known `sub_id` and `job_id`.
+fn unsaved_receipt_error(data: &SubmissionSuccess) -> super::CommandError {
+    super::CommandError::recovery_save_failure(
+        super::RequestAcceptance::Accepted { operation_id: None },
+        "The job was accepted, but its local receipt could not be saved",
+        serde_json::json!({"sub_id": data.sub_id, "job_id": data.receipt.job_id}),
+    )
 }
 
 fn random_hex() -> Result<String, super::CommandError> {
