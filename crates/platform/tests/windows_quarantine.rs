@@ -1,4 +1,12 @@
 //! Windows quarantine moves one direct child without following or opening it.
+#![cfg_attr(
+    windows,
+    expect(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        reason = "integration test helpers; engineering.md Rule 6 permits unwrap in test setup"
+    )
+)]
 #![cfg(windows)]
 
 use dissect3d_platform::{OwnedRoot, PlatformError, RelativePath, RootPurpose};

@@ -24,10 +24,11 @@ pub(crate) fn random_id(prefix: &str) -> Result<String, CoreError> {
 
 #[cfg(unix)]
 pub(super) fn digest_hex(digest: &[u8; 32]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut encoded = String::with_capacity(64);
     for byte in digest {
-        use std::fmt::Write as _;
-        write!(encoded, "{byte:02x}").expect("writing to a String cannot fail");
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
     }
     encoded
 }

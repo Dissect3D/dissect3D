@@ -1,5 +1,11 @@
 //! Real CLI/native discovery/HTTPS against the normal engine composition.
 //! Faults are private per-root Rust-test latches, never public API operations.
+#![expect(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    reason = "Test-only module behind a compound cfg(all(test, ...)) gate that clippy test \
+              allowances do not recognize; Rule 6 permits unwrap in tests"
+)]
 
 #[path = "coordination_regressions.rs"]
 mod coordination_regressions;

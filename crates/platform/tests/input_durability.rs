@@ -1,3 +1,7 @@
+#![expect(
+    clippy::unwrap_used,
+    reason = "integration test helpers; engineering.md Rule 6 permits unwrap in test setup"
+)]
 use dissect3d_platform::{OwnedRoot, RelativePath, RootPurpose};
 use std::io::Read;
 

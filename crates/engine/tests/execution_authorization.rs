@@ -1,4 +1,8 @@
 //! Real native peer/channel regressions; no worker execution is activated.
+#![expect(
+    clippy::unwrap_used,
+    reason = "integration test helpers; engineering.md Rule 6 permits unwrap in test setup"
+)]
 use dissect3d_api::{ClientId, TokenDigest};
 use dissect3d_engine::{CorePolicy, Store, serve_bootstrap_once};
 use dissect3d_platform::{

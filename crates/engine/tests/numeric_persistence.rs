@@ -1,4 +1,9 @@
 //! Exercise the production typed JSON/TEXT codec without enabling numeric admission.
+#![expect(
+    clippy::disallowed_methods,
+    reason = "integration test helpers; engineering.md Rule 6 permits unwrap in test setup; \
+              direct SQLite opens inspect engine state from outside the store"
+)]
 use dissect3d_api::{AcceptanceReceipt, ResolvedJob, decode_submission_json};
 
 #[test]

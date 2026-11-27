@@ -1,3 +1,7 @@
+#![allow(
+    clippy::expect_used,
+    reason = "integration test helpers; engineering.md Rule 6 permits unwrap in test setup"
+)]
 use dissect3d_api::{ClientId, EnrollmentReceipt, TokenDigest, decode_json};
 use dissect3d_engine::{CorePolicy, Store, serve_bootstrap_once};
 use dissect3d_platform::{

@@ -1,4 +1,11 @@
 //! Native-only macOS candidate checks. Cross-checking does not execute these.
+#![cfg_attr(
+    target_os = "macos",
+    expect(
+        clippy::unwrap_used,
+        reason = "integration test helpers; engineering.md Rule 6 permits unwrap in test setup"
+    )
+)]
 #![cfg(target_os = "macos")]
 use dissect3d_platform::{CleanupFault, WorkerCommand, WorkerProcess};
 use std::time::{Duration, Instant};

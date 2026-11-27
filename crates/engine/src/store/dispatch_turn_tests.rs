@@ -1,6 +1,11 @@
 //! WE-P06/1 dispatch turns against the real Store: FIFO among eligible jobs,
 //! a blocked first job, atomic coordinated reservation, cancellation before
 //! dispatch and concurrent duplicate requests.
+#![expect(
+    clippy::unwrap_used,
+    reason = "Test-only module behind a compound cfg(all(test, ...)) gate that clippy test \
+              allowances do not recognize; Rule 6 permits unwrap in tests"
+)]
 use super::cleanup::AttemptRef;
 use super::finalize::AttemptFinalization;
 use super::launch_identity_tests::{evidence, record_launch};

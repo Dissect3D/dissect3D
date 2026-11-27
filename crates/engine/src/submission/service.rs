@@ -114,6 +114,12 @@ impl SubmissionService {
             .await?
             .ok_or_else(|| ErrorCode::IncompatibleContract.into())
     }
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "Intentional: the per-key gate (`_gate`) stays held across probe/fresh/probe so \
+                  same-key submissions are serialized; clippy reports it at the async body, so \
+                  the expectation cannot sit on the guard binding itself."
+    )]
     async fn submit_request(
         &self,
         auth: AuthContext,

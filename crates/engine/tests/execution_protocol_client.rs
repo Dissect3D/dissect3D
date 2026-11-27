@@ -1,4 +1,9 @@
 //! Scripted TLS peer tests the real API client transport, not engine activation.
+#![expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "integration test helpers; engineering.md Rule 6 permits unwrap in test setup"
+)]
 use dissect3d_api::*;
 use rcgen::{
     BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,

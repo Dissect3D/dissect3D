@@ -3,6 +3,11 @@
 //! intent, keeps an earlier user cancellation and queued work as they are,
 //! and is serialized with publication inside the Store. Restart after a
 //! barrier that no outcome followed records the shutdown, not a plain restart.
+#![expect(
+    clippy::unwrap_used,
+    reason = "Test-only module behind a compound cfg(all(test, ...)) gate that clippy test \
+              allowances do not recognize; Rule 6 permits unwrap in tests"
+)]
 use super::cleanup::AttemptRef;
 use super::execution_page_tests::reopen;
 use super::launch_identity::LaunchRecord;

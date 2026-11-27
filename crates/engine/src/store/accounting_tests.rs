@@ -1,6 +1,11 @@
 //! WE-P03 retained-history accounting (2026-11-17): terminal jobs free their
 //! queue slot but keep counting toward lifetime bindings and captured bytes, and
 //! replay stays usable at every growth-capacity edge for submission and retry.
+#![expect(
+    clippy::unwrap_used,
+    reason = "Test-only module behind a compound cfg(all(test, ...)) gate that clippy test \
+              allowances do not recognize; Rule 6 permits unwrap in tests"
+)]
 use super::retry_tests::{accept, authorize, canceled_source, prerequisites};
 use super::*;
 use crate::submission::SubmissionError;

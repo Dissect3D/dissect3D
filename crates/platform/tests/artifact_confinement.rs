@@ -1,5 +1,9 @@
 //! RP-P02/2: capture from a real per-attempt staging folder on the native
 //! filesystem. Every refusal must leave the outside world unread.
+#![expect(
+    clippy::unwrap_used,
+    reason = "integration test helpers; engineering.md Rule 6 permits unwrap in test setup"
+)]
 use dissect3d_platform::{
     ATTEMPT_ENTRIES_MAX, AttemptRoot, OwnedRoot, PlatformError, RelativePath, RootPurpose,
 };

@@ -1,3 +1,12 @@
+#![cfg_attr(
+    unix,
+    expect(
+        clippy::expect_used,
+        clippy::disallowed_methods,
+        reason = "integration test helpers; engineering.md Rule 6 permits unwrap in test setup; \
+                  direct SQLite opens inspect engine state from outside the store"
+    )
+)]
 #![cfg(unix)]
 
 use dissect3d_api::{

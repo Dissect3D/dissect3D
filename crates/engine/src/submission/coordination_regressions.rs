@@ -1,4 +1,9 @@
 //! Connected CLI coordination regressions; existing fault assertions are unchanged.
+#![expect(
+    clippy::unwrap_used,
+    reason = "Test-only module behind a compound cfg(all(test, ...)) gate that clippy test \
+              allowances do not recognize; Rule 6 permits unwrap in tests"
+)]
 use super::*;
 
 async fn observer(host: &Host) -> (PathBuf, Client) {

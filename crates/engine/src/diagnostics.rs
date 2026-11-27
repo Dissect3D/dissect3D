@@ -233,7 +233,9 @@ pub(crate) fn record_startup_failure(root: &OwnedRoot, error: crate::StartupErro
 
 #[cfg(unix)]
 pub(crate) fn record_job_recovery_failure(root: &OwnedRoot) {
-    let path = RelativePath::parse("run/job-recovery.json").expect("fixed private path");
+    let Ok(path) = RelativePath::parse("run/job-recovery.json") else {
+        return;
+    };
     let record = serde_json::json!({"timestamp_ms":timestamp_ms(),"phase":"job_recovery","code":"store_unavailable"});
     if let Ok(bytes) = serde_json::to_vec(&record) {
         let _ = root.write_atomic(&path, &bytes);

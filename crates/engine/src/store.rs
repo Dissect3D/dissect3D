@@ -447,12 +447,20 @@ impl Store {
         .ok_or_else(|| dissect3d_api::ErrorCode::StoreUnavailable.into())
     }
     #[cfg(all(unix, test, feature = "test-support"))]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "cfg(test)-only helper; tests may unwrap setup"
+    )]
     pub(crate) fn set_test_job_limits(&self, limits: admission::AcceptanceLimits) {
         self.request(|reply| Command::JobLimits(limits, reply))
             .unwrap();
     }
 
     #[cfg(all(unix, test, feature = "test-support"))]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "cfg(test)-only helper; tests may unwrap setup"
+    )]
     pub(crate) fn accept_job_without_reply(
         &self,
         auth: AuthContext,

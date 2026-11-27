@@ -1,6 +1,13 @@
 //! Windows keeps an exited process object alive while any handle to it remains
 //! open (for example, an antivirus scanner or indexer holding a query handle).
 //! `process_matches` must report such an exited process as absent, never live.
+#![cfg_attr(
+    windows,
+    expect(
+        clippy::unwrap_used,
+        reason = "integration test helpers; engineering.md Rule 6 permits unwrap in test setup"
+    )
+)]
 #![cfg(windows)]
 
 use dissect3d_platform::{

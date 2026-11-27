@@ -5,6 +5,11 @@
 //! On Linux the guardian must already be built
 //! (`cargo build -p dissect3d-platform --bins`). Evidence is WSL2/ext4 or the
 //! host it ran on; it is not native acceptance of another platform.
+#![expect(
+    clippy::unwrap_used,
+    reason = "Test-only module behind a compound cfg(all(test, ...)) gate that clippy test \
+              allowances do not recognize; Rule 6 permits unwrap in tests"
+)]
 use super::execution_controller_tests::{
     Faults, Shared, accept as accept_r1, facts, result_rows, terminal_within,
 };

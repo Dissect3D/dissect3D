@@ -1,4 +1,9 @@
 //! Real protected files/leases; transport closures establish ordering only.
+#![expect(
+    clippy::unwrap_used,
+    reason = "Test-only module behind a compound cfg(all(test, ...)) gate that clippy test \
+              allowances do not recognize; Rule 6 permits unwrap in tests"
+)]
 use super::*;
 fn ids() -> (InstallationId, ClientId) {
     (

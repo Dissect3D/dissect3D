@@ -1,5 +1,10 @@
 //! Opt-in raw SQLite WAL `synchronous=FULL` commit-latency probe. It measures the
 //! storage stack only, not Store admission, and prints JSON without asserting time.
+#![expect(
+    clippy::disallowed_methods,
+    reason = "Opt-in probe measures raw SQLite commit latency on a scratch file, so it must \
+              bypass the store; production opens only via store/schema.rs"
+)]
 use rusqlite::Connection;
 use std::time::{Duration, Instant};
 

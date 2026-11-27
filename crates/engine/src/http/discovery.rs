@@ -361,11 +361,11 @@ fn model_selection(
     {
         return Err(DiscoveryError::InvalidRequest);
     }
-    if task_id.is_none() {
+    // Both are present or both absent after the pairing check above.
+    let (Some(task_id), Some(task_version)) = (task_id, task_version) else {
         return Ok(None);
-    }
-    let task = TaskKey::new(task_id.unwrap(), task_version.unwrap())
-        .map_err(|_| DiscoveryError::InvalidRequest)?;
+    };
+    let task = TaskKey::new(task_id, task_version).map_err(|_| DiscoveryError::InvalidRequest)?;
     if runtime_ref.is_some_and(|value| !valid_runtime_selector(value))
         || variant.is_some_and(|value| !valid_name(value))
     {

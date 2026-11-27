@@ -1,6 +1,11 @@
 //! WE-P05/3 preparation of the r2 package: install, contained probe,
 //! activation, re-verification on load, refusal of tampering and reuse, and a
 //! real supervised attempt by the installed worker (copy into staging).
+#![expect(
+    clippy::unwrap_used,
+    reason = "Test-only module behind a compound cfg(all(test, ...)) gate that clippy test \
+              allowances do not recognize; Rule 6 permits unwrap in tests"
+)]
 use super::preparation::{PreparedExecutionFixture, WorkerLaunch, load, prepare};
 use super::{
     ADAPTER_ID, ADAPTER_REVISION, FEATURES, FixtureParameters, OUTPUT_NAME, STAGES, sha256_hex,

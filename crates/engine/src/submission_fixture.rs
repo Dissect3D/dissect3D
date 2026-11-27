@@ -513,6 +513,10 @@ pub(crate) fn load_prepared_fixture(
 /// Install and re-verify the exact controlled package for internal admission
 /// tests without exposing fixture package composition to production callers.
 #[cfg(all(unix, test, feature = "test-support"))]
+#[expect(
+    clippy::expect_used,
+    reason = "test-support fixture; never in production builds"
+)]
 pub(crate) fn verified_fixture_for_admission(root: &OwnedRoot) -> PreparedFixture {
     root.ensure_private_directory(&relative(PACKAGE_DIR).expect("fixture package path"))
         .expect("create fixture package directory");

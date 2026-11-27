@@ -1,3 +1,7 @@
+#![allow(
+    clippy::expect_used,
+    reason = "integration test helpers; engineering.md Rule 6 permits unwrap in test setup"
+)]
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};

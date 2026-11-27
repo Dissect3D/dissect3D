@@ -1,3 +1,10 @@
+#![cfg_attr(
+    unix,
+    expect(
+        clippy::unwrap_used,
+        reason = "integration test helpers; engineering.md Rule 6 permits unwrap in test setup"
+    )
+)]
 #![cfg(unix)]
 
 use dissect3d_platform::{OwnedRoot, RelativePath, RootPurpose};

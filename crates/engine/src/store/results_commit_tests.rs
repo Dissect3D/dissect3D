@@ -1,5 +1,10 @@
 //! RP-P03/1-/3 and /5: the authoritative publication transaction through the
 //! real Store actor and a genuinely dispatched, launched attempt.
+#![expect(
+    clippy::unwrap_used,
+    reason = "Test-only module behind a compound cfg(all(test, ...)) gate that clippy test \
+              allowances do not recognize; Rule 6 permits unwrap in tests"
+)]
 use super::cleanup::AttemptRef;
 use super::launch_identity_tests::{evidence, launched};
 use super::results_commit::{CommitOutcome, CommitRefusal, CommittedFile, PublicationCommit};

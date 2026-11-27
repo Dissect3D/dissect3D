@@ -414,15 +414,14 @@ fn stage3_preflight(
         Some(Command::Jobs {
             command: JobsCommand::Recover { sub_id },
         }) => {
-            if dissect3d_api::SubmissionId::parse(sub_id.clone()).is_err() {
+            let Ok(id) = dissect3d_api::SubmissionId::parse(sub_id.clone()) else {
                 return Some(failure(
                     "jobs recover",
                     "usage_error",
                     "Submission ID is invalid.",
                     2,
                 ));
-            }
-            let id = dissect3d_api::SubmissionId::parse(sub_id.clone()).unwrap();
+            };
             let result = (|| {
                 let profile = submissions::SubmissionRecords::open_existing(config_path)?;
                 let records = submissions::SubmissionRecords::lock(&profile)?;

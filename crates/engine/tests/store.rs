@@ -1,3 +1,8 @@
+#![allow(
+    clippy::disallowed_methods,
+    reason = "integration test helpers; direct SQLite access plants or inspects store state for \
+              tests"
+)]
 use dissect3d_api::{ClientId, EnrollmentId, TokenDigest};
 use dissect3d_engine::{CoreError, CorePolicy, Store, VerifiedEnrollment};
 use dissect3d_platform::{AuthorityLease, OwnedRoot, RootPurpose, current_owner_identity};

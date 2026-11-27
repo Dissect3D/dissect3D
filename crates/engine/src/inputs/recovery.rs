@@ -122,25 +122,24 @@ async fn audit_owned_files(
         if *done {
             continue;
         }
-        if scan.is_none() {
-            let path = match RelativePath::parse(directory) {
-                Ok(path) => path,
-                Err(error) => return Err(crate::CoreError::Platform(error)),
-            };
-            match root.scan_owned_inputs(&path) {
-                Ok(opened) => *scan = Some(opened),
-                Err(PlatformError::NotFound) => {
-                    *done = true;
-                    continue;
+        let scan = match scan {
+            Some(scan) => scan,
+            None => {
+                let path = match RelativePath::parse(directory) {
+                    Ok(path) => path,
+                    Err(error) => return Err(crate::CoreError::Platform(error)),
+                };
+                match root.scan_owned_inputs(&path) {
+                    Ok(opened) => scan.insert(opened),
+                    Err(PlatformError::NotFound) => {
+                        *done = true;
+                        continue;
+                    }
+                    Err(error) => return Err(crate::CoreError::Platform(error)),
                 }
-                Err(error) => return Err(crate::CoreError::Platform(error)),
             }
-        }
-        let batch = match scan
-            .as_mut()
-            .expect("scan initialized")
-            .next_batch(remaining)
-        {
+        };
+        let batch = match scan.next_batch(remaining) {
             Ok(batch) => batch,
             Err(error) => return Err(crate::CoreError::Platform(error)),
         };
@@ -310,6 +309,11 @@ mod tests {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "Recovery tests open the SQLite file directly to plant states the store API cannot \
+              express; production opens only via store/schema.rs"
+)]
 mod failure_tests {
     use super::*;
 
@@ -373,6 +377,11 @@ mod failure_tests {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "Recovery tests open the SQLite file directly to plant states the store API cannot \
+              express; production opens only via store/schema.rs"
+)]
 mod publication_recovery_tests {
     use super::*;
     use crate::VerifiedEnrollment;

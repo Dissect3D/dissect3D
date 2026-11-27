@@ -1,3 +1,7 @@
+#![expect(
+    clippy::unwrap_used,
+    reason = "integration test helpers; engineering.md Rule 6 permits unwrap in test setup"
+)]
 use dissect3d_api::{decode_result_manifest, validate_result_filename};
 use serde_json::{Value, json};
 fn example() -> Value {

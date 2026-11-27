@@ -1,0 +1,29 @@
+# Clippy configuration for the codex-derived lint guardrails denied in the
+# root Cargo.toml [workspace.lints.clippy] table.
+
+allow-expect-in-tests = true
+allow-unwrap-in-tests = true
+
+# Async lock guards must not be held across `.await` unless a local, reasoned
+# `#[expect(clippy::await_holding_invalid_type, ...)]` documents why.
+await-holding-invalid-types = [
+    "tokio::sync::MutexGuard",
+    "tokio::sync::OwnedMutexGuard",
+    "tokio::sync::RwLockReadGuard",
+    "tokio::sync::RwLockWriteGuard",
+    "tokio::sync::OwnedRwLockReadGuard",
+    "tokio::sync::OwnedRwLockWriteGuard",
+]
+
+# Audited against rusqlite =0.41.0 with features bundled, backup, limits.
+# Revisit this list when bumping rusqlite.
+disallowed-methods = [
+    { path = "rusqlite::Connection::open", reason = "Open SQLite only through the store actor (store/schema.rs)" },
+    { path = "rusqlite::Connection::open_with_flags", reason = "Open SQLite only through the store actor (store/schema.rs)" },
+    { path = "rusqlite::Connection::open_with_flags_and_vfs", reason = "Open SQLite only through the store actor (store/schema.rs)" },
+    { path = "rusqlite::Connection::open_in_memory", reason = "Open SQLite only through the store actor (store/schema.rs)" },
+    { path = "rusqlite::Connection::open_in_memory_with_flags", reason = "Open SQLite only through the store actor (store/schema.rs)" },
+    { path = "rusqlite::Connection::open_in_memory_with_flags_and_vfs", reason = "Open SQLite only through the store actor (store/schema.rs)" },
+    { path = "rusqlite::Connection::from_handle", reason = "Open SQLite only through the store actor (store/schema.rs)" },
+    { path = "rusqlite::Connection::from_handle_owned", reason = "Open SQLite only through the store actor (store/schema.rs)" },
+]

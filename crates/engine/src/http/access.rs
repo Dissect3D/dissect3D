@@ -788,6 +788,11 @@ fn error_message(code: ErrorCode) -> &'static str {
     }
 }
 
+#[expect(
+    clippy::expect_used,
+    reason = "The fallback is a fixed literal in the corr_ + 32 lowercase hex grammar that \
+              CorrelationId::parse accepts; dissect3d-api exposes no infallible constructor."
+)]
 fn correlation_id() -> CorrelationId {
     let mut random = [0_u8; 16];
     if getrandom::fill(&mut random).is_ok() {

@@ -7,6 +7,16 @@
 //! any dispatch. The explicit host binary covers death during execution and
 //! signal shutdown (`execution_restart_tests`). Evidence is the host it ran on
 //! (WSL2/ext4 here); it is not native acceptance on another platform.
+#![expect(
+    clippy::unwrap_used,
+    reason = "Test-only module behind a compound cfg(all(test, ...)) gate that clippy test \
+              allowances do not recognize; Rule 6 permits unwrap in tests"
+)]
+#![expect(
+    clippy::disallowed_methods,
+    reason = "Fault and migration tests open the SQLite file directly to plant or inspect states \
+              the store API cannot express; production opens only via store/schema.rs"
+)]
 use super::cleanup::AttemptRef;
 use super::fixture_attempts_tests::{accept_r2, worker_launch};
 use super::launch_identity::{LaunchRecord, decode, encode};

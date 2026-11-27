@@ -359,6 +359,11 @@ where
     Ok((writer, digest.finalize().into()))
 }
 
+#[expect(
+    clippy::expect_used,
+    reason = "InputId is validated as inp_ + 32 lowercase hex, always one safe path component; \
+              failing after the reservation commit would bypass its cleanup path."
+)]
 fn stage_path(reservation: &UploadReservation) -> RelativePath {
     RelativePath::parse(format!(
         "inputs/staging/{}.part",
@@ -366,6 +371,11 @@ fn stage_path(reservation: &UploadReservation) -> RelativePath {
     ))
     .expect("generated input ID is a safe path component")
 }
+#[expect(
+    clippy::expect_used,
+    reason = "InputId is validated as inp_ + 32 lowercase hex, always one safe path component; \
+              failing after the reservation commit would bypass its cleanup path."
+)]
 fn final_path(reservation: &UploadReservation) -> RelativePath {
     RelativePath::parse(format!("inputs/data/{}.bin", reservation.input_id.as_str()))
         .expect("generated input ID is a safe path component")

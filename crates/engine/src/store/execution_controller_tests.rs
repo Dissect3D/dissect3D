@@ -5,6 +5,11 @@
 //!
 //! The worker is the in-memory fake (codec/legality only, not a process or
 //! cleanup proof); publication, finalization and dispatch are the real ones.
+#![expect(
+    clippy::unwrap_used,
+    reason = "Test-only module behind a compound cfg(all(test, ...)) gate that clippy test \
+              allowances do not recognize; Rule 6 permits unwrap in tests"
+)]
 use super::results::{PublicationReservation, ReclaimBatch};
 use super::results_commit::{CommitOutcome, PublicationCommit, PublicationReceipt};
 use super::retry_tests::{authorize, db};

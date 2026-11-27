@@ -1,5 +1,10 @@
 //! Real loopback HTTPS + SQLite Store + OwnedRoot tests for `RP-P04`
 //! (`RP-S09`, `RP-S10`, `RP-S11`, `RP-S12`, `RP-S16`, `RP-S18`).
+#![expect(
+    clippy::disallowed_methods,
+    reason = "Fault and migration tests open the SQLite file directly to plant or inspect states \
+              the store API cannot express; production opens only via store/schema.rs"
+)]
 
 use crate::{CorePolicy, HttpServer, Store, serve_bootstrap_once};
 use dissect3d_api::{

@@ -1,6 +1,11 @@
 //! WE-P04 launch-identity record and release-time identity check
 //! (2026-11-19). Dispatch stays inactive; identities and evidence come from
 //! the test constructors, as a launch and its native witness would report them.
+#![expect(
+    clippy::unwrap_used,
+    reason = "Test-only module behind a compound cfg(all(test, ...)) gate that clippy test \
+              allowances do not recognize; Rule 6 permits unwrap in tests"
+)]
 use super::cleanup::{AttemptRef, CleanupEvidence, CleanupOutcome, CleanupReport, test_identity};
 use super::execution_page_tests::reopen;
 use super::finalize::AttemptFinalization;

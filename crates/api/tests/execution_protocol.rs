@@ -1,3 +1,7 @@
+#![expect(
+    clippy::unwrap_used,
+    reason = "integration test helpers; engineering.md Rule 6 permits unwrap in test setup"
+)]
 use dissect3d_api::*;
 
 const REQUEST: &str = r#"{"api_version":"1.0","support_ref":"test.mesh-copy@fixture-r2","task":{"id":"dissect3d.test.mesh-copy","version":"1.0"},"inputs":{"mesh":[{"input_id":"inp_11111111111111111111111111111111"}]},"parameters":{"n":1.00000000000000000000001},"required_features":["job_execution.we-0.1"],"evaluation_consent":false}"#;

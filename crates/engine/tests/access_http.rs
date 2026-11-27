@@ -1,3 +1,9 @@
+#![allow(
+    clippy::expect_used,
+    clippy::disallowed_methods,
+    reason = "integration test helpers; direct SQLite access plants or inspects store state for \
+              tests; engineering.md Rule 6 permits unwrap in test setup"
+)]
 use dissect3d_api::{
     ApiError, AuthStatus, Client, ClientError, ClientId, ClientLimits, ConnectionMaterial,
     EnrollmentId, ErrorCode, IdempotencyKey, OperationReceipt, OperationSnapshot, OperationTarget,

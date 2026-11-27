@@ -6,6 +6,16 @@
 //! known secret, so this checks routes and authorization, not native
 //! enrollment (the CLI's `auth setup --execution-access` is WE-P08). Evidence
 //! is the host it ran on (WSL2/ext4 here), not native acceptance elsewhere.
+#![expect(
+    clippy::unwrap_used,
+    reason = "Test-only module behind a compound cfg(all(test, ...)) gate that clippy test \
+              allowances do not recognize; Rule 6 permits unwrap in tests"
+)]
+#![expect(
+    clippy::disallowed_methods,
+    reason = "Fault and migration tests open the SQLite file directly to plant or inspect states \
+              the store API cannot express; production opens only via store/schema.rs"
+)]
 use super::fixture_attempts_tests::worker_launch;
 use super::*;
 use crate::execution::controller::{ExecutionDependencies, ExecutionLimits, start};

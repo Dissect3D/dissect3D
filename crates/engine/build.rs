@@ -12,6 +12,10 @@
 //! deliberate: any change to these crates changes the identity (fails closed).
 //! Like Cargo's own fingerprints this identifies the build inputs; it is not a
 //! reproducible-build proof.
+#![expect(
+    clippy::expect_used,
+    reason = "build script: a panic is Cargo's build-failure report and fails the build closed"
+)]
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 

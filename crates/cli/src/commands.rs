@@ -451,6 +451,12 @@ fn engine_binary(config: &ConfigFile) -> Option<PathBuf> {
     candidate.is_file().then_some(candidate)
 }
 
+#[expect(
+    clippy::expect_used,
+    reason = "Pre-existing abort, kept unchanged: a current-thread runtime fails to build only when \
+              the OS refuses its I/O driver, before any request is sent; reporting that through a \
+              public error category is an unmade CLI contract decision."
+)]
 fn tokio_runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()

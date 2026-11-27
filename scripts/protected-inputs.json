@@ -10,6 +10,26 @@
     "copied": "2026-11-26, copied from the record; not recomputed from the working tree",
     "additions": {
       "crates/cli/src/commands/exit_rule_regressions.rs": "CR-CS-01 (CSD-05), accepted 2026-11-27; SHA-256 of the CRLF form of the bytes committed in cdba375, computed 2026-11-27"
+    },
+    "revisions": {
+      "codex-lint-guardrails": {
+        "accepted": "2026-11-27, one-time change authorized by the maintainer",
+        "change": "each listed file gained exactly one inserted inner #![allow(clippy::..., reason = \"...\")] attribute naming only the lints it triggers; the reason keeps only matching clauses of \"integration test helpers; direct SQLite access plants or inspects store state for tests; engineering.md Rule 6 permits unwrap in test setup\" (the SQLite clause only where clippy::disallowed_methods is listed); no other bytes changed",
+        "files": [
+          "crates/cli/tests/core_service.rs",
+          "crates/cli/tests/core_service_windows.rs",
+          "crates/cli/tests/offline.rs",
+          "crates/cli/tests/support_discovery.rs",
+          "crates/connection/tests/discovery.rs",
+          "crates/engine/tests/access_http.rs",
+          "crates/engine/tests/bootstrap.rs",
+          "crates/engine/tests/shutdown_boundaries.rs",
+          "crates/engine/tests/signal_shutdown.rs",
+          "crates/engine/tests/store.rs",
+          "crates/platform/tests/authority.rs"
+        ],
+        "hashes": "SHA-256 of the CRLF form, computed 2026-11-27"
+      }
     }
   },
   "line_endings": "SHA-256 of the CRLF bytes that .gitattributes (text eol=crlf) checks out on every OS",
@@ -19,19 +39,19 @@
     "crates/api/tests/types.rs": "3bf9b63a5f62355884adc791bf6a3f02d814184ecc307f1cdf0bcf12201c80e8",
     "crates/cli/src/commands/exit_rule_regressions.rs": "7655aedef9e5f8ae37016c60357a1c14dc86f0b1a0b848069634027fa9399aec",
     "crates/cli/tests/audit_limits.rs": "8f44a26c60c0bed39f9bd1463b6c8de5b8b929c6a086c73f74fc57c0a55f9031",
-    "crates/cli/tests/core_service.rs": "8bad2bce4fab3f0aeeed17b71e076b7524b5fa9dd1c44842396fd7614c9eb221",
-    "crates/cli/tests/core_service_windows.rs": "ce35582cf41dc9386ba64cd8b22ac3be6071beff9f65439f40bfb053894d5d15",
-    "crates/cli/tests/offline.rs": "352fc963ce9b22fab01acfe07b69c0c5aad2c6ea49508e65c06b20b38c2b6ea9",
-    "crates/cli/tests/support_discovery.rs": "c7ead3d4e5ac75aeb1bed0d1559b42eac1d3b63d2b0ade686389917a97f0b7d0",
-    "crates/connection/tests/discovery.rs": "b15f42ddb85671d64bacb16b3f8aea249c302657fabae1e19cb3764c6b47938a",
-    "crates/engine/tests/access_http.rs": "2ddf8bd0f88adf566d64a9f6ef520ac71f538c7e0557c4e0a01a994ab6005c7a",
-    "crates/engine/tests/bootstrap.rs": "029b0d1fe00660d67e1094327513edbd4f2adccb3bdc8733133c192a4ccb0653",
-    "crates/engine/tests/shutdown_boundaries.rs": "67babc6a7a142fdcbf219f6f312c0a2018022e08a7d9a8ce401ccb92c2d22d0d",
-    "crates/engine/tests/signal_shutdown.rs": "132fe63f6eb3b98855bbc71d6363550ddfb61765b5d809f5737b67d09ccf3183",
-    "crates/engine/tests/store.rs": "042a08f6ba1f0c72244b092f432e4cb198c395c98db2b7cd2d8578454c58937d",
+    "crates/cli/tests/core_service.rs": "bcee6f5151a0dc0d2bfc8387fba5a8a4f2f96e43a0b87df609c8fcf80dc7f1ab",
+    "crates/cli/tests/core_service_windows.rs": "5e219f188a1caa7a349e5b7eeb0ae3525ee252b8ce567ea0c2ac60c05991d1c5",
+    "crates/cli/tests/offline.rs": "d7f258d7d2c2de8b5244a32a8376509f97d47ddfdf4e457db81b7162048e1460",
+    "crates/cli/tests/support_discovery.rs": "f147e6cef354407c972dde5f32917eea6c42ac3297a13af3f4560802f200f03a",
+    "crates/connection/tests/discovery.rs": "24ba1956300710fb36d14441af392c206a74b8c363cd063c8d5d54b96abf3bdd",
+    "crates/engine/tests/access_http.rs": "23a27cc21529725bb6203287d1eaba95c1cbcef2f5933230c068828dd978c6fa",
+    "crates/engine/tests/bootstrap.rs": "817df8dfed4d19c936ab5c018b7338aeb375153fb6269e106a5d20b623b6a6e8",
+    "crates/engine/tests/shutdown_boundaries.rs": "8f2c23024fcf59db65e86a1c49336942c7157d1f275576228d62f21b0b9ef6a7",
+    "crates/engine/tests/signal_shutdown.rs": "faea87678f94a5979e68ee0d4a8703ecb153d4f701d20baaad292a13fead5b8a",
+    "crates/engine/tests/store.rs": "db05d6f60bd54ff7212ea2b5d2ea22ba96ee8a8dc713d0751fb521508ef45b5c",
     "crates/platform/tests/atomic_recovery.rs": "ddb97561ad99d286cae26d2d3aee5a1afe53b9b024e144e9e0ac5364f93094a0",
     "crates/platform/tests/audit_regressions.rs": "f41b3d1b7e904ae2de167cf09b23da5ea81b41922767a0fdccace6396c0ad7a7",
-    "crates/platform/tests/authority.rs": "d61c42990880b289d4cbd455f2299d047d461a34f38b8fbe57728663b8c37fa0",
+    "crates/platform/tests/authority.rs": "14967ef0471691b123ad15ad0c1ae4aec9a3814e10dbb1516ba7b755e830519e",
     "crates/platform/tests/bootstrap_peer.rs": "2b6929e8deb9cadcb6e8158acde03e5a9f51f85da68711ed4cd35955413c61f6",
     "crates/platform/tests/bootstrap_peer_windows.rs": "266fc30a7d825b0c267aa67e0c1adc79d6f9e9ceef8ac2321a788d65cb4e064c",
     "crates/platform/tests/native_cancellation.rs": "4922789efa41dbc97dc779f9fda614320f660ecb39271c7dafadde398ab38eef",

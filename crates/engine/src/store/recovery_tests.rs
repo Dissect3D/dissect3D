@@ -1,5 +1,10 @@
 //! WE-P07/4 restart reconciliation (user decision 2026-11-24): attempts of a
 //! dead engine instance, their recorded launch identities and real processes.
+#![expect(
+    clippy::unwrap_used,
+    reason = "Test-only module behind a compound cfg(all(test, ...)) gate that clippy test \
+              allowances do not recognize; Rule 6 permits unwrap in tests"
+)]
 use super::cleanup::AttemptRef;
 #[cfg(target_os = "linux")]
 use super::cleanup::test_identity;

@@ -1,3 +1,8 @@
+#![expect(
+    clippy::disallowed_methods,
+    reason = "Fault and migration tests open the SQLite file directly to plant or inspect states \
+              the store API cannot express; production opens only via store/schema.rs"
+)]
 use super::*;
 
 fn memory_store() -> Connection {

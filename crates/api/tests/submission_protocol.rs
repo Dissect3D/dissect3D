@@ -1,3 +1,7 @@
+#![expect(
+    clippy::expect_used,
+    reason = "integration test helpers; engineering.md Rule 6 permits unwrap in test setup"
+)]
 use dissect3d_api::{
     EngineInfo, InputId, JobRequest, SubmissionId, SubmissionValue, decode_job_request,
     decode_json, decode_submission_json, encode_job_request,

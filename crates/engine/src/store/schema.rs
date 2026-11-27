@@ -7,6 +7,10 @@ fn protected_sqlite_open_flags() -> OpenFlags {
     OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "The single sanctioned SQLite open; every other connection goes through this store."
+)]
 pub(super) fn open_internal_database(path: &Path) -> Result<Connection, CoreError> {
     Connection::open_with_flags(path, protected_sqlite_open_flags())
         .map_err(|_| CoreError::StoreUnavailable)

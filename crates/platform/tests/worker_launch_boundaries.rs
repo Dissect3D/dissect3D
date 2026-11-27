@@ -1,4 +1,12 @@
 //! Deterministic native handoffs; developer feature is absent from normal builds.
+#![cfg_attr(
+    all(feature = "native-test-hooks", any(windows, target_os = "linux")),
+    expect(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        reason = "integration test helpers; engineering.md Rule 6 permits unwrap in test setup"
+    )
+)]
 #![cfg(all(feature = "native-test-hooks", any(windows, target_os = "linux")))]
 use dissect3d_platform::native_test_hooks::{Action, Event, Stage, with_hook};
 use dissect3d_platform::{

@@ -1,5 +1,10 @@
 //! WE-P03 cleanup-witness transitions at the Store seam (2026-11-18). Dispatch
 //! stays inactive; confirmed evidence comes only from the test-only constructor.
+#![expect(
+    clippy::unwrap_used,
+    reason = "Test-only module behind a compound cfg(all(test, ...)) gate that clippy test \
+              allowances do not recognize; Rule 6 permits unwrap in tests"
+)]
 use super::cleanup::{AttemptRef, CleanupOutcome, CleanupReceipt, CleanupReport};
 use super::execution_page_tests::reopen;
 use super::launch_identity_tests::{evidence, launched};

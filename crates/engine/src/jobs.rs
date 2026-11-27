@@ -122,12 +122,15 @@ impl JobsService {
             let entries = tokio::task::spawn_blocking(move || store.job_audit_batch(cursor))
                 .await
                 .map_err(|_| SubmissionError::from(ErrorCode::StoreUnavailable))??;
-            if entries.is_empty() {
+            let Some(last) = entries.last() else {
                 return Ok(());
-            }
-            after = entries.last().unwrap().id.as_str().to_owned();
+            };
+            after = last.id.as_str().to_owned();
             let mut entries = entries.into_iter();
-            let a = entries.next().unwrap();
+            // Non-empty: `last` exists, so the first entry does too.
+            let Some(a) = entries.next() else {
+                return Ok(());
+            };
             let b = entries.next();
             let (first, second) = tokio::join!(verify_input(self.root.clone(), a), async {
                 match b {
@@ -155,7 +158,10 @@ async fn verify_input(
     let Some(identity) = entry.identity else {
         return (id, false);
     };
-    let path = RelativePath::parse(format!("inputs/data/{}.bin", id.as_str())).unwrap();
+    // Unreachable for a validated InputId; fails closed like the open/read errors below.
+    let Ok(path) = RelativePath::parse(format!("inputs/data/{}.bin", id.as_str())) else {
+        return (id, false);
+    };
     let opened = tokio::task::spawn_blocking(move || {
         #[cfg(test)]
         crate::submission::test_support::for_root(root.path()).audit();

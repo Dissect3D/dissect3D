@@ -1,5 +1,10 @@
 //! WE-P04 Store finalization and observation writers (2026-11-18). Dispatch
 //! stays inactive; confirmed evidence comes only from the test constructor.
+#![expect(
+    clippy::unwrap_used,
+    reason = "Test-only module behind a compound cfg(all(test, ...)) gate that clippy test \
+              allowances do not recognize; Rule 6 permits unwrap in tests"
+)]
 use super::cleanup::{AttemptRef, CleanupOutcome, CleanupReport};
 use super::execution_page_tests::reopen;
 use super::finalize::{AttemptFinalization, AttemptObservation, FinalizationPath};

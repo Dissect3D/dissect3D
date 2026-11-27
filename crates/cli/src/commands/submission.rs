@@ -133,7 +133,8 @@ impl LocalDefinition {
     }
 
     fn validate_selected_task(&self, task: SubmittedTask) -> Result<(), DefinitionError> {
-        let placeholder = InputId::parse(format!("inp_{}", "0".repeat(32))).unwrap();
+        let placeholder =
+            InputId::parse(format!("inp_{}", "0".repeat(32))).map_err(|_| DefinitionError)?;
         let request = self.request(
             task,
             self.inputs

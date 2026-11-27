@@ -1,4 +1,14 @@
 //! Deterministic handoff regressions; no protected oracle or assertion is changed.
+#![expect(
+    clippy::unwrap_used,
+    reason = "Test-only module behind a compound cfg(all(test, ...)) gate that clippy test \
+              allowances do not recognize; Rule 6 permits unwrap in tests"
+)]
+#![expect(
+    clippy::disallowed_methods,
+    reason = "Fault and migration tests open the SQLite file directly to plant or inspect states \
+              the store API cannot express; production opens only via store/schema.rs"
+)]
 use super::*;
 use crate::submission::equivalence::SubmittedJobRequest;
 use dissect3d_api::*;

@@ -1,3 +1,7 @@
+#![allow(
+    clippy::expect_used,
+    reason = "integration test helpers; engineering.md Rule 6 permits unwrap in test setup"
+)]
 use std::fs;
 use std::process::{Child, Command};
 use std::thread;

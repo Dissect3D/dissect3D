@@ -46,6 +46,10 @@ pub fn decode_execution_local_request(
     {
         return Err(SubmissionDecodeError::InvalidRequest);
     }
+    // The constraint check needs only the reference shape, so every local
+    // path maps to one canonical placeholder ID (parsed once; it always parses).
+    let placeholder = crate::InputId::parse("inp_00000000000000000000000000000000")
+        .map_err(|_| SubmissionDecodeError::InvalidRequest)?;
     let mut references = BTreeMap::new();
     for (role, inputs) in &request.inputs {
         if inputs.iter().any(|i| !bounded(&i.path, 32768)) {
@@ -56,8 +60,7 @@ pub fn decode_execution_local_request(
             inputs
                 .iter()
                 .map(|_| crate::InputRef {
-                    input_id: crate::InputId::parse("inp_00000000000000000000000000000000")
-                        .expect("literal ID"),
+                    input_id: placeholder.clone(),
                 })
                 .collect(),
         );

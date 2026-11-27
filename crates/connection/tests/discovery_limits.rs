@@ -5,6 +5,10 @@
 //! Each record carries a non-loopback `base_url`, so a record that is read
 //! and decoded fails validation as `InvalidDiscovery` before any process or
 //! native probe. A record refused at the read never reaches validation.
+#![expect(
+    clippy::expect_used,
+    reason = "integration test helpers; engineering.md Rule 6 permits unwrap in test setup"
+)]
 use dissect3d_api::{
     BootstrapAddress, DiscoveryRecord, InstallationId, InstanceId, MAX_DISCOVERY_BYTES,
     ProcessReference,

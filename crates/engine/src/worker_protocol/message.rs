@@ -25,6 +25,12 @@ fn is_sha256(value: &str) -> bool {
 fn bounded(value: &str, max: usize) -> bool {
     !value.is_empty() && value.chars().count() <= max
 }
+#[expect(
+    clippy::expect_used,
+    reason = "Deliberate pre-existing fail-closed abort: a failed OS random source must not yield \
+              a predictable message or command identity; returning an error instead would turn it \
+              into a supervised protocol failure, a behavior change."
+)]
 pub(crate) fn random_id(prefix: &str) -> String {
     let mut bytes = [0u8; 16];
     // A failed OS source must not produce a predictable correlation identity.

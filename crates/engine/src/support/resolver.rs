@@ -74,6 +74,11 @@ pub(super) fn resolve(
     }
 
     let code = &model.declaration["code"];
+    #[expect(
+        clippy::expect_used,
+        reason = "Catalog declarations are schema-validated at load (code.patches is an array), \
+                  like the string fields read by string() below."
+    )]
     let code_identity = CodeIdentity {
         upstream_repository: string(&code["upstream_repository"], "code.upstream_repository"),
         upstream_revision: string(&code["upstream_revision"], "code.upstream_revision"),
@@ -101,6 +106,11 @@ pub(super) fn resolve(
             "adapter.required_worker_features",
         ),
     };
+    #[expect(
+        clippy::expect_used,
+        reason = "Catalog declarations are schema-validated at load (assets is an array and each \
+                  byte_length an unsigned integer), like the string fields read by string()."
+    )]
     let assets = model.declaration["assets"]
         .as_array()
         .expect("validated support assets are an array")

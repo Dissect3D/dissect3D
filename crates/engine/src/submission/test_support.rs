@@ -1,4 +1,8 @@
 //! Private per-root fault latches, compiled only into Rust test binaries.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test-support fixture; never in production builds"
+)]
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

@@ -1,4 +1,11 @@
 //! Supplementary WE-P02 regressions; these do not activate engine dispatch.
+#![cfg_attr(
+    any(windows, target_os = "linux"),
+    expect(
+        clippy::unwrap_used,
+        reason = "integration test helpers; engineering.md Rule 6 permits unwrap in test setup"
+    )
+)]
 #![cfg(any(windows, target_os = "linux"))]
 
 use dissect3d_platform::{

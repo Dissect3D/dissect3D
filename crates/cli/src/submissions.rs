@@ -175,7 +175,7 @@ impl<'a> SubmissionRecords<'a> {
             return Err(RecordError::Invalid);
         }
         let path = RelativePath::parse(format!("submission-locks/{}.lock", record.sub_id.as_str()))
-            .unwrap();
+            .map_err(|_| RecordError::Invalid)?;
         // Never wait here: receipt saving holds a record lease before the profile
         // lease. Nonblocking acquisition prevents the reverse-order deadlock.
         let lease = AuthorityLease::acquire_at(self.profile.root(), &path).map_err(|error| {
@@ -224,7 +224,7 @@ impl<'a> SubmissionRecords<'a> {
         let bytes = self
             .profile
             .root()
-            .read_file(&record_path(sub_id), MAX_RECORD_BYTES)
+            .read_file(&record_path(sub_id)?, MAX_RECORD_BYTES)
             .map_err(|error| {
                 if error == PlatformError::NotFound {
                     RecordError::Missing
@@ -237,7 +237,7 @@ impl<'a> SubmissionRecords<'a> {
 
     fn scan(&self) -> Result<(Vec<SubmissionId>, u64), RecordError> {
         let root = self.profile.root();
-        let directory = RelativePath::parse("submissions").unwrap();
+        let directory = RelativePath::parse("submissions").map_err(|_| RecordError::Storage)?;
         let mut scan = match root.scan_owned_inputs(&directory) {
             Ok(scan) => scan,
             Err(PlatformError::NotFound) => return Ok((Vec::new(), 0)),
@@ -342,7 +342,7 @@ impl<'a> SubmissionRecords<'a> {
         check_capacity(ids.len(), existing_bytes, bytes.len(), replacing)?;
         self.profile
             .root()
-            .write_recovery_record(&record_path(&record.sub_id), &bytes)
+            .write_recovery_record(&record_path(&record.sub_id)?, &bytes)
             .map_err(|_| RecordError::Storage)
     }
 }
@@ -363,8 +363,9 @@ fn is_atomic_temporary(name: &str) -> bool {
             .is_ok_and(|n| n.to_string() == counter)
 }
 
-fn record_path(id: &SubmissionId) -> RelativePath {
-    RelativePath::parse(format!("submissions/{}.json", id.as_str())).unwrap()
+fn record_path(id: &SubmissionId) -> Result<RelativePath, RecordError> {
+    RelativePath::parse(format!("submissions/{}.json", id.as_str()))
+        .map_err(|_| RecordError::Invalid)
 }
 
 fn check_capacity(

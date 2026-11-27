@@ -1,6 +1,11 @@
 //! WE-P03 creator-scoped execution pages and the legacy-list guard (2026-11-17).
 //! Dispatch stays inactive; non-queued states come from the private dispatch and
 //! cancellation seams, and other-creator rows from isolated SQL setup.
+#![expect(
+    clippy::unwrap_used,
+    reason = "Test-only module behind a compound cfg(all(test, ...)) gate that clippy test \
+              allowances do not recognize; Rule 6 permits unwrap in tests"
+)]
 use super::retry_tests::{accept, authorize, canceled_source, db, dispatch, prerequisites};
 use super::*;
 use crate::submission::SubmissionError;

@@ -8,6 +8,11 @@
 //! record, rebuilt, rewritten or run as another attempt. Reclamation and the
 //! audit never follow a damaged reference out of the owned root. HTTP
 //! status mapping is RP-P04/3.
+#![expect(
+    clippy::unwrap_used,
+    reason = "Test-only module behind a compound cfg(all(test, ...)) gate that clippy test \
+              allowances do not recognize; Rule 6 permits unwrap in tests"
+)]
 use super::publication_crash_tests::publication_job;
 use super::results::FileRole;
 use super::results_commit::CommittedFile;

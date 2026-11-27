@@ -12,6 +12,15 @@ version = "0.1.0-dev"
 unsafe_op_in_unsafe_fn = "deny"
 unused_must_use = "deny"
 
+# Codex-derived guardrails (patompong-docs/docs/engineering.md, Reference
+# codebases -> codex-main; Project Rules 5-6). Configuration in clippy.toml.
+[workspace.lints.clippy]
+await_holding_invalid_type = "deny"
+await_holding_lock = "deny"
+disallowed_methods = "deny"
+expect_used = "deny"
+unwrap_used = "deny"
+
 
 # Debug test workers hash their own large unoptimized binary before `hello`;
 # optimized sha2 keeps that well inside the 10 s handshake bound (WE-P06/3).

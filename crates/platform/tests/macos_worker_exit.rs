@@ -4,6 +4,13 @@
 //! and the guardian reported FAULT even though nothing forked. These cases end
 //! with the worker already exited; a fork still forbids a closure witness.
 //! Native-only: cross-checking compiles this target empty.
+#![cfg_attr(
+    target_os = "macos",
+    expect(
+        clippy::unwrap_used,
+        reason = "integration test helpers; engineering.md Rule 6 permits unwrap in test setup"
+    )
+)]
 #![cfg(target_os = "macos")]
 use dissect3d_platform::{CleanupFault, WorkerCommand, WorkerProcess, wait_for_process_exit};
 use std::time::{Duration, Instant};

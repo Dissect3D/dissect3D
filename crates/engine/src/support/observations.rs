@@ -279,6 +279,11 @@ pub(crate) fn for_model_binding(
         _ => (None, None),
     };
     let evidence = model_evidence(model);
+    #[expect(
+        clippy::expect_used,
+        reason = "Catalog validation admits tested profiles only without numeric fields, so \
+                  serializing one into serde_json::Value cannot fail."
+    )]
     let tested_profiles = model.declaration["tested_profiles"]
         .as_array()
         .into_iter()

@@ -3,6 +3,11 @@
 //! Kept beside the Store because the timing record and the actor pause hook are
 //! crate-private; the proposed `tests/attempt_deadline.rs` target would need new
 //! public hooks. Dispatch stays inactive outside tests.
+#![expect(
+    clippy::unwrap_used,
+    reason = "Test-only module behind a compound cfg(all(test, ...)) gate that clippy test \
+              allowances do not recognize; Rule 6 permits unwrap in tests"
+)]
 use super::cleanup::AttemptRef;
 use super::execution_page_tests::reopen;
 use super::finalize::AttemptFinalization;

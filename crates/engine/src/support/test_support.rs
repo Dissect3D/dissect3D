@@ -1,4 +1,8 @@
 //! Synthetic declarations are compiled only into the isolated discovery test host.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test-support fixture; never in production builds"
+)]
 
 use super::{Catalog, CatalogError, ControlledPackage, DiscoveryLimits};
 

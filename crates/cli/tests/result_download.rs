@@ -1,5 +1,9 @@
 //! CLI surface, argument validation, offline error handling, and exit-code
 //! contract tests for `results` and `storage` commands (`RP-P05`, `CT-CLI-SURFACE`).
+#![expect(
+    clippy::expect_used,
+    reason = "integration test helpers; engineering.md Rule 6 permits unwrap in test setup"
+)]
 
 use serde_json::Value;
 use std::fs;

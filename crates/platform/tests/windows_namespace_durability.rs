@@ -2,6 +2,14 @@
 //!
 //! Process exit and handle reopen are exercised here; physical power loss is a
 //! separate open gate and is never implied by these tests.
+#![cfg_attr(
+    windows,
+    expect(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        reason = "integration test helpers; engineering.md Rule 6 permits unwrap in test setup"
+    )
+)]
 #![cfg(windows)]
 
 use dissect3d_platform::{OwnedRoot, PlatformError, RelativePath, RootPurpose};

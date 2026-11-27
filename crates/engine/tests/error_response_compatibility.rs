@@ -1,3 +1,8 @@
+#![expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "integration test helpers; engineering.md Rule 6 permits unwrap in test setup"
+)]
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 

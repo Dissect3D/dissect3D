@@ -1,3 +1,7 @@
+#![expect(
+    clippy::expect_used,
+    reason = "integration test helpers; engineering.md Rule 6 permits unwrap in test setup"
+)]
 use dissect3d_api::{
     Client, ClientError, ClientId, ClientLimits, ConnectionMaterial, ErrorCode, InstallationId,
     InstanceId, SecretToken,

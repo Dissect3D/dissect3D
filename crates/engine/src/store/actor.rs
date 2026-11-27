@@ -339,23 +339,19 @@ pub(super) fn actor(
                     stopping,
                     fail_commit,
                 );
-                if result.as_ref().is_ok_and(|receipt| {
-                    matches!(
-                        receipt.state,
+                if let Ok(accepted) = &result
+                    && matches!(
+                        accepted.state,
                         OperationState::Queued | OperationState::Running
                     )
-                }) {
+                {
                     stopping = true;
                     stopping_flag.store(true, Ordering::Release);
-                    if let Ok(accepted) = &result {
-                        let _ =
-                            mark_shutdown_running(&mut connection, accepted.operation_id.as_str());
-                    }
+                    let _ = mark_shutdown_running(&mut connection, accepted.operation_id.as_str());
                     // This is emitted after request_shutdown commits. Replayed
                     // queued intent re-arms coordination if an earlier wakeup
                     // was delayed or consumed during coordinator startup.
                     if let Some(shutdown) = &shutdown {
-                        let accepted = result.as_ref().expect("queued shutdown result");
                         let _ = mark_shutdown_quiescing(
                             &mut connection,
                             accepted.operation_id.as_str(),

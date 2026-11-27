@@ -1,3 +1,7 @@
+#![allow(
+    clippy::expect_used,
+    reason = "integration test helpers; engineering.md Rule 6 permits unwrap in test setup"
+)]
 #![cfg(windows)]
 
 use serde_json::Value;
