@@ -5,6 +5,7 @@
 
 mod artifact_files;
 mod client_output;
+mod console;
 mod files;
 mod identity;
 mod input_files;
@@ -26,6 +27,7 @@ pub use artifact_files::{
 pub use client_output::{
     ClientOutputDirectory, ClientOutputError, OutputFilename, StagedOutputFile,
 };
+pub use console::enable_console_ctrl_c;
 pub use files::{RelativePath, SafeFileMetadata, open_config_lock, open_regular_file};
 pub use identity::{OwnerIdentity, current_owner_identity};
 pub use input_files::{

@@ -213,6 +213,7 @@ async fn submit_inner(
     config_path: &Path,
     limits: dissect3d_api::ClientLimits,
     control: &SubmissionControl,
+    prefetched_info: Option<dissect3d_api::EngineInfo>,
 ) -> Result<SubmissionSuccess, super::CommandError> {
     use crate::submissions::{PendingSubmission, SubmissionRecords};
     use dissect3d_api::{
@@ -248,7 +249,10 @@ async fn submit_inner(
     let client = engine.client(credential).map_err(before_connection_error)?;
     {
         control.checkpoint().await?;
-        let info = client.info().await.map_err(before_client_error)?;
+        let info = match prefetched_info {
+            Some(info) => info,
+            None => client.info().await.map_err(before_client_error)?,
+        };
         require_operations(&info)?;
         let mut model_selector = definition.model.clone();
         let declared = if definition.task.is_none() {
@@ -366,15 +370,19 @@ async fn submit_inner(
     }
 }
 
-pub(crate) fn submit(
+pub(crate) fn submit_with_info(
     args: JobDefinitionArgs,
     config: &crate::config::ConfigFile,
     path: &Path,
     limits: dissect3d_api::ClientLimits,
+    prefetched_info: Option<dissect3d_api::EngineInfo>,
 ) -> Result<SubmissionSuccess, super::CommandError> {
     let runtime = super::tokio_runtime();
     let (control, signal) = SubmissionControl::new(&runtime)?;
-    runtime.block_on(control.run(signal, submit_inner(args, config, path, limits, &control)))
+    runtime.block_on(control.run(
+        signal,
+        submit_inner(args, config, path, limits, &control, prefetched_info),
+    ))
 }
 
 pub(crate) fn recover(

@@ -94,6 +94,9 @@ pub(crate) struct RunArgs {
     /// Save completed foreground outputs to an explicit local directory.
     #[arg(long, value_name = "DIR", conflicts_with = "detach")]
     pub(crate) output: Option<std::path::PathBuf>,
+    /// Stop observing after MS milliseconds without canceling the job (1,000..=86,400,000).
+    #[arg(long = "observe-timeout-ms", value_name = "MS")]
+    pub(crate) observe_timeout_ms: Option<String>,
     #[command(flatten)]
     pub(crate) definition: JobDefinitionArgs,
 }
@@ -147,6 +150,29 @@ pub(crate) enum JobsCommand {
     },
     /// Inspect one accepted job.
     Show { job_id: String },
+    /// Observe an accepted job until it ends (observation-only; Ctrl+C never cancels).
+    Watch {
+        job_id: String,
+        /// Stop observing after MS milliseconds without canceling the job (1,000..=86,400,000).
+        #[arg(long = "observe-timeout-ms", value_name = "MS")]
+        observe_timeout_ms: Option<String>,
+    },
+    /// Wait for an accepted job to finish and reflect its terminal outcome in the exit code.
+    Wait {
+        job_id: String,
+        /// Stop waiting after MS milliseconds without canceling the job (1,000..=86,400,000).
+        #[arg(long = "observe-timeout-ms", value_name = "MS")]
+        observe_timeout_ms: Option<String>,
+    },
+    /// Request cancellation of an accepted job without fabricating cleanup completion.
+    Cancel { job_id: String },
+    /// Explicitly create a new linked job retrying a terminal job's exact inputs and configuration.
+    Retry {
+        job_id: String,
+        /// Use this stable key to recover the same retry request.
+        #[arg(long = "idempotency-key", value_name = "KEY")]
+        idempotency_key: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]

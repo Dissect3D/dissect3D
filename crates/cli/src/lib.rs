@@ -291,6 +291,66 @@ pub fn run() -> i32 {
                 }
             }
         }
+        Some(Command::Jobs {
+            command:
+                JobsCommand::Watch {
+                    job_id,
+                    observe_timeout_ms,
+                },
+        }) => run_observe_command(
+            "jobs watch",
+            commands::job_outcome::Promise::Watch,
+            commands::observe::run_observe(
+                job_id,
+                observe_timeout_ms,
+                &config,
+                &config_path,
+                client_limits,
+            ),
+            json_output,
+        ),
+        Some(Command::Jobs {
+            command:
+                JobsCommand::Wait {
+                    job_id,
+                    observe_timeout_ms,
+                },
+        }) => run_observe_command(
+            "jobs wait",
+            commands::job_outcome::Promise::Wait,
+            commands::observe::run_observe(
+                job_id,
+                observe_timeout_ms,
+                &config,
+                &config_path,
+                client_limits,
+            ),
+            json_output,
+        ),
+        Some(Command::Jobs {
+            command: JobsCommand::Cancel { job_id },
+        }) => run_connected_command(
+            "jobs cancel",
+            commands::job_control::cancel(job_id, &config, &config_path, client_limits),
+            json_output,
+        ),
+        Some(Command::Jobs {
+            command:
+                JobsCommand::Retry {
+                    job_id,
+                    idempotency_key,
+                },
+        }) => run_connected_command(
+            "jobs retry",
+            commands::job_control::retry(
+                job_id,
+                idempotency_key,
+                &config,
+                &config_path,
+                client_limits,
+            ),
+            json_output,
+        ),
         Some(Command::Results { command }) => match command {
             ResultsCommand::List { limit, cursor } => {
                 match commands::results::list(limit, cursor, &config, &config_path, client_limits) {
@@ -391,8 +451,20 @@ pub fn run() -> i32 {
                 run_connected_command::<serde_json::Value>("storage show", Err(error), json_output)
             }
         },
-        Some(Command::Run(_)) => {
-            unreachable!("Stage 3 commands are returned by the preflight gate")
+        Some(Command::Run(args)) => {
+            match commands::foreground::run_foreground(args, &config, &config_path, client_limits) {
+                Ok(result) => {
+                    if output::render_checked(&result.outcome, json_output).is_err()
+                        && result.exit_code == 0
+                    {
+                        return 19;
+                    }
+                    result.exit_code
+                }
+                Err(error) => {
+                    run_connected_command::<serde_json::Value>("run", Err(error), json_output)
+                }
+            }
         }
         None => {
             let outcome = CommandOutcome::failure(
@@ -423,18 +495,20 @@ fn stage3_preflight(
     };
     match command {
         Some(Command::Run(args)) => {
+            if let Some(raw) = args.observe_timeout_ms.as_deref()
+                && let Err(error) = commands::observe::ObserveTimeout::parse(raw)
+            {
+                return Some(failure(
+                    "run",
+                    error.category,
+                    error.message,
+                    error.exit_code,
+                ));
+            }
             if let Some(code) =
                 commands::execution::preflight_definition("run", &args.definition, json)
             {
                 return Some(code);
-            }
-            if !args.detach {
-                return Some(failure(
-                    "run",
-                    "operation_unavailable",
-                    "Foreground run is not implemented; no input will be uploaded or accepted.",
-                    5,
-                ));
             }
             None
         }
@@ -473,7 +547,108 @@ fn stage3_preflight(
         Some(Command::Jobs {
             command: JobsCommand::List { .. } | JobsCommand::Show { .. },
         }) => None,
+        Some(Command::Jobs {
+            command:
+                JobsCommand::Watch {
+                    job_id,
+                    observe_timeout_ms,
+                },
+        }) => preflight_observe("jobs watch", job_id, observe_timeout_ms.as_deref(), json),
+        Some(Command::Jobs {
+            command:
+                JobsCommand::Wait {
+                    job_id,
+                    observe_timeout_ms,
+                },
+        }) => preflight_observe("jobs wait", job_id, observe_timeout_ms.as_deref(), json),
+        Some(Command::Jobs {
+            command: JobsCommand::Cancel { job_id },
+        }) => {
+            if dissect3d_api::JobId::parse(job_id.clone()).is_err() {
+                return Some(failure(
+                    "jobs cancel",
+                    "usage_error",
+                    "Job ID is invalid",
+                    2,
+                ));
+            }
+            None
+        }
+        Some(Command::Jobs {
+            command:
+                JobsCommand::Retry {
+                    job_id,
+                    idempotency_key,
+                },
+        }) => {
+            if dissect3d_api::JobId::parse(job_id.clone()).is_err() {
+                return Some(failure("jobs retry", "usage_error", "Job ID is invalid", 2));
+            }
+            if let Some(key) = idempotency_key
+                && dissect3d_api::IdempotencyKey::parse(key).is_err()
+            {
+                return Some(failure(
+                    "jobs retry",
+                    "usage_error",
+                    "Idempotency key is invalid",
+                    2,
+                ));
+            }
+            None
+        }
         _ => None,
+    }
+}
+
+fn preflight_observe(
+    command: &str,
+    job_id: &str,
+    observe_timeout_ms: Option<&str>,
+    json: bool,
+) -> Option<i32> {
+    if dissect3d_api::JobId::parse(job_id.to_owned()).is_err() {
+        let outcome = CommandOutcome::failure_with_context(
+            command,
+            ErrorInfo::new("usage_error", "Job ID is invalid"),
+            Some(serde_json::Value::Bool(false)),
+            None,
+            None,
+        );
+        render(&outcome, json);
+        return Some(2);
+    }
+    if let Some(raw) = observe_timeout_ms
+        && let Err(error) = commands::observe::ObserveTimeout::parse(raw)
+    {
+        let outcome = CommandOutcome::failure_with_context(
+            command,
+            ErrorInfo::new(error.category, error.message),
+            Some(serde_json::Value::Bool(false)),
+            None,
+            None,
+        );
+        render(&outcome, json);
+        return Some(error.exit_code);
+    }
+    None
+}
+
+fn run_observe_command(
+    command: &str,
+    promise: commands::job_outcome::Promise,
+    result: Result<commands::observe::ObserveEnd, commands::CommandError>,
+    json_output: bool,
+) -> i32 {
+    match result {
+        Ok(end) => {
+            let code = commands::job_outcome::exit_code(promise, &end);
+            let outcome = commands::job_outcome::render_outcome(command, promise, &end);
+            if output::render_checked(&outcome, json_output).is_err() && code == 0 {
+                return 19;
+            }
+            code
+        }
+        Err(error) => run_connected_command::<serde_json::Value>(command, Err(error), json_output),
     }
 }
 

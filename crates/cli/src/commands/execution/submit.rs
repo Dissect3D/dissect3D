@@ -3,8 +3,8 @@
 
 use super::request::ExecutionRequest;
 use super::{
-    ExecutionMode, detect_mode, execution_client_error, execution_send_error,
-    operation_unavailable, require_execution_ops, usage_error,
+    ExecutionMode, detect_mode, detect_mode_with_info, execution_client_error,
+    execution_send_error, operation_unavailable, require_execution_ops, usage_error,
 };
 use crate::args::JobDefinitionArgs;
 use crate::commands::{
@@ -80,7 +80,7 @@ pub(crate) fn submit_or_stage3(
         .map_err(CommandError::connection)?;
 
     let runtime = tokio_runtime();
-    let mode = runtime.block_on(detect_mode(&client))?;
+    let (mode, core_info) = runtime.block_on(detect_mode_with_info(&client))?;
     match mode {
         ExecutionMode::Stage3 => {
             if requires_execution {
@@ -88,7 +88,13 @@ pub(crate) fn submit_or_stage3(
                     "Execution-aware submission requires an engine advertising job_execution",
                 ));
             }
-            let result = super::super::submission::submit(args, config, config_path, limits)?;
+            let result = super::super::submission::submit_with_info(
+                args,
+                config,
+                config_path,
+                limits,
+                Some(core_info),
+            )?;
             serde_json::to_value(result).map_err(|_| super::super::invalid_error())
         }
         ExecutionMode::Negotiated {
@@ -439,6 +445,11 @@ fn preserve_stage3_recovery_status(
     receipt: Option<&dissect3d_api::AcceptanceReceipt>,
 ) -> CommandError {
     if let Some(receipt) = receipt {
+        if error.category == "submission_uncertain" {
+            error.category = "recovery_confirmation_failed";
+            error.message = "Job acceptance is known; the confirmation response was unavailable";
+        }
+        error.exit_code = 19;
         let data = super::super::submission::SubmissionSuccess {
             sub_id: Some(sub_id.clone()),
             receipt: receipt.clone(),

@@ -3,7 +3,11 @@
 
 pub(crate) mod discovery;
 pub(crate) mod execution;
+pub(crate) mod foreground;
+pub(crate) mod job_control;
+pub(crate) mod job_outcome;
 pub(crate) mod jobs;
+pub(crate) mod observe;
 pub(crate) mod results;
 pub(crate) mod submission;
 

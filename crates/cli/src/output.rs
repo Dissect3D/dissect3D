@@ -102,6 +102,11 @@ impl CommandOutcome {
         self
     }
 
+    pub(crate) fn with_accepted(mut self, accepted: serde_json::Value) -> Self {
+        self.accepted = Some(accepted);
+        self
+    }
+
     pub(crate) fn failure(command: &str, error: ErrorInfo) -> Self {
         Self {
             cli_output_version: "1.0",
@@ -137,6 +142,11 @@ impl CommandOutcome {
 
 pub(crate) fn render(outcome: &CommandOutcome, json: bool) {
     let _ = render_checked(outcome, json);
+}
+
+pub(crate) fn write_stderr_line(line: &str) {
+    use std::io::Write;
+    let _ = writeln!(std::io::stderr().lock(), "{}", safe_terminal_text(line));
 }
 
 pub(crate) fn render_checked(outcome: &CommandOutcome, json: bool) -> std::io::Result<()> {

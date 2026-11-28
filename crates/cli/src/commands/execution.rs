@@ -4,6 +4,10 @@
 pub(crate) mod request;
 pub(crate) mod submit;
 
+#[cfg(test)]
+#[path = "execution/retry_save_regressions.rs"]
+mod retry_save_regressions;
+
 use crate::args::JobDefinitionArgs;
 use crate::commands::{CommandError, CommandErrorContext};
 use dissect3d_api::{
@@ -21,17 +25,27 @@ pub(crate) enum ExecutionMode {
 
 /// Probe `/v1/info` once and select negotiated `we-0.1` or legacy Stage 3 mode.
 pub(crate) async fn detect_mode(client: &Client) -> Result<ExecutionMode, CommandError> {
+    let (mode, _) = detect_mode_with_info(client).await?;
+    Ok(mode)
+}
+
+/// Probe `/v1/info` once and return both the selected mode and the core
+/// `EngineInfo` so Stage 3 fallback does not repeat the initial `/v1/info` call.
+pub(crate) async fn detect_mode_with_info(
+    client: &Client,
+) -> Result<(ExecutionMode, dissect3d_api::EngineInfo), CommandError> {
     let info = client
         .execution_info()
         .await
         .map_err(execution_client_error)?;
-    match info.job_execution {
-        Some(capability) => Ok(ExecutionMode::Negotiated {
+    let mode = match info.job_execution {
+        Some(capability) => ExecutionMode::Negotiated {
             capability,
-            granted_operations: info.core.granted_operations,
-        }),
-        None => Ok(ExecutionMode::Stage3),
-    }
+            granted_operations: info.core.granted_operations.clone(),
+        },
+        None => ExecutionMode::Stage3,
+    };
+    Ok((mode, info.core))
 }
 
 /// Verify both engine capability and credential grants before opening inputs or
@@ -274,10 +288,14 @@ pub(crate) fn execution_send_error(
                 }
                 ErrorCode::PersistenceUnavailable
                 | ErrorCode::StorageUnavailable
-                | ErrorCode::StoreUnavailable
-                | ErrorCode::EngineStopping => (
+                | ErrorCode::StoreUnavailable => (
+                    "storage_unavailable",
+                    "The engine could not complete the request because storage is unavailable",
+                    7,
+                ),
+                ErrorCode::EngineStopping => (
                     "engine_unavailable",
-                    "The engine could not complete the request because storage or service is unavailable",
+                    "The engine is stopping and could not complete the request",
                     3,
                 ),
                 _ => (
