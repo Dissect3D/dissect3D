@@ -55,7 +55,7 @@ dissect3d-engine ──▶ dissect3d-api, dissect3d-platform
 | `dissect3d-platform` | `crates/platform/` | Operating-system boundary: owned root and files, durable writes, authority lease, private bootstrap IPC, process lifetime, worker containment and restart reconciliation of a previous engine's worker by verified identity (`reconcile_survivors`). All `unsafe` and native flag handling lives here, in per-OS modules (`windows.rs`, `worker/linux.rs`, `worker/macos.rs`, ...). Also builds the `dissect3d-worker-guardian` helper binary. It has no project dependencies. |
 | `dissect3d-connection` | `crates/connection/` | Engine discovery validation, process identity checks and native readiness probes shared by the CLI and engine test hosts. |
 | `dissect3d-engine` | `crates/engine/` | The engine library and the `dissect3d-engine` binary: access control, HTTP service, durable store, submission, execution supervision and result publication. |
-| `dissect3d-cli` | `crates/cli/` | The `dissect3d` command-line client: argument parsing, profiles and configuration, connection setup and output rendering. |
+| `dissect3d-cli` | `crates/cli/` | The `dissect3d` command-line client: argument parsing, profiles and configuration, connection setup (including native execution authorization in `connection/execution.rs`), pending recovery records (`submissions.rs`, `submissions/execution.rs`), command handlers (`commands/{auth,authorize,discovery,engine,execution,jobs,results,submission}.rs`, with `commands/execution/{request,submit}.rs`), and output rendering. |
 
 Feature flags:
 

@@ -9,12 +9,19 @@ fn main() {
         usage();
         return;
     }
-    let mut values = std::collections::BTreeMap::new();
     let mut rest = args.iter();
-    if rest.next().and_then(|c| c.to_str()) != Some("prepare") {
-        usage();
-        std::process::exit(2);
+    match rest.next().and_then(|c| c.to_str()) {
+        Some("prepare") => run_prepare(rest),
+        Some("write-provider-fixture") => run_write_provider_fixture(rest),
+        _ => {
+            usage();
+            std::process::exit(2);
+        }
     }
+}
+
+fn run_prepare(mut rest: std::slice::Iter<'_, std::ffi::OsString>) {
+    let mut values = std::collections::BTreeMap::new();
     while let Some(flag) = rest.next() {
         let (Some(flag), Some(value)) = (flag.to_str(), rest.next()) else {
             usage();
@@ -40,8 +47,51 @@ fn main() {
     }
 }
 
+fn run_write_provider_fixture(mut rest: std::slice::Iter<'_, std::ffi::OsString>) {
+    let mut values = std::collections::BTreeMap::new();
+    while let Some(flag) = rest.next() {
+        let (Some(flag), Some(value)) = (flag.to_str(), rest.next()) else {
+            usage();
+            std::process::exit(2);
+        };
+        let value = PathBuf::from(value);
+        if !matches!(
+            flag,
+            "--data-root" | "--config-a" | "--config-b" | "--cli" | "--output"
+        ) || !value.is_absolute()
+            || values.insert(flag.to_owned(), value).is_some()
+        {
+            usage();
+            std::process::exit(2);
+        }
+    }
+    let (Some(root), Some(config_a), Some(config_b), Some(cli), Some(output)) = (
+        values.get("--data-root"),
+        values.get("--config-a"),
+        values.get("--config-b"),
+        values.get("--cli"),
+        values.get("--output"),
+    ) else {
+        usage();
+        std::process::exit(2);
+    };
+    #[cfg(unix)]
+    if let Err(error) =
+        dissect3d_engine::write_execution_provider_fixture(root, config_a, config_b, cli, output)
+    {
+        eprintln!("execution fixture tool failed: {}", error.safe_code());
+        std::process::exit(1);
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (root, config_a, config_b, cli, output);
+        eprintln!("write-provider-fixture is supported only on Unix/WSL2");
+        std::process::exit(2);
+    }
+}
+
 fn usage() {
     println!(
-        "Usage: execution_fixture_tool prepare --data-root ABS_ROOT --worker ABS_WORKER [--guardian ABS_GUARDIAN]"
+        "Usage:\n  execution_fixture_tool prepare --data-root ABS_ROOT --worker ABS_WORKER [--guardian ABS_GUARDIAN]\n  execution_fixture_tool write-provider-fixture --data-root ABS_ROOT --config-a ABS_CONFIG --config-b ABS_CONFIG --cli ABS_DISSECT3D --output ABS_JSON"
     );
 }

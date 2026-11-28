@@ -2,6 +2,7 @@
 //! the connection layer; handlers return only bounded public data.
 
 pub(crate) mod discovery;
+pub(crate) mod execution;
 pub(crate) mod jobs;
 pub(crate) mod results;
 pub(crate) mod submission;
@@ -17,10 +18,14 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 mod auth;
+mod authorize;
 mod engine;
 use auth::*;
 use engine::*;
 
+#[cfg(test)]
+#[path = "commands/authorization_exit_regressions.rs"]
+mod authorization_exit_regressions;
 #[cfg(test)]
 #[path = "commands/recovery_save_regressions.rs"]
 mod recovery_save_regressions;
@@ -218,7 +223,9 @@ pub(crate) fn engine(
             let client = engine
                 .client(credential)
                 .map_err(CommandError::connection)?;
-            let info = tokio_runtime().block_on(client.info()).map_err(api_error)?;
+            let info = tokio_runtime()
+                .block_on(client.execution_info())
+                .map_err(api_error)?;
             serde_json::to_value(info).map_err(|_| invalid_error())
         }
         EngineCommand::Stop => stop(
@@ -238,16 +245,18 @@ pub(crate) fn auth(
 ) -> Result<serde_json::Value, CommandError> {
     let root = data_root(config, config_path).ok_or_else(|| match command {
         AuthCommand::Status => read_unconfigured("unverified")(),
-        AuthCommand::Setup { .. } | AuthCommand::Revoke => unconfigured(),
+        AuthCommand::Setup { .. } | AuthCommand::Authorize { .. } | AuthCommand::Revoke => {
+            unconfigured()
+        }
     })?;
     let profile = Profile::open(config_path).map_err(CommandError::connection)?;
-    let _profile_control = profile.lock_control().map_err(CommandError::connection)?;
-    if matches!(
-        command,
-        AuthCommand::Setup {
-            submission_access: true
-        }
-    ) {
+    let profile_control = profile.control_lease().map_err(CommandError::connection)?;
+    if let AuthCommand::Setup {
+        submission_access,
+        execution_access,
+    } = command
+        && (submission_access || execution_access)
+    {
         if config
             .explicit_credential_reference()
             .map_err(|_| invalid_error())?
@@ -264,7 +273,12 @@ pub(crate) fn auth(
             .load()
             .map_err(CommandError::connection)?
             .is_some_and(|credential| {
-                credential.state == "pending" && credential.submission_access
+                credential.state == "pending"
+                    && if execution_access {
+                        credential.execution_access
+                    } else {
+                        credential.submission_access
+                    }
             })
             && profile
                 .load_pending_stop()
@@ -275,8 +289,25 @@ pub(crate) fn auth(
                 .has_saved_records()
                 .map_err(CommandError::connection)?
         {
-            return Err(submission_access_requires_new_profile());
+            return Err(if execution_access {
+                execution_access_requires_new_profile()
+            } else {
+                submission_access_requires_new_profile()
+            });
         }
+    }
+    if matches!(command, AuthCommand::Authorize { .. })
+        && config
+            .explicit_credential_reference()
+            .map_err(|_| invalid_error())?
+            .is_some()
+    {
+        return Err(CommandError {
+            category: "usage_error",
+            message: "Clear the explicit credential reference before execution authorization",
+            exit_code: 2,
+            context: None,
+        });
     }
     let engine = match profile.connection(&root, client_limits.connect_timeout, client_limits) {
         Ok(engine) => engine,
@@ -286,8 +317,11 @@ pub(crate) fn auth(
         Err(error) => return Err(CommandError::connection(error)),
     };
     match command {
-        AuthCommand::Setup { submission_access } => {
-            if submission_access
+        AuthCommand::Setup {
+            submission_access,
+            execution_access,
+        } => {
+            if (submission_access || execution_access)
                 && profile
                     .load()
                     .map_err(CommandError::connection)?
@@ -295,7 +329,11 @@ pub(crate) fn auth(
                         credential.installation_id != engine.discovery.installation_id
                     })
             {
-                return Err(submission_access_requires_new_profile());
+                return Err(if execution_access {
+                    execution_access_requires_new_profile()
+                } else {
+                    submission_access_requires_new_profile()
+                });
             }
             if config
                 .explicit_credential_reference()
@@ -309,8 +347,26 @@ pub(crate) fn auth(
                     context: None,
                 });
             }
-            setup(&profile, &engine, submission_access)
+            let access = if execution_access {
+                EnrollmentAccess::Execution
+            } else if submission_access {
+                EnrollmentAccess::Submission
+            } else {
+                EnrollmentAccess::Core
+            };
+            setup(&profile, &engine, access)
         }
+        AuthCommand::Authorize {
+            execution_access: true,
+        } => authorize::authorize_execution(&profile, &profile_control, &engine),
+        AuthCommand::Authorize {
+            execution_access: false,
+        } => Err(CommandError {
+            category: "usage_error",
+            message: "Specify --execution-access to authorize execution grants",
+            exit_code: 2,
+            context: None,
+        }),
         AuthCommand::Status => {
             let credential = profile
                 .selected_credential(config, &engine)
@@ -480,6 +536,14 @@ fn submission_access_requires_new_profile() -> CommandError {
         context: None,
     }
 }
+fn execution_access_requires_new_profile() -> CommandError {
+    CommandError {
+        category: "usage_error",
+        message: "This profile already holds a credential; use `dissect3d auth authorize --execution-access` to add execution access",
+        exit_code: 2,
+        context: None,
+    }
+}
 fn read_unconfigured(status: &'static str) -> impl FnOnce() -> CommandError {
     move || CommandError {
         category: "engine_unavailable",
@@ -619,7 +683,12 @@ fn api_error(error: dissect3d_api::ClientError) -> CommandError {
             exit_code: 7,
             context: None,
         },
-        dissect3d_api::ClientError::Incompatible => CommandError {
+        dissect3d_api::ClientError::Incompatible
+        | dissect3d_api::ClientError::Rejected(
+            dissect3d_api::ErrorCode::IncompatibleContract
+            | dissect3d_api::ErrorCode::IncompatibleProfile
+            | dissect3d_api::ErrorCode::OperationUnavailable,
+        ) => CommandError {
             category: "incompatible",
             message: "The selected engine does not match this profile or CLI",
             exit_code: 5,
@@ -659,11 +728,13 @@ mod tests {
             secret_hex: "ab".repeat(32),
             state: "pending".to_owned(),
             submission_access: true,
+            execution_access: false,
         };
         profile.save(&credential).unwrap();
         let error = auth(
             AuthCommand::Setup {
                 submission_access: true,
+                execution_access: false,
             },
             &config,
             &config_path,
@@ -709,12 +780,14 @@ mod tests {
                 secret_hex: "ab".repeat(32),
                 state: state.to_owned(),
                 submission_access: false,
+                execution_access: false,
             };
             profile.save(&credential).expect("existing profile");
 
             let error = auth(
                 AuthCommand::Setup {
                     submission_access: true,
+                    execution_access: false,
                 },
                 &config,
                 &config_path,
@@ -751,6 +824,7 @@ mod tests {
             secret_hex: "ab".repeat(32),
             state: "pending".to_owned(),
             submission_access: false,
+            execution_access: false,
         };
         for failure in [
             ConnectionError::Unavailable,

@@ -1,5 +1,7 @@
 //! Protected client recovery metadata; the engine remains the job authority.
 
+pub(crate) mod execution;
+
 use crate::connection::Profile;
 use dissect3d_api::{
     AcceptanceReceipt, ClientId, IdempotencyKey, InputIdentity, InstallationId, SubmissionId,
@@ -161,6 +163,11 @@ impl SubmissionRecordLease<'_> {
     }
 }
 
+pub(crate) enum AnyPendingRecord {
+    Stage3(PendingSubmission),
+    Execution(execution::PendingExecutionRecord),
+}
+
 impl<'a> SubmissionRecords<'a> {
     pub(crate) fn coordinate(
         &self,
@@ -221,8 +228,29 @@ impl<'a> SubmissionRecords<'a> {
     }
 
     pub(crate) fn load(&self, sub_id: &SubmissionId) -> Result<PendingSubmission, RecordError> {
-        let bytes = self
-            .profile
+        let bytes = self.read_record_bytes(sub_id)?;
+        PendingSubmission::decode(&bytes, sub_id)
+    }
+
+    pub(crate) fn load_any(&self, sub_id: &SubmissionId) -> Result<AnyPendingRecord, RecordError> {
+        let bytes = self.read_record_bytes(sub_id)?;
+        let fields: BTreeMap<String, SubmissionValue> =
+            decode_submission_json(&bytes, MAX_RECORD_BYTES).map_err(|_| RecordError::Invalid)?;
+        match fields.get("record_version") {
+            Some(SubmissionValue::String(version)) if version == "1.0" => Ok(
+                AnyPendingRecord::Stage3(PendingSubmission::decode(&bytes, sub_id)?),
+            ),
+            Some(SubmissionValue::String(version)) if version == "1.1" => {
+                Ok(AnyPendingRecord::Execution(
+                    execution::PendingExecutionRecord::decode(&bytes, sub_id)?,
+                ))
+            }
+            _ => Err(RecordError::Invalid),
+        }
+    }
+
+    fn read_record_bytes(&self, sub_id: &SubmissionId) -> Result<Vec<u8>, RecordError> {
+        self.profile
             .root()
             .read_file(&record_path(sub_id)?, MAX_RECORD_BYTES)
             .map_err(|error| {
@@ -231,8 +259,7 @@ impl<'a> SubmissionRecords<'a> {
                 } else {
                     RecordError::Storage
                 }
-            })?;
-        PendingSubmission::decode(&bytes, sub_id)
+            })
     }
 
     fn scan(&self) -> Result<(Vec<SubmissionId>, u64), RecordError> {
@@ -335,14 +362,23 @@ impl<'a> SubmissionRecords<'a> {
     fn write(&self, record: &PendingSubmission, replacing: bool) -> Result<(), RecordError> {
         record.validate()?;
         let bytes = serde_json::to_vec(record).map_err(|_| RecordError::Invalid)?;
+        self.write_raw(&record.sub_id, &bytes, replacing)
+    }
+
+    pub(super) fn write_raw(
+        &self,
+        sub_id: &SubmissionId,
+        bytes: &[u8],
+        replacing: bool,
+    ) -> Result<(), RecordError> {
         let (ids, existing_bytes) = self.scan()?;
-        if ids.contains(&record.sub_id) != replacing {
+        if ids.contains(sub_id) != replacing {
             return Err(RecordError::Invalid);
         }
         check_capacity(ids.len(), existing_bytes, bytes.len(), replacing)?;
         self.profile
             .root()
-            .write_recovery_record(&record_path(&record.sub_id)?, &bytes)
+            .write_recovery_record(&record_path(sub_id)?, bytes)
             .map_err(|_| RecordError::Storage)
     }
 }

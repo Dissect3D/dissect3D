@@ -22,6 +22,7 @@ pub(super) fn credential(
         },
         state: state.into(),
         submission_access: false,
+        execution_access: false,
     }
 }
 #[cfg(unix)]
@@ -69,7 +70,7 @@ fn authorization_record_survives_reload_and_success_without_touching_credentials
         assert!(matches!(
             profile
                 .begin_execution_authorization(&lease, &credential(&installation, &wrong, state)),
-            Err(ConnectionError::Conflict)
+            Err(AuthorizationFailure::BeforeSend(ConnectionError::Conflict))
         ));
     }
 }
@@ -83,7 +84,9 @@ fn windows_authorization_pending_is_refused_before_any_record_write() {
     assert!(matches!(
         profile
             .begin_execution_authorization(&lease, &credential(&installation, &client, "active")),
-        Err(ConnectionError::Incompatible)
+        Err(AuthorizationFailure::BeforeSend(
+            ConnectionError::Incompatible
+        ))
     ));
     let file = RelativePath::parse("execution-authorization.json").unwrap();
     assert!(matches!(
@@ -98,4 +101,41 @@ fn native_authorization_receipt_rejects_partial_or_substituted_grants() {
     assert!(decode_execution_authorization_receipt(&serde_json::to_vec(&value).unwrap()).is_err());
     value["granted_operations"] = serde_json::json!(dissect3d_api::EXECUTION_GRANTS);
     assert!(decode_execution_authorization_receipt(&serde_json::to_vec(&value).unwrap()).is_ok());
+}
+
+#[test]
+fn active_credential_from_prior_engine_instance_is_accepted_for_reauthorization() {
+    let (installation, client) = binding();
+    let restarted = DiscoveredEngine {
+        discovery: DiscoveryRecord {
+            discovery_version: "1.0".into(),
+            installation_id: installation.clone(),
+            instance_id: InstanceId::parse("eng_99999999999999999999999999999999").unwrap(),
+            base_url: "https://127.0.0.1:44444".into(),
+            bootstrap_endpoint: BootstrapAddress::Unix {
+                path: "/tmp/unused.sock".into(),
+            },
+            process: dissect3d_api::ProcessReference {
+                pid: 1,
+                start_marker: "1".into(),
+            },
+            trust_anchor_der: vec![1],
+            trust_anchor_sha256: vec![2; 32],
+        },
+        client_limits: ClientLimits::default(),
+    };
+    let prior = credential(&installation, &client, "active");
+    assert!(restarted.check_execution_credential(&prior, true).is_ok());
+
+    let wrong_installation = InstallationId::parse("ins_88888888888888888888888888888888").unwrap();
+    let foreign = credential(&wrong_installation, &client, "active");
+    assert_eq!(
+        restarted.check_execution_credential(&foreign, true),
+        Err(ConnectionError::Unauthorized)
+    );
+    let revoked = credential(&installation, &client, "revoked");
+    assert_eq!(
+        restarted.check_execution_credential(&revoked, true),
+        Err(ConnectionError::Unauthorized)
+    );
 }

@@ -729,7 +729,7 @@ mod tests {
         match cli.command.unwrap() {
             Command::Jobs {
                 command: JobsCommand::Submit(args),
-            } => args,
+            } => *args,
             Command::Run(args) => args.definition,
             _ => panic!("submission arguments"),
         }

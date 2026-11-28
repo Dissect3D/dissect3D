@@ -30,6 +30,9 @@ pub(crate) mod preparation;
 #[cfg(all(test, feature = "test-support"))]
 #[path = "execution_fixture/preparation_tests.rs"]
 mod preparation_tests;
+#[cfg(all(unix, feature = "test-support"))]
+#[path = "execution_fixture/provider_export.rs"]
+pub(crate) mod provider_export;
 
 use crate::worker_protocol::{FRAME_BYTES_MAX, PROTOCOL_VERSION, random_id};
 use serde_json::{Map, Value, json};

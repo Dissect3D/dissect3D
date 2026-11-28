@@ -73,30 +73,38 @@ fn lease_and_durable_id_span_send_uncertainty_and_interrupted_completion() {
         original = pending.authorization_id.clone();
         assert_eq!(
             profile
-                .read_execution_authorization()?
+                .read_execution_authorization()
+                .map_err(ExchangeFailure::BeforeSend)?
                 .unwrap()
                 .authorization_id,
             original
         );
         assert!(matches!(
-            Profile::open(&path)?.lock_control(),
+            Profile::open(&path)
+                .map_err(ExchangeFailure::BeforeSend)?
+                .lock_control(),
             Err(ConnectionError::ProfileBusy)
         ));
-        Err(ConnectionError::Unavailable)
+        Err(ExchangeFailure::AfterWrite(ConnectionError::Unavailable))
     });
-    assert!(matches!(result, Err(ConnectionError::Unavailable)));
+    assert!(matches!(
+        result,
+        Err(AuthorizationFailure::AfterWrite {
+            error: ConnectionError::Unavailable,
+            ..
+        })
+    ));
     let alias = temp.path().join("incomplete-ack");
     // Native replacement refusal simulates interruption before the completion
     // update. The sent ID must remain recoverable even after transport success.
-    assert!(
-        profile
-            .with_execution_authorization(None, |_credential, pending| {
-                assert_eq!(pending.authorization_id, original);
-                std::fs::hard_link(profile.root.path().join(PENDING_FILE), &alias).unwrap();
-                Ok(receipt(pending))
-            })
-            .is_err()
-    );
+    assert!(matches!(
+        profile.with_execution_authorization(None, |_credential, pending| {
+            assert_eq!(pending.authorization_id, original);
+            std::fs::hard_link(profile.root.path().join(PENDING_FILE), &alias).unwrap();
+            Ok(receipt(pending))
+        }),
+        Err(AuthorizationFailure::ReceiptUnsaved(_))
+    ));
     std::fs::remove_file(&alias).unwrap();
     assert_eq!(
         profile
@@ -182,11 +190,11 @@ fn a_lease_for_another_profile_handle_cannot_authorize_this_one() {
     let foreign = other.control_lease().unwrap();
     assert!(matches!(
         profile.begin_execution_authorization(&foreign, &active()),
-        Err(ConnectionError::Conflict)
+        Err(AuthorizationFailure::BeforeSend(ConnectionError::Conflict))
     ));
     assert!(matches!(
         profile.with_execution_authorization(Some(&foreign), |_, _| unreachable!()),
-        Err(ConnectionError::Conflict)
+        Err(AuthorizationFailure::BeforeSend(ConnectionError::Conflict))
     ));
     assert!(profile.read_execution_authorization().unwrap().is_none());
 }
@@ -196,7 +204,9 @@ fn missing_profile_credential_is_refused_before_any_record_write() {
     let profile = Profile::open(&temp.path().join("profile.json")).unwrap();
     assert!(matches!(
         profile.with_execution_authorization(None, |_, _| unreachable!()),
-        Err(ConnectionError::Unauthorized)
+        Err(AuthorizationFailure::BeforeSend(
+            ConnectionError::Unauthorized
+        ))
     ));
     assert!(profile.read_execution_authorization().unwrap().is_none());
 }
@@ -212,11 +222,11 @@ fn a_second_handle_to_the_same_profile_directory_is_refused() {
     let same_directory = Profile::open(&path).unwrap();
     assert!(matches!(
         same_directory.with_execution_authorization(Some(&lease), |_, _| unreachable!()),
-        Err(ConnectionError::Conflict)
+        Err(AuthorizationFailure::BeforeSend(ConnectionError::Conflict))
     ));
     assert!(matches!(
         same_directory.begin_execution_authorization(&lease, &active()),
-        Err(ConnectionError::Conflict)
+        Err(AuthorizationFailure::BeforeSend(ConnectionError::Conflict))
     ));
     assert!(profile.read_execution_authorization().unwrap().is_none());
 }
@@ -240,7 +250,7 @@ fn active_credential_for_another_client_supersedes_and_never_sends_the_old_id() 
     profile
         .with_execution_authorization(None, |_, pending| {
             old = pending.authorization_id.clone();
-            Err(ConnectionError::Unavailable)
+            Err(ExchangeFailure::AfterWrite(ConnectionError::Unavailable))
         })
         .unwrap_err();
     // The profile now holds a different, active credential.
@@ -254,10 +264,13 @@ fn active_credential_for_another_client_supersedes_and_never_sends_the_old_id() 
             assert_eq!(pending.state, "pending");
             assert_ne!(pending.authorization_id, old);
             // The replacement is already durable before any send.
-            let stored = profile.read_execution_authorization()?.unwrap();
+            let stored = profile
+                .read_execution_authorization()
+                .map_err(ExchangeFailure::BeforeSend)?
+                .unwrap();
             assert_eq!(stored.authorization_id, pending.authorization_id);
             sent = pending.authorization_id.clone();
-            Err(ConnectionError::Unavailable)
+            Err(ExchangeFailure::AfterWrite(ConnectionError::Unavailable))
         })
         .unwrap_err();
     // A retry keeps the replacement ID; the old one never comes back.
@@ -304,7 +317,7 @@ fn non_active_credential_for_another_client_never_supersedes() {
     for state in ["pending", "revoked"] {
         assert!(matches!(
             profile.begin_execution_authorization(&lease, &other_client(state)),
-            Err(ConnectionError::Conflict)
+            Err(AuthorizationFailure::BeforeSend(ConnectionError::Conflict))
         ));
         let kept = profile.read_execution_authorization().unwrap().unwrap();
         assert_eq!(kept.authorization_id, old.authorization_id);

@@ -7,6 +7,37 @@ use crate::{
 };
 
 impl Client {
+    /// Non-failing `/v1/info` probe returning `ExecutionEngineInfo`.
+    ///
+    /// When `job_execution` is absent, returns `Ok(info)` with `job_execution: None`
+    /// so callers can select Stage 3 vs negotiated `we-0.1` mode without failing.
+    /// When `job_execution` is present, validates its contract and `dispatch_enabled`
+    /// consistency once.
+    pub async fn execution_info(&self) -> Result<ExecutionEngineInfo, ClientError> {
+        let info: ExecutionEngineInfo = self.get_submission("/v1/info").await?;
+        if info.core.api_version != API_VERSION
+            || !info.core.required_features.is_empty()
+            || info.core.installation_id != self.installation_id
+            || info.core.instance_id != self.instance_id
+        {
+            return Err(ClientError::Incompatible);
+        }
+        if let Some(capability) = &info.job_execution {
+            capability
+                .validate()
+                .map_err(|_| ClientError::Rejected(ErrorCode::IncompatibleContract))?;
+            let submission = info
+                .core
+                .submission
+                .as_ref()
+                .ok_or(ClientError::Rejected(ErrorCode::IncompatibleContract))?;
+            if submission.dispatch_enabled != capability.dispatch_enabled {
+                return Err(ClientError::Rejected(ErrorCode::IncompatibleContract));
+            }
+        }
+        Ok(info)
+    }
+
     pub async fn create_execution_input<R>(
         &self,
         source: R,
@@ -16,24 +47,33 @@ impl Client {
     where
         R: AsyncRead + Send + Unpin + 'static,
     {
-        self.require_execution_capability("inputs.create").await?;
+        let cap = self.require_execution_capability("inputs.create").await?;
+        self.create_execution_input_with(&cap, source, length, media_type)
+            .await
+    }
+
+    pub async fn create_execution_input_with<R>(
+        &self,
+        capability: &ExecutionCapability,
+        source: R,
+        length: u64,
+        media_type: &str,
+    ) -> Result<InputReceipt, ClientError>
+    where
+        R: AsyncRead + Send + Unpin + 'static,
+    {
+        require_operation(capability, "inputs.create")?;
         self.create_input_inner(source, length, media_type, MAX_INPUT_BYTES, true)
             .await
     }
+
     /// Call before opening/capturing fresh inputs. Missing/unknown semantics fail
     /// before a mutation; old core and discovery methods keep their own contracts.
     pub async fn require_execution_capability(
         &self,
         operation: &str,
     ) -> Result<ExecutionCapability, ClientError> {
-        let info: ExecutionEngineInfo = self.get_submission("/v1/info").await?;
-        if info.core.api_version != API_VERSION
-            || !info.core.required_features.is_empty()
-            || info.core.installation_id != self.installation_id
-            || info.core.instance_id != self.instance_id
-        {
-            return Err(ClientError::Incompatible);
-        }
+        let info = self.execution_info().await?;
         validate_execution_capability(&info, operation)?;
         info.job_execution
             .ok_or(ClientError::Rejected(ErrorCode::OperationUnavailable))
@@ -46,9 +86,20 @@ impl Client {
         key: &IdempotencyKey,
         body: &ExecutionSubmissionBody,
     ) -> Result<ExecutionAcceptance, SubmissionClientError> {
-        self.require_execution_capability("jobs.submit")
+        let cap = self
+            .require_execution_capability("jobs.submit")
             .await
             .map_err(SubmissionClientError::BeforeSend)?;
+        self.submit_execution_job_with(&cap, key, body).await
+    }
+
+    pub async fn submit_execution_job_with(
+        &self,
+        capability: &ExecutionCapability,
+        key: &IdempotencyKey,
+        body: &ExecutionSubmissionBody,
+    ) -> Result<ExecutionAcceptance, SubmissionClientError> {
+        require_operation(capability, "jobs.submit").map_err(SubmissionClientError::BeforeSend)?;
         let receipt: ExecutionAcceptance = self
             .post_execution("/v1/jobs", Some(key), body.as_bytes(), true)
             .await?;
@@ -61,7 +112,16 @@ impl Client {
     }
 
     pub async fn execution_job(&self, id: &JobId) -> Result<ExecutionJobSnapshot, ClientError> {
-        self.require_execution_capability("jobs.show").await?;
+        let cap = self.require_execution_capability("jobs.show").await?;
+        self.execution_job_with(&cap, id).await
+    }
+
+    pub async fn execution_job_with(
+        &self,
+        capability: &ExecutionCapability,
+        id: &JobId,
+    ) -> Result<ExecutionJobSnapshot, ClientError> {
+        require_operation(capability, "jobs.show")?;
         let snapshot: ExecutionJobSnapshot = self
             .get_execution(&format!("/v1/jobs/{}", id.as_str()))
             .await?;
@@ -72,6 +132,15 @@ impl Client {
     }
 
     pub async fn execution_jobs(&self, query: JobsQuery) -> Result<ExecutionJobPage, ClientError> {
+        let cap = self.require_execution_capability("jobs.list").await?;
+        self.execution_jobs_with(&cap, query).await
+    }
+
+    pub async fn execution_jobs_with(
+        &self,
+        capability: &ExecutionCapability,
+        query: JobsQuery,
+    ) -> Result<ExecutionJobPage, ClientError> {
         let limit = query.limit.unwrap_or(20);
         if !(1..=100).contains(&limit)
             || query
@@ -81,7 +150,7 @@ impl Client {
         {
             return Err(ClientError::InvalidMaterial);
         }
-        self.require_execution_capability("jobs.list").await?;
+        require_operation(capability, "jobs.list")?;
         let mut path = "/v1/jobs".to_owned();
         let mut first = true;
         push_query(&mut path, &mut first, "limit", &limit.to_string());
@@ -99,9 +168,19 @@ impl Client {
         &self,
         id: &JobId,
     ) -> Result<CancelResponse, SubmissionClientError> {
-        self.require_execution_capability("jobs.cancel")
+        let cap = self
+            .require_execution_capability("jobs.cancel")
             .await
             .map_err(SubmissionClientError::BeforeSend)?;
+        self.cancel_execution_job_with(&cap, id).await
+    }
+
+    pub async fn cancel_execution_job_with(
+        &self,
+        capability: &ExecutionCapability,
+        id: &JobId,
+    ) -> Result<CancelResponse, SubmissionClientError> {
+        require_operation(capability, "jobs.cancel").map_err(SubmissionClientError::BeforeSend)?;
         let response: CancelResponse = self
             .post_execution(
                 &format!("/v1/jobs/{}/cancel", id.as_str()),
@@ -123,9 +202,20 @@ impl Client {
         id: &JobId,
         key: &IdempotencyKey,
     ) -> Result<ExecutionAcceptance, SubmissionClientError> {
-        self.require_execution_capability("jobs.retry")
+        let cap = self
+            .require_execution_capability("jobs.retry")
             .await
             .map_err(SubmissionClientError::BeforeSend)?;
+        self.retry_execution_job_with(&cap, id, key).await
+    }
+
+    pub async fn retry_execution_job_with(
+        &self,
+        capability: &ExecutionCapability,
+        id: &JobId,
+        key: &IdempotencyKey,
+    ) -> Result<ExecutionAcceptance, SubmissionClientError> {
+        require_operation(capability, "jobs.retry").map_err(SubmissionClientError::BeforeSend)?;
         let receipt: ExecutionAcceptance = self
             .post_execution(
                 &format!("/v1/jobs/{}/retry", id.as_str()),
@@ -223,6 +313,16 @@ impl Client {
         }
         decode_execution_json(&body, self.limits.max_response_bytes).map_err(|_| uncertain())
     }
+}
+
+fn require_operation(capability: &ExecutionCapability, operation: &str) -> Result<(), ClientError> {
+    capability
+        .validate()
+        .map_err(|_| ClientError::Rejected(ErrorCode::IncompatibleContract))?;
+    if !capability.operations.iter().any(|s| s == operation) {
+        return Err(ClientError::Rejected(ErrorCode::OperationUnavailable));
+    }
+    Ok(())
 }
 
 pub(super) fn validate_execution_capability(

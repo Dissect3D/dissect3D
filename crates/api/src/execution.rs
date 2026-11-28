@@ -290,11 +290,11 @@ pub struct ExecutionCapability {
 }
 
 /// Keeps the older core record unchanged for existing clients.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ExecutionEngineInfo {
     #[serde(flatten)]
     pub core: crate::EngineInfo,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job_execution: Option<ExecutionCapability>,
 }
 

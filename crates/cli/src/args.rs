@@ -127,12 +127,15 @@ pub(crate) struct JobDefinitionArgs {
     /// Use this stable key to recover the same submission.
     #[arg(long = "idempotency-key", value_name = "KEY")]
     pub(crate) idempotency_key: Option<String>,
+    /// Bound execution attempt duration in milliseconds (1..=86,400,000).
+    #[arg(long = "execution-timeout-ms", value_name = "MS")]
+    pub(crate) execution_timeout_ms: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum JobsCommand {
     /// Submit one durable job definition.
-    Submit(JobDefinitionArgs),
+    Submit(Box<JobDefinitionArgs>),
     /// Recover the same request and key; the first attempt may already have been accepted.
     Recover { sub_id: String },
     /// List this credential's accepted jobs.
@@ -256,8 +259,17 @@ pub(crate) enum AuthCommand {
     /// Enroll this profile with the selected engine.
     Setup {
         /// Request the four queued-submission grants for a new empty profile.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "execution_access")]
         submission_access: bool,
+        /// Request the execution-v1 grants for a new empty profile.
+        #[arg(long, conflicts_with = "submission_access")]
+        execution_access: bool,
+    },
+    /// Explicitly reauthorize this profile's existing client identity.
+    Authorize {
+        /// Upgrade this profile's existing credential to execution-v1 grants.
+        #[arg(long, required = true)]
+        execution_access: bool,
     },
     /// Read this profile's authentication status.
     Status,

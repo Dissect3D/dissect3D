@@ -2,10 +2,17 @@
 
 use super::*;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum EnrollmentAccess {
+    Core,
+    Submission,
+    Execution,
+}
+
 pub(super) fn setup(
     profile: &Profile,
     engine: &crate::connection::DiscoveredEngine,
-    submission_access_requested: bool,
+    access: EnrollmentAccess,
 ) -> Result<serde_json::Value, CommandError> {
     let mut reused = false;
     let mut credential = match profile.load().map_err(CommandError::connection)? {
@@ -36,11 +43,15 @@ pub(super) fn setup(
                 Err(_) => return Err(transport_error()),
                 _ => return Err(unauthorized()),
             }
-            new_credential(engine, false)?
+            new_credential(engine, EnrollmentAccess::Core)?
         }
-        _ => new_credential(engine, submission_access_requested)?,
+        _ => new_credential(engine, access)?,
     };
-    if credential.submission_access {
+    if credential.execution_access {
+        engine
+            .supports_execution_access()
+            .map_err(authorize::map_before_send)?;
+    } else if credential.submission_access {
         // `connection` already completed protected discovery, process matching,
         // and the old native probe. This separate same-owner exchange gates
         // both first enrollment and replay of a pending opt-in record.
@@ -49,17 +60,41 @@ pub(super) fn setup(
             .map_err(CommandError::connection)?;
     }
     save_before_enroll(&credential, reused, |record| profile.save(record))?;
-    let receipt = if credential.submission_access {
+    let receipt = if credential.execution_access {
+        engine.enroll_execution(&credential)
+    } else if credential.submission_access {
         engine.enroll_submission(&credential)
     } else {
         engine.enroll(&credential)
     }
     .map_err(|error| enrollment_error(error, &credential))?;
     credential.state = "active".to_owned();
-    profile
-        .save(&credential)
-        .map_err(|error| enrollment_error(error, &credential))?;
+    save_after_enroll(&credential, &receipt, |record| profile.save(record))?;
     serde_json::to_value(receipt).map_err(|_| invalid_error())
+}
+
+/// Persist the active credential after the engine returned an enrollment
+/// receipt. Under `CR-CS-01`, an execution-access save failure reports exit
+/// `19` `recovery_storage_failed` with `accepted: true` and `receipt_confirmed: true`.
+pub(super) fn save_after_enroll(
+    credential: &ProfileCredential,
+    receipt: &dissect3d_api::EnrollmentReceipt,
+    save: impl FnOnce(&ProfileCredential) -> Result<(), ConnectionError>,
+) -> Result<(), CommandError> {
+    save(credential).map_err(|error| {
+        if credential.execution_access {
+            return CommandError::recovery_save_failure(
+                RequestAcceptance::Accepted { operation_id: None },
+                "Execution enrollment was accepted, but the local profile could not be saved",
+                serde_json::json!({
+                    "client_id": receipt.client_id,
+                    "enrollment_id": receipt.enrollment_id,
+                    "grant_policy": dissect3d_api::EXECUTION_AUTHORIZATION_CONTRACT,
+                }),
+            );
+        }
+        enrollment_error(error, credential)
+    })
 }
 
 /// Save the pending credential before enrollment. A credential retained from
@@ -87,7 +122,7 @@ pub(super) fn save_before_enroll(
 
 fn new_credential(
     engine: &crate::connection::DiscoveredEngine,
-    submission_access: bool,
+    access: EnrollmentAccess,
 ) -> Result<ProfileCredential, CommandError> {
     let installation_id = engine.discovery.installation_id.clone();
     let instance_id = engine.discovery.instance_id.clone();
@@ -99,7 +134,8 @@ fn new_credential(
         enrollment_id,
         secret_hex,
         state: "pending".to_owned(),
-        submission_access,
+        submission_access: access == EnrollmentAccess::Submission,
+        execution_access: access == EnrollmentAccess::Execution,
     })
 }
 

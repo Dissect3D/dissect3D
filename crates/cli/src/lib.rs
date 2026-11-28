@@ -192,11 +192,19 @@ pub fn run() -> i32 {
             ),
             json_output,
         ),
-        Some(Command::Auth { command }) => run_connected_command(
-            "auth",
-            commands::auth(command, &config, &config_path, client_limits),
-            json_output,
-        ),
+        Some(Command::Auth { command }) => {
+            let name = match &command {
+                args::AuthCommand::Setup { .. } => "auth setup",
+                args::AuthCommand::Authorize { .. } => "auth authorize",
+                args::AuthCommand::Status => "auth status",
+                args::AuthCommand::Revoke => "auth revoke",
+            };
+            run_connected_command(
+                name,
+                commands::auth(command, &config, &config_path, client_limits),
+                json_output,
+            )
+        }
         Some(Command::Models { command }) => {
             let name = match &command {
                 ModelsCommand::List { .. } => "models list",
@@ -235,19 +243,29 @@ pub fn run() -> i32 {
             command: JobsCommand::Submit(args),
         }) => run_connected_command(
             "jobs submit",
-            commands::submission::submit(args, &config, &config_path, client_limits),
+            commands::execution::submit::submit_or_stage3(
+                *args,
+                &config,
+                &config_path,
+                client_limits,
+            ),
             json_output,
         ),
         Some(Command::Run(args)) if args.detach => run_connected_command(
             "run",
-            commands::submission::submit(args.definition, &config, &config_path, client_limits),
+            commands::execution::submit::submit_or_stage3(
+                args.definition,
+                &config,
+                &config_path,
+                client_limits,
+            ),
             json_output,
         ),
         Some(Command::Jobs {
             command: JobsCommand::Recover { sub_id },
         }) => run_connected_command(
             "jobs recover",
-            commands::submission::recover(&sub_id, &config, &config_path, client_limits),
+            commands::execution::submit::recover_any(&sub_id, &config, &config_path, client_limits),
             json_output,
         ),
         Some(Command::Jobs {
@@ -404,13 +422,22 @@ fn stage3_preflight(
         exit_code
     };
     match command {
-        Some(Command::Run(args)) if !args.detach => Some(failure(
-            "run",
-            "operation_unavailable",
-            "Foreground run is not implemented; no input will be uploaded or accepted.",
-            5,
-        )),
-        Some(Command::Run(_)) => None,
+        Some(Command::Run(args)) => {
+            if let Some(code) =
+                commands::execution::preflight_definition("run", &args.definition, json)
+            {
+                return Some(code);
+            }
+            if !args.detach {
+                return Some(failure(
+                    "run",
+                    "operation_unavailable",
+                    "Foreground run is not implemented; no input will be uploaded or accepted.",
+                    5,
+                ));
+            }
+            None
+        }
         Some(Command::Jobs {
             command: JobsCommand::Recover { sub_id },
         }) => {
@@ -425,7 +452,7 @@ fn stage3_preflight(
             let result = (|| {
                 let profile = submissions::SubmissionRecords::open_existing(config_path)?;
                 let records = submissions::SubmissionRecords::lock(&profile)?;
-                records.load(&id)
+                records.load_any(&id)
             })();
             match result {
                 Err(error) => {
@@ -441,8 +468,8 @@ fn stage3_preflight(
             }
         }
         Some(Command::Jobs {
-            command: JobsCommand::Submit(_),
-        }) => None,
+            command: JobsCommand::Submit(args),
+        }) => commands::execution::preflight_definition("jobs submit", args, json),
         Some(Command::Jobs {
             command: JobsCommand::List { .. } | JobsCommand::Show { .. },
         }) => None,

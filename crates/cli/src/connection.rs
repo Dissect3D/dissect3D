@@ -45,6 +45,8 @@ pub(crate) struct ProfileCredential {
     pub(crate) state: String,
     #[serde(default, skip_serializing_if = "is_false")]
     pub(crate) submission_access: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub(crate) execution_access: bool,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -708,8 +710,4 @@ mod submission_enrollment_tests {
     }
 }
 
-#[allow(
-    dead_code,
-    reason = "WE-P08 connects native execution authorization after its dependency gates"
-)]
-mod execution;
+pub(crate) mod execution;

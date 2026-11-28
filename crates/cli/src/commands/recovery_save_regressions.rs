@@ -44,6 +44,7 @@ fn credential() -> ProfileCredential {
         secret_hex: "ab".repeat(32),
         state: "pending".to_owned(),
         submission_access: false,
+        execution_access: false,
     }
 }
 

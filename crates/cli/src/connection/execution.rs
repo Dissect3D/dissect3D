@@ -16,6 +16,11 @@ pub(crate) struct PendingExecutionAuthorization {
     pub(super) state: String,
 }
 impl PendingExecutionAuthorization {
+    #[cfg(all(test, unix))]
+    pub(crate) fn authorization_id(&self) -> &str {
+        &self.authorization_id
+    }
+
     fn validate(&self) -> Result<(), ConnectionError> {
         let valid = self.authorization_id.strip_prefix("aut_").is_some_and(|s| {
             s.len() == 32
@@ -32,9 +37,37 @@ impl PendingExecutionAuthorization {
         Ok(())
     }
 }
+/// Failure classification at the native execution-authorization boundary.
+///
+/// Everything up to and including the bootstrap frame write is `BeforeSend`.
+/// Re-writing an existing same-client record that may have been sent earlier is
+/// `RecordRewrite`. Any failure after `write_frame` is `AfterWrite`. A failed
+/// local save after receiving a valid receipt is `ReceiptUnsaved`.
+#[derive(Debug)]
+pub(crate) enum AuthorizationFailure {
+    BeforeSend(ConnectionError),
+    RecordRewrite {
+        client_id: ClientId,
+        authorization_id: String,
+    },
+    AfterWrite {
+        error: ConnectionError,
+        client_id: ClientId,
+        authorization_id: String,
+    },
+    ReceiptUnsaved(Box<ExecutionAuthorizationReceipt>),
+}
+
+/// Transport-layer failure split at the `write_frame` boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ExchangeFailure {
+    BeforeSend(ConnectionError),
+    AfterWrite(ConnectionError),
+}
+
 /// Native execution-authority records and exchanges are fail-closed on Windows
 /// until ordinary-user namespace durability is established.
-fn require_native_authority() -> Result<(), ConnectionError> {
+pub(crate) fn require_native_authority() -> Result<(), ConnectionError> {
     if cfg!(windows) {
         Err(ConnectionError::Incompatible)
     } else {
@@ -85,24 +118,40 @@ impl Profile {
         &self,
         lease: &ControlLease<'_>,
         credential: &ProfileCredential,
-    ) -> Result<PendingExecutionAuthorization, ConnectionError> {
-        lease.require(self)?;
-        require_native_authority()?;
-        if let Some(pending) = self.read_execution_authorization()? {
+    ) -> Result<PendingExecutionAuthorization, AuthorizationFailure> {
+        lease
+            .require(self)
+            .map_err(AuthorizationFailure::BeforeSend)?;
+        require_native_authority().map_err(AuthorizationFailure::BeforeSend)?;
+        if let Some(pending) = self
+            .read_execution_authorization()
+            .map_err(AuthorizationFailure::BeforeSend)?
+        {
             if pending.installation_id == credential.installation_id
                 && pending.client_id == credential.client_id
             {
                 // A prior rename may have been visible even though its durability
                 // barrier failed. Re-establish the barrier for this exact ID before send.
-                self.write_execution_authorization(&pending)?;
+                self.write_execution_authorization(&pending).map_err(|_| {
+                    AuthorizationFailure::RecordRewrite {
+                        client_id: pending.client_id.clone(),
+                        authorization_id: pending.authorization_id.clone(),
+                    }
+                })?;
                 return Ok(pending);
             }
             if credential.state != "active" {
-                return Err(ConnectionError::Conflict);
+                return Err(AuthorizationFailure::BeforeSend(ConnectionError::Conflict));
             }
         }
+        if credential.state != "active" {
+            return Err(AuthorizationFailure::BeforeSend(
+                ConnectionError::Unauthorized,
+            ));
+        }
         let mut random = [0_u8; 16];
-        getrandom::fill(&mut random).map_err(|_| ConnectionError::Storage)?;
+        getrandom::fill(&mut random)
+            .map_err(|_| AuthorizationFailure::BeforeSend(ConnectionError::Storage))?;
         let authorization_id = format!(
             "aut_{}",
             random
@@ -118,7 +167,8 @@ impl Profile {
             grant_policy: EXECUTION_AUTHORIZATION_CONTRACT.into(),
             state: "pending".into(),
         };
-        self.write_execution_authorization(&pending)?;
+        self.write_execution_authorization(&pending)
+            .map_err(AuthorizationFailure::BeforeSend)?;
         Ok(pending)
     }
     /// Own the permanent profile lease across credential load, recovery, durable
@@ -131,21 +181,47 @@ impl Profile {
         send: impl FnOnce(
             &ProfileCredential,
             &PendingExecutionAuthorization,
-        ) -> Result<ExecutionAuthorizationReceipt, ConnectionError>,
-    ) -> Result<ExecutionAuthorizationReceipt, ConnectionError> {
+        ) -> Result<ExecutionAuthorizationReceipt, ExchangeFailure>,
+    ) -> Result<ExecutionAuthorizationReceipt, AuthorizationFailure> {
         let acquired;
         let lease = match held {
             Some(lease) => lease,
             None => {
-                acquired = self.control_lease()?;
+                acquired = self
+                    .control_lease()
+                    .map_err(AuthorizationFailure::BeforeSend)?;
                 &acquired
             }
         };
-        lease.require(self)?;
-        let credential = self.load()?.ok_or(ConnectionError::Unauthorized)?;
+        lease
+            .require(self)
+            .map_err(AuthorizationFailure::BeforeSend)?;
+        let credential = self
+            .load()
+            .map_err(AuthorizationFailure::BeforeSend)?
+            .ok_or(AuthorizationFailure::BeforeSend(
+                ConnectionError::Unauthorized,
+            ))?;
         let pending = self.begin_execution_authorization(lease, &credential)?;
-        let receipt = send(&credential, &pending)?;
-        self.complete_execution_authorization(lease, &receipt)?;
+        let receipt = match send(&credential, &pending) {
+            Ok(receipt) => receipt,
+            Err(ExchangeFailure::BeforeSend(error)) => {
+                return Err(AuthorizationFailure::BeforeSend(error));
+            }
+            Err(ExchangeFailure::AfterWrite(error)) => {
+                return Err(AuthorizationFailure::AfterWrite {
+                    error,
+                    client_id: pending.client_id,
+                    authorization_id: pending.authorization_id,
+                });
+            }
+        };
+        if self
+            .complete_execution_authorization(lease, &receipt)
+            .is_err()
+        {
+            return Err(AuthorizationFailure::ReceiptUnsaved(Box::new(receipt)));
+        }
         Ok(receipt)
     }
     fn complete_execution_authorization(
@@ -193,29 +269,40 @@ struct AuthorizationRequest<'a> {
     secret_hex: &'a str,
 }
 impl DiscoveredEngine {
+    fn execution_exchange_classified<T: Serialize, R: serde::de::DeserializeOwned>(
+        &self,
+        request: &T,
+    ) -> Result<R, ExchangeFailure> {
+        require_native_authority().map_err(ExchangeFailure::BeforeSend)?;
+        let endpoint = native_endpoint(&self.discovery.bootstrap_endpoint);
+        let owner = current_owner_identity()
+            .map_err(|_| ExchangeFailure::BeforeSend(ConnectionError::Unavailable))?;
+        let mut channel = connect_bootstrap(&endpoint, &owner, self.client_limits.connect_timeout)
+            .map_err(|_| ExchangeFailure::BeforeSend(ConnectionError::Unavailable))?;
+        let mut bytes = serde_json::to_vec(request)
+            .map_err(|_| ExchangeFailure::BeforeSend(ConnectionError::Invalid))?;
+        if bytes.len() > 16_384 {
+            bytes.fill(0);
+            return Err(ExchangeFailure::BeforeSend(ConnectionError::Capacity));
+        }
+        let sent = channel.write_frame(&bytes);
+        bytes.fill(0);
+        sent.map_err(|_| ExchangeFailure::BeforeSend(ConnectionError::Unavailable))?;
+        let mut response = channel
+            .read_frame()
+            .map_err(|_| ExchangeFailure::AfterWrite(ConnectionError::Unavailable))?;
+        let result = decode_native_response(&response).map_err(ExchangeFailure::AfterWrite);
+        response.fill(0);
+        result
+    }
     fn execution_exchange<T: Serialize, R: serde::de::DeserializeOwned>(
         &self,
         request: &T,
     ) -> Result<R, ConnectionError> {
-        require_native_authority()?;
-        let endpoint = native_endpoint(&self.discovery.bootstrap_endpoint);
-        let owner = current_owner_identity().map_err(|_| ConnectionError::Unavailable)?;
-        let mut channel = connect_bootstrap(&endpoint, &owner, self.client_limits.connect_timeout)
-            .map_err(|_| ConnectionError::Unavailable)?;
-        let mut bytes = serde_json::to_vec(request).map_err(|_| ConnectionError::Invalid)?;
-        if bytes.len() > 16_384 {
-            bytes.fill(0);
-            return Err(ConnectionError::Capacity);
-        }
-        let sent = channel.write_frame(&bytes);
-        bytes.fill(0);
-        sent.map_err(|_| ConnectionError::Unavailable)?;
-        let mut response = channel
-            .read_frame()
-            .map_err(|_| ConnectionError::Unavailable)?;
-        let result = decode_native_response(&response);
-        response.fill(0);
-        result
+        self.execution_exchange_classified(request)
+            .map_err(|failure| match failure {
+                ExchangeFailure::BeforeSend(error) | ExchangeFailure::AfterWrite(error) => error,
+            })
     }
     pub(crate) fn supports_execution_access(&self) -> Result<(), ConnectionError> {
         let receipt:ExecutionEnrollmentCapability=self.execution_exchange(&serde_json::json!({"kind":"execution_capabilities","bootstrap_version":"1.0","instance_id":self.discovery.instance_id})).map_err(|e|if e==ConnectionError::EnrollmentRejected {ConnectionError::Incompatible}else{e})?;
@@ -233,14 +320,13 @@ impl DiscoveredEngine {
         &self,
         credential: &ProfileCredential,
     ) -> Result<EnrollmentReceipt, ConnectionError> {
-        self.supports_execution_access()?;
         self.check_execution_credential(credential, false)?;
         let receipt: EnrollmentReceipt = self.execution_exchange(&EnrollmentRequest {
             kind: "enroll_execution",
             bootstrap_version: "1.0",
             execution_contract: EXECUTION_AUTHORIZATION_CONTRACT,
             installation_id: &credential.installation_id,
-            instance_id: &credential.instance_id,
+            instance_id: &self.discovery.instance_id,
             enrollment_id: &credential.enrollment_id,
             client_id: &credential.client_id,
             client_kind: "cli",
@@ -260,32 +346,36 @@ impl DiscoveredEngine {
         &self,
         credential: &ProfileCredential,
         pending: &PendingExecutionAuthorization,
-    ) -> Result<ExecutionAuthorizationReceipt, ConnectionError> {
-        self.supports_execution_access()?;
-        self.check_execution_credential(credential, true)?;
-        pending.validate()?;
+    ) -> Result<ExecutionAuthorizationReceipt, ExchangeFailure> {
+        self.supports_execution_access()
+            .map_err(ExchangeFailure::BeforeSend)?;
+        self.check_execution_credential(credential, true)
+            .map_err(ExchangeFailure::BeforeSend)?;
+        pending.validate().map_err(ExchangeFailure::BeforeSend)?;
         if pending.installation_id != credential.installation_id
             || pending.client_id != credential.client_id
         {
-            return Err(ConnectionError::Conflict);
+            return Err(ExchangeFailure::BeforeSend(ConnectionError::Conflict));
         }
         let receipt: ExecutionAuthorizationReceipt =
-            self.execution_exchange(&AuthorizationRequest {
+            self.execution_exchange_classified(&AuthorizationRequest {
                 kind: "authorize_execution",
                 bootstrap_version: "1.0",
                 execution_contract: EXECUTION_AUTHORIZATION_CONTRACT,
                 installation_id: &credential.installation_id,
-                instance_id: &credential.instance_id,
+                instance_id: &self.discovery.instance_id,
                 client_id: &credential.client_id,
                 authorization_id: &pending.authorization_id,
                 secret_hex: &credential.secret_hex,
             })?;
-        receipt.validate().map_err(|_| ConnectionError::Invalid)?;
+        receipt
+            .validate()
+            .map_err(|_| ExchangeFailure::AfterWrite(ConnectionError::Invalid))?;
         if receipt.installation_id != credential.installation_id
             || receipt.client_id != credential.client_id
             || receipt.authorization_id != pending.authorization_id
         {
-            return Err(ConnectionError::Invalid);
+            return Err(ExchangeFailure::AfterWrite(ConnectionError::Invalid));
         }
         Ok(receipt)
     }
@@ -294,8 +384,11 @@ impl DiscoveredEngine {
         c: &ProfileCredential,
         active: bool,
     ) -> Result<(), ConnectionError> {
+        // Reauthorization (`active == true`) is bound to the installation and
+        // client identity, so a credential active before an engine restart
+        // reconciles to the freshly verified `self.discovery.instance_id`.
         if c.installation_id != self.discovery.installation_id
-            || c.instance_id != self.discovery.instance_id
+            || (!active && c.instance_id != self.discovery.instance_id)
             || (active && c.state != "active")
             || c.state == "revoked"
         {
@@ -306,6 +399,7 @@ impl DiscoveredEngine {
         Ok(())
     }
 }
+#[cfg(test)]
 pub(super) fn decode_execution_authorization_receipt(
     bytes: &[u8],
 ) -> Result<ExecutionAuthorizationReceipt, ConnectionError> {

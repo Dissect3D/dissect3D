@@ -47,6 +47,8 @@ pub use bootstrap::{BootstrapServeError, serve_bootstrap_once};
 pub use credentials::{AuthContext, VerifiedEnrollment};
 #[cfg(feature = "test-support")]
 pub use execution_fixture::preparation::prepare_execution_fixture;
+#[cfg(all(unix, feature = "test-support"))]
+pub use execution_fixture::provider_export::write_execution_provider_fixture;
 #[cfg(feature = "test-support")]
 pub use execution_fixture::run_execution_fixture_worker;
 pub use http::{HttpError, HttpServer};
