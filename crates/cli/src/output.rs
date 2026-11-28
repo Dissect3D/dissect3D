@@ -14,6 +14,8 @@ pub(crate) struct CommandOutcome {
     accepted: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     operation_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    job_id: Option<String>,
     data: Option<OutputData>,
     warnings: Vec<String>,
     error: Option<ErrorInfo>,
@@ -51,6 +53,7 @@ impl CommandOutcome {
         struct Metadata {
             accepted: Option<bool>,
             operation_id: Option<String>,
+            job_id: Option<String>,
         }
         let metadata: Metadata = serde_json::from_str(data.get()).unwrap_or_default();
         Self {
@@ -59,6 +62,7 @@ impl CommandOutcome {
             ok: true,
             accepted: metadata.accepted.map(serde_json::Value::Bool),
             operation_id: metadata.operation_id,
+            job_id: metadata.job_id,
             data: Some(OutputData::Raw(data)),
             warnings: Vec::new(),
             error: None,
@@ -78,12 +82,17 @@ impl CommandOutcome {
             .get("operation_id")
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned);
+        let job_id = data
+            .get("job_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
         Self {
             cli_output_version: "1.0",
             command: command.to_owned(),
             ok: true,
             accepted,
             operation_id,
+            job_id,
             data: Some(OutputData::Value(data)),
             warnings,
             error: None,
@@ -114,6 +123,7 @@ impl CommandOutcome {
             ok: false,
             accepted: None,
             operation_id: None,
+            job_id: None,
             data: None,
             warnings: Vec::new(),
             error: Some(error),
@@ -127,12 +137,18 @@ impl CommandOutcome {
         operation_id: Option<String>,
         data: Option<serde_json::Value>,
     ) -> Self {
+        let job_id = data
+            .as_ref()
+            .and_then(|value| value.get("job_id"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
         Self {
             cli_output_version: "1.0",
             command: command.to_owned(),
             ok: false,
             accepted,
             operation_id,
+            job_id,
             data: data.map(OutputData::Value),
             warnings: Vec::new(),
             error: Some(error),
@@ -302,5 +318,27 @@ mod tests {
         assert!(rendered.contains("accepted: true"));
         assert!(rendered.contains("op_0123456789abcdef0123456789abcdef"));
         assert!(rendered.contains("\"process_exit_confirmed\": false"));
+    }
+    #[test]
+    fn job_id_is_lifted_to_top_level_envelope_when_present_in_data() {
+        let outcome = CommandOutcome::success(
+            "run",
+            serde_json::json!({
+                "job_id": "job_0123456789abcdef0123456789abcdef",
+                "state": "succeeded"
+            }),
+        )
+        .with_accepted(serde_json::json!(true));
+        let encoded: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&outcome).unwrap()).unwrap();
+        assert_eq!(
+            encoded["job_id"],
+            serde_json::json!("job_0123456789abcdef0123456789abcdef")
+        );
+        assert_eq!(encoded["accepted"], serde_json::json!(true));
+        let plain = CommandOutcome::success("engine status", serde_json::json!({"running": true}));
+        let plain_encoded: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&plain).unwrap()).unwrap();
+        assert!(plain_encoded.get("job_id").is_none());
     }
 }

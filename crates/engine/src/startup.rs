@@ -127,6 +127,20 @@ pub async fn run_submission_test_engine(data_root: &Path) -> Result<(), StartupE
 /// dispatch to the contained r2 worker. Never the normal composition.
 #[cfg(all(unix, feature = "test-support"))]
 pub async fn run_execution_test_engine(data_root: &Path) -> Result<(), StartupError> {
+    run_execution_test_engine_with_holds(
+        data_root,
+        crate::execution::controller::ExecutionTestHolds::default(),
+    )
+    .await
+}
+
+/// Isolated execution host with explicit host-side `test-support` holds
+/// (`WE-P09`, `fixture-contract.md`). Never available in normal builds.
+#[cfg(all(unix, feature = "test-support"))]
+pub async fn run_execution_test_engine_with_holds(
+    data_root: &Path,
+    holds: crate::execution::controller::ExecutionTestHolds,
+) -> Result<(), StartupError> {
     dissect3d_platform::ensure_independent_engine().map_err(|_| StartupError::Runtime)?;
     if !data_root.is_absolute() {
         return Err(StartupError::Root);
@@ -142,7 +156,7 @@ pub async fn run_execution_test_engine(data_root: &Path) -> Result<(), StartupEr
             data_root,
             root,
             lease,
-            Composition::Execution(Box::new(fixture)),
+            Composition::Execution(Box::new(fixture), holds),
         )
         .await
     }
@@ -200,7 +214,10 @@ enum Composition {
         Box<crate::submission_fixture::PreparedReadiness>,
     ),
     #[cfg(all(unix, feature = "test-support"))]
-    Execution(Box<crate::execution_fixture::preparation::PreparedExecutionFixture>),
+    Execution(
+        Box<crate::execution_fixture::preparation::PreparedExecutionFixture>,
+        crate::execution::controller::ExecutionTestHolds,
+    ),
 }
 
 pub(crate) async fn run_engine_with_lease(
@@ -270,7 +287,7 @@ async fn run_engine_inner(
             .await
         }
         #[cfg(all(unix, feature = "test-support"))]
-        Composition::Execution(mut fixture) => {
+        Composition::Execution(mut fixture, holds) => {
             let catalog = Arc::new(std::mem::replace(
                 &mut fixture.catalog,
                 crate::support::Catalog::empty(),
@@ -288,7 +305,7 @@ async fn run_engine_inner(
             .await
             .map_err(|_| StartupError::Runtime)?
             .map_err(|_| StartupError::Store)?;
-            let handle = crate::execution::controller::start(
+            let handle = crate::execution::controller::start_with_holds(
                 crate::execution::controller::ExecutionDependencies {
                     store: store.clone(),
                     root: Arc::clone(&attempts_root),
@@ -298,6 +315,7 @@ async fn run_engine_inner(
                     )),
                     limits: crate::execution::controller::ExecutionLimits::CONTROLLED,
                 },
+                holds,
             );
             let handle = Arc::new(handle);
             execution = Some(Arc::clone(&handle));

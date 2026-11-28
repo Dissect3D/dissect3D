@@ -149,6 +149,8 @@ async fn submit_execution(
     match result {
         Ok(receipt) => {
             handle.wake();
+            #[cfg(all(unix, feature = "test-support"))]
+            handle.wait_pre_receipt_hold().await;
             #[cfg(test)]
             if reply_lost(state) {
                 return lost_response();

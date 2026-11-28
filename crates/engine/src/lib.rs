@@ -45,23 +45,27 @@ mod worker_protocol;
 
 pub use bootstrap::{BootstrapServeError, serve_bootstrap_once};
 pub use credentials::{AuthContext, VerifiedEnrollment};
+#[cfg(all(unix, feature = "test-support"))]
+pub use execution::controller::ExecutionTestHolds;
 #[cfg(feature = "test-support")]
 pub use execution_fixture::preparation::prepare_execution_fixture;
 #[cfg(all(unix, feature = "test-support"))]
-pub use execution_fixture::provider_export::write_execution_provider_fixture;
+pub use execution_fixture::provider_export::{
+    enroll_and_export_execution_fixture, write_execution_provider_fixture,
+};
 #[cfg(feature = "test-support")]
 pub use execution_fixture::run_execution_fixture_worker;
 pub use http::{HttpError, HttpServer};
 pub use policy::CorePolicy;
 #[cfg(feature = "test-support")]
 pub use startup::run_discovery_test_engine;
-#[cfg(all(unix, feature = "test-support"))]
-pub use startup::run_execution_test_engine;
 #[cfg(feature = "test-support")]
 pub use startup::run_selection_test_engine;
 #[cfg(feature = "test-support")]
 pub use startup::run_submission_test_engine;
 pub use startup::{StartupError, run_engine};
+#[cfg(all(unix, feature = "test-support"))]
+pub use startup::{run_execution_test_engine, run_execution_test_engine_with_holds};
 pub use store::{CoreError, Store, StoreIdentity};
 #[cfg(feature = "test-support")]
 pub use submission_fixture::{

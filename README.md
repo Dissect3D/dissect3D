@@ -43,8 +43,19 @@ accepted platform or model support.
   tests; a tree that forks is reported as unconfirmed until forked-descendant
   closure is implemented.
 
-Foreground `run`, `jobs watch|wait|cancel|retry` and a first complete job through
-the real CLI remain future work.
+- **CLI execution and controlled-spine proof (`CJ-G1`).** The CLI implements
+  `auth setup --execution-access`, `auth authorize --execution-access`,
+  foreground `run` (with `--output DIR`, `--execution-timeout-ms`,
+  `--observe-timeout-ms`, two-stage Ctrl+C, and inert Esc),
+  `jobs watch|wait|cancel|retry`, and execution/retry `jobs recover`. Against
+  the explicit Unix `test-support` host (`execution_test_host` provisioned via
+  `execution_fixture_tool enroll-and-export`), the first complete controlled
+  `test.mesh-copy@fixture-r2` job flow (foreground run, supervised worker,
+  confirmed cleanup, validation/publication, authenticated manifest/artifact
+  retrieval, no-overwrite download, and restart retention) is verified on
+  Darwin arm64. Native Windows execution parity (`PH-2-PRE`), bare-metal Linux
+  runtime acceptance, macOS forked-descendant closure, and real-model/GPU
+  inference remain open.
 
 [Why Dissect3D?](#why-dissect3d) · [Workflows](#intended-workflows) ·
 [Models](#target-models) · [Architecture](#architecture) ·

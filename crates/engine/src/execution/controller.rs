@@ -41,8 +41,25 @@ use dissect3d_platform::{AttemptRoot, OwnedRoot, PrivateInputReader};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+#[cfg(all(unix, feature = "test-support"))]
+use std::time::Duration;
 use std::time::Instant;
 use tokio::sync::{mpsc, watch};
+
+/// Host-side test-support hold options for `execution_test_host` (`WE-P09`).
+///
+/// Strictly compiled behind `cfg(all(unix, feature = "test-support"))`; never
+/// exposed via production engine builds, CLI flags, config files, or env vars.
+#[cfg(all(unix, feature = "test-support"))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ExecutionTestHolds {
+    /// Delay returning the `POST /v1/jobs` acceptance reply on negotiated
+    /// submissions (deterministic pre-receipt Ctrl+C window for `WE-S17`).
+    pub pre_receipt_hold: Option<Duration>,
+    /// Delay delivering active user cancellation from `cancel_requested` to
+    /// worker termination (deterministic cancel-wait Ctrl+C window for `WE-S17`).
+    pub cancel_wait_hold: Option<Duration>,
+}
 
 /// Most unreconciled entries kept; later ones are counted only.
 const UNRECONCILED_MAX: usize = 64;
@@ -174,6 +191,11 @@ impl StopRegistry {
             });
         }
     }
+    #[cfg(all(unix, feature = "test-support"))]
+    fn has_job(&self, job_id: &JobId) -> bool {
+        let map = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        map.values().any(|(job, _)| job == job_id)
+    }
 }
 
 pub(crate) struct ExecutionDependencies<S, A> {
@@ -202,6 +224,10 @@ struct Owned {
     stopping: AtomicBool,
     /// Attempts dispatched and not yet routed to an outcome.
     active: watch::Sender<usize>,
+    #[cfg(all(unix, feature = "test-support"))]
+    holds: ExecutionTestHolds,
+    #[cfg(all(unix, feature = "test-support"))]
+    shutdown_signal: watch::Sender<bool>,
 }
 
 impl ExecutionHandle {
@@ -210,8 +236,47 @@ impl ExecutionHandle {
     pub(crate) fn wake(&self) {
         let _ = self.wake.try_send(());
     }
+    /// Wait out the host-side `pre_receipt_hold`, if configured (`WE-P09`).
+    /// Aborts immediately if engine shutdown begins.
+    #[cfg(all(unix, feature = "test-support"))]
+    pub(crate) async fn wait_pre_receipt_hold(&self) {
+        let Some(delay) = self.owned.holds.pre_receipt_hold else {
+            return;
+        };
+        if self.owned.stopping.load(Ordering::Acquire) {
+            return;
+        }
+        let mut stopping = self.owned.shutdown_signal.subscribe();
+        tokio::select! {
+            () = tokio::time::sleep(delay) => {}
+            _ = stopping.wait_for(|done| *done) => {}
+        }
+    }
     /// Deliver a durably committed stop intent (see `StopRegistry::signal`).
     pub(crate) fn signal(&self, job_id: &JobId, intent: StopIntent) -> bool {
+        #[cfg(all(unix, feature = "test-support"))]
+        if intent == StopIntent::UserCancel
+            && let Some(delay) = self.owned.holds.cancel_wait_hold
+            && !self.owned.stopping.load(Ordering::Acquire)
+        {
+            if !self.owned.stops.has_job(job_id) {
+                return false;
+            }
+            let owned = Arc::clone(&self.owned);
+            let job_id = job_id.clone();
+            tokio::spawn(async move {
+                let mut stopping = owned.shutdown_signal.subscribe();
+                tokio::select! {
+                    () = tokio::time::sleep(delay) => {
+                        owned.stops.signal(&job_id, StopIntent::UserCancel);
+                    }
+                    _ = stopping.wait_for(|done| *done) => {
+                        owned.stops.signal(&job_id, StopIntent::UserCancel);
+                    }
+                }
+            });
+            return true;
+        }
         self.owned.stops.signal(job_id, intent)
     }
     /// A queued job's blocker as of the latest eligibility scan; `None` when
@@ -243,6 +308,8 @@ impl ExecutionHandle {
     pub(crate) async fn shutdown(&self, deadline: Instant) -> ShutdownOutcome {
         self.owned.clock.begin(deadline);
         self.owned.stopping.store(true, Ordering::Release);
+        #[cfg(all(unix, feature = "test-support"))]
+        self.owned.shutdown_signal.send_replace(true);
         self.owned.stops.signal_all(StopIntent::EngineShutdown);
         let mut active = self.owned.active.subscribe();
         let drained = matches!(
@@ -280,6 +347,33 @@ pub(crate) enum ShutdownOutcome {
 pub(crate) fn start<S: ControllerStore, A: AttemptSource>(
     deps: ExecutionDependencies<S, A>,
 ) -> ExecutionHandle {
+    #[cfg(all(unix, feature = "test-support"))]
+    return start_with_holds(deps, ExecutionTestHolds::default());
+    #[cfg(not(all(unix, feature = "test-support")))]
+    {
+        let (wake, wakes) = mpsc::channel(1);
+        let owned = Arc::new(Owned {
+            stops: StopRegistry::default(),
+            report: Mutex::new(Report::default()),
+            blocked: Mutex::new(HashMap::new()),
+            loaded: Arc::new(LoadedWorkers::default()),
+            clock: ShutdownClock::default(),
+            stopping: AtomicBool::new(false),
+            active: watch::channel(0).0,
+        });
+        tokio::spawn(own_turns(deps, wakes, Arc::clone(&owned)));
+        let handle = ExecutionHandle { wake, owned };
+        handle.wake();
+        handle
+    }
+}
+
+/// Start the controller with host-side `test-support` holds (`WE-P09`).
+#[cfg(all(unix, feature = "test-support"))]
+pub(crate) fn start_with_holds<S: ControllerStore, A: AttemptSource>(
+    deps: ExecutionDependencies<S, A>,
+    holds: ExecutionTestHolds,
+) -> ExecutionHandle {
     let (wake, wakes) = mpsc::channel(1);
     let owned = Arc::new(Owned {
         stops: StopRegistry::default(),
@@ -289,6 +383,8 @@ pub(crate) fn start<S: ControllerStore, A: AttemptSource>(
         clock: ShutdownClock::default(),
         stopping: AtomicBool::new(false),
         active: watch::channel(0).0,
+        holds,
+        shutdown_signal: watch::channel(false).0,
     });
     tokio::spawn(own_turns(deps, wakes, Arc::clone(&owned)));
     let handle = ExecutionHandle { wake, owned };
@@ -582,5 +678,101 @@ mod tests {
         assert_eq!(*stop.borrow(), StopIntent::UserCancel);
         let other = JobId::parse(format!("job_{}", "9".repeat(32))).unwrap();
         assert!(!stops.signal(&other, StopIntent::UserCancel));
+    }
+
+    #[cfg(all(unix, feature = "test-support"))]
+    #[tokio::test]
+    async fn pre_receipt_hold_waits_and_aborts_on_shutdown() {
+        let (wake, _wakes) = mpsc::channel(1);
+        let owned = Arc::new(Owned {
+            stops: StopRegistry::default(),
+            report: Mutex::new(Report::default()),
+            blocked: Mutex::new(HashMap::new()),
+            loaded: Arc::new(LoadedWorkers::default()),
+            clock: ShutdownClock::default(),
+            stopping: AtomicBool::new(false),
+            active: watch::channel(0).0,
+            holds: ExecutionTestHolds {
+                pre_receipt_hold: Some(Duration::from_millis(80)),
+                cancel_wait_hold: None,
+            },
+            shutdown_signal: watch::channel(false).0,
+        });
+        let handle = ExecutionHandle { wake, owned };
+        let start = Instant::now();
+        handle.wait_pre_receipt_hold().await;
+        assert!(start.elapsed() >= Duration::from_millis(60));
+
+        // Shutdown immediately cancels a long pre-receipt hold.
+        let (wake2, _wakes2) = mpsc::channel(1);
+        let owned2 = Arc::new(Owned {
+            stops: StopRegistry::default(),
+            report: Mutex::new(Report::default()),
+            blocked: Mutex::new(HashMap::new()),
+            loaded: Arc::new(LoadedWorkers::default()),
+            clock: ShutdownClock::default(),
+            stopping: AtomicBool::new(false),
+            active: watch::channel(0).0,
+            holds: ExecutionTestHolds {
+                pre_receipt_hold: Some(Duration::from_secs(10)),
+                cancel_wait_hold: None,
+            },
+            shutdown_signal: watch::channel(false).0,
+        });
+        let handle2 = Arc::new(ExecutionHandle {
+            wake: wake2,
+            owned: owned2,
+        });
+        let waiter_handle = Arc::clone(&handle2);
+        let waiter = tokio::spawn(async move {
+            waiter_handle.wait_pre_receipt_hold().await;
+        });
+        tokio::task::yield_now().await;
+        assert_eq!(
+            handle2
+                .shutdown(Instant::now() + Duration::from_secs(1))
+                .await,
+            ShutdownOutcome::Clean
+        );
+        tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("shutdown should wake pre-receipt hold")
+            .unwrap();
+    }
+
+    #[cfg(all(unix, feature = "test-support"))]
+    #[tokio::test]
+    async fn cancel_wait_hold_delays_user_cancel_only() {
+        let (wake, _wakes) = mpsc::channel(1);
+        let owned = Arc::new(Owned {
+            stops: StopRegistry::default(),
+            report: Mutex::new(Report::default()),
+            blocked: Mutex::new(HashMap::new()),
+            loaded: Arc::new(LoadedWorkers::default()),
+            clock: ShutdownClock::default(),
+            stopping: AtomicBool::new(false),
+            active: watch::channel(0).0,
+            holds: ExecutionTestHolds {
+                pre_receipt_hold: None,
+                cancel_wait_hold: Some(Duration::from_millis(120)),
+            },
+            shutdown_signal: watch::channel(false).0,
+        });
+        let record = dispatch(None);
+        let mut stop = owned.stops.register(&record).unwrap();
+        let handle = ExecutionHandle { wake, owned };
+        let start = Instant::now();
+        assert!(handle.signal(&record.job_id, StopIntent::UserCancel));
+        assert_eq!(
+            *stop.borrow(),
+            StopIntent::Continue,
+            "cancel should stay held before delay elapses"
+        );
+        tokio::time::timeout(Duration::from_secs(2), stop.changed())
+            .await
+            .expect("delayed cancel should eventually fire")
+            .unwrap();
+        assert_eq!(*stop.borrow(), StopIntent::UserCancel);
+        assert!(start.elapsed() >= Duration::from_millis(90));
     }
 }
